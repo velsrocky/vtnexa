@@ -20,8 +20,7 @@ without your explicit approval.
 - **Windows + routines** — every OS window is an independent VTNexa
   instance: own workspace folder, provider config, PTY, editor tabs, chat,
   audit, and session file. ⧉ New Window (or a second app launch) opens a
-  sibling window; `⎇ isolate` puts a window on its own git worktree +
-  branch. Routines run scheduled turns in this window.
+  sibling window. Routines run scheduled turns in this window.
 - **Git tab** — status, diffs, log, commits; Approve-&-commit from the gate.
 - **Transparency** — per-window tokens, estimated cost, tool timing, and a
   persisted audit trail of every tool call + decision.

@@ -10,7 +10,6 @@ import {
 } from "../lib/tauri";
 
 // Git tab state + actions for this window: status/diff/log/commit.
-// Worktree isolate/merge lives in useWorktree (needs PTY + file-tree coordination).
 export function useGit(opts: {
   getRoot: () => string;
   logAudit: (e: AuditInput) => void;

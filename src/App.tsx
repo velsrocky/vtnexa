@@ -26,7 +26,6 @@ import { useSession } from "./hooks/useSession";
 import { useEditor } from "./hooks/useEditor";
 import { useFiles } from "./hooks/useFiles";
 import { useProvider } from "./hooks/useProvider";
-import { useWorktree } from "./hooks/useWorktree";
 import { useShell } from "./hooks/useShell";
 import { usePrefs } from "./hooks/usePrefs";
 import { useSkills } from "./hooks/useSkills";
@@ -177,17 +176,6 @@ export default function App() {
     openFile,
     retargetTabs,
     dropTabsUnder,
-  });
-
-  const { isolateWorktree, leaveWorktree, mergeWorktree } = useWorktree({
-    ws,
-    workspaceRoot,
-    updateWs,
-    setCwdState,
-    refreshFiles,
-    refreshGit,
-    logAudit,
-    ptyId,
   });
 
   const { shellCmd, onShellCmdChange, runShell } = useShell({
@@ -451,9 +439,6 @@ export default function App() {
           openFile={openFile}
           closeTab={closeTab}
           saveFile={saveFile}
-          isolateWorktree={isolateWorktree}
-          leaveWorktree={leaveWorktree}
-          mergeWorktree={mergeWorktree}
           commitMsg={commitMsg}
           setCommitMsg={setCommitMsg}
           approveDiff={approveDiff}

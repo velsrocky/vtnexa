@@ -8,7 +8,7 @@ import { baseName } from "../lib/utils";
 
 // Center column: tabbed edit/diff/preview/browser/git panes + review-gate
 // row + one-shot shell + this window's PTY.
-export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, originals, editorText, originalText, setEditorText, monacoTheme, centerTab, setCenterTab, gitCount, gitPane, previewUrl, setPreviewUrl, previewDoc, openFile, closeTab, saveFile, isolateWorktree, leaveWorktree, mergeWorktree, commitMsg, setCommitMsg, approveDiff, approveAndCommit, onRejectDiff, shellCmd, onShellCmdChange, runShell, shellH, ptyH, themeId, onHResizerDown }: {
+export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, originals, editorText, originalText, setEditorText, monacoTheme, centerTab, setCenterTab, gitCount, gitPane, previewUrl, setPreviewUrl, previewDoc, openFile, closeTab, saveFile, commitMsg, setCommitMsg, approveDiff, approveAndCommit, onRejectDiff, shellCmd, onShellCmdChange, runShell, shellH, ptyH, themeId, onHResizerDown }: {
   ws: Workspace;
   ptyId: string;
   busy: boolean;
@@ -30,9 +30,6 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
   openFile: (path: string) => void;
   closeTab: (path: string) => void;
   saveFile: () => void;
-  isolateWorktree: () => void;
-  leaveWorktree: () => void;
-  mergeWorktree: () => void;
   commitMsg: string;
   setCommitMsg: (v: string) => void;
   approveDiff: () => void;
@@ -152,30 +149,6 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
       {centerTab === "git" && gitPane}
       <div className="row">
         <button onClick={saveFile}>Stage → review gate</button>
-        {ws.worktree ? (
-          <>
-            <span
-              className="pill"
-              style={{ background: "var(--accent)", color: "var(--accent-text)" }}
-              title={`Isolated in worktree ${ws.worktree.path} - committed work stays on ${ws.worktree.branch}`}
-            >
-              {`⎇ ${ws.worktree.branch.replace(/^vtnexa\//, "")}`}
-            </span>
-            <button onClick={mergeWorktree} title="git merge this window's branch into the main checkout">
-              ⇣ merge to main
-            </button>
-            <button onClick={leaveWorktree} title="Leave the worktree (uncommitted changes are discarded)">
-              leave
-            </button>
-          </>
-        ) : (
-          <button
-            onClick={isolateWorktree}
-            title="Isolate this window in its own git worktree + branch so parallel windows never edit the same files"
-          >
-            ⎇ isolate
-          </button>
-        )}
         {ws.pendingDiff && (
           <span className="gate">
             pending: {ws.pendingDiff.path}

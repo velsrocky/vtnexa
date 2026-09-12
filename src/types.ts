@@ -59,8 +59,6 @@ export interface Workspace {
   ptyH: number;
   /** Each window owns its provider config outright. */
   provider: ProviderConfig;
-  /** Set when this window is isolated in its own git worktree. */
-  worktree?: { path: string; branch: string } | null;
   /** This window's own UI memory. */
   centerTab: CenterTab;
   sideTab: SideTab;

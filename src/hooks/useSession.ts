@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { DEFAULT_PROVIDER, type AuditEvent, type CenterTab, type WorkspaceUsage, type ProviderConfig, type SideTab, type Workspace } from "../types";
-import { fsList, keyGet, sessionLoad, sessionSave } from "../lib/tauri";
+import { keyGet, sessionLoad, sessionSave } from "../lib/tauri";
 import { uid } from "../lib/utils";
 import { windowLabel } from "./useWorkspaceState";
 
@@ -113,7 +113,6 @@ export function useSession(opts: {
         kind: ws.provider.kind ?? "auto",
         apiKey: "",
       },
-      worktree: ws.worktree ?? null,
       centerTab: ws.centerTab ?? "edit",
       sideTab: ws.sideTab ?? "chat",
       chatDraft: ws.chatDraft ?? "",
@@ -203,10 +202,6 @@ export function useSession(opts: {
               }
             : undefined,
         ) ?? { ...DEFAULT_PROVIDER },
-      worktree:
-        l?.worktree && typeof l.worktree.path === "string" && typeof l.worktree.branch === "string"
-          ? { path: l.worktree.path, branch: l.worktree.branch }
-          : undefined,
       centerTab: asCenterTab(l?.centerTab),
       sideTab: asSideTab(l?.sideTab),
       chatDraft: typeof l?.chatDraft === "string" ? l.chatDraft.slice(0, 20000) : "",
@@ -232,14 +227,6 @@ export function useSession(opts: {
       }
       if (!src) return;
       const restored = asWorkspace(src, ws.id);
-      // Worktree may have been removed outside the app - drop dangling refs.
-      if (restored.worktree) {
-        try {
-          await fsList(restored.worktree.path);
-        } catch {
-          restored.worktree = null;
-        }
-      }
       // Providers never persist their key - refill from the keychain.
       if (restored.provider?.baseUrl && restored.provider?.model) {
         try {

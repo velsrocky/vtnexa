@@ -120,7 +120,6 @@ describe("useInit.changeWorkspace", () => {
     expect(h.deps.setOpenPath).toHaveBeenCalledWith("");
     expect(h.deps.nexaReady.current).toBe(false);
     expect(h.wsOf().cwd).toBe("/new");
-    expect(h.wsOf().worktree).toBeNull();
   });
 
   it("ignores the same committed target", async () => {

@@ -159,14 +159,11 @@ describe("useSession.saveSessionNow", () => {
 describe("useSession.loadSession", () => {
   function loadSetup(raw: string) {
     const restored: Workspace[] = [];
-    setInvokeImpl(async (cmd, args?: any) => {
+    setInvokeImpl(async (cmd, _args?: any) => {
       if (cmd === "session_load") return raw;
       if (cmd === "session_save") return {};
       if (cmd === "key_get") return "REFILLED";
-      if (cmd === "fs_list") {
-        if (String(args.path).includes("gone")) throw new Error("missing");
-        return [];
-      }
+      if (cmd === "fs_list") return [];
       throw new Error(`unexpected ${cmd}`);
     });
     const hook = renderHook(() =>
@@ -183,7 +180,7 @@ describe("useSession.loadSession", () => {
     return { ...hook, restored };
   }
 
-  it("restores its own v7 slot, drops dangling worktrees, refills keys", async () => {
+  it("restores its own v7 slot and refills keys", async () => {
     const raw = JSON.stringify({
       version: 7,
       windows: {
@@ -198,7 +195,6 @@ describe("useSession.loadSession", () => {
         originals: {},
         openPath: "",
           provider: { baseUrl: "http://x", model: "m", kind: "openai" },
-          worktree: { path: "/w/.nexa/worktrees/gone", branch: "vtnexa/x" },
         },
       },
     });
@@ -208,7 +204,6 @@ describe("useSession.loadSession", () => {
     });
     expect(restored).toHaveLength(1);
     expect(restored[0].messages).toEqual([{ id: "m1", role: "user", content: "hi" }]);
-    expect(restored[0].worktree).toBeNull();
     expect(restored[0].provider).toMatchObject({ apiKey: "REFILLED", kind: "openai" });
     expect(result.current.sessionReady.current).toBe(true);
   });

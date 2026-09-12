@@ -929,156 +929,6 @@ fn git_init(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots
     Ok(dir.to_string_lossy().to_string())
 }
 
-fn valid_merge_branch(branch: &str) -> bool {
-    // Backend-created worktree branches only: vtnexa/<lane>. No shell
-    // interpolation, no arbitrary refs.
-    let Some(rest) = branch.strip_prefix("vtnexa/") else {
-        return false;
-    };
-    if rest.is_empty() || rest.len() > 48 {
-        return false;
-    }
-    rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-}
-
-#[derive(Debug, Serialize)]
-pub struct GitMergeOut {
-    pub output: String,
-}
-
-#[tauri::command]
-fn git_merge(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
-    cwd: String,
-    branch: String,
-) -> Result<GitMergeOut, String> {
-    if !valid_merge_branch(&branch) {
-        return Err("git_merge: branch must match vtnexa/[a-z0-9-]{1,48}".to_string());
-    }
-    let dir = git_cwd(&state, window.label(), cwd)?;
-    let out = git_cmd(&dir, &["merge", "--no-edit", &branch])?;
-    Ok(GitMergeOut {
-        output: truncate_chars(out, 20_000),
-    })
-}
-
-// ---- Per-lane git worktrees (filesystem isolation for parallel agents) ----
-// Worktrees live at <workspace>/.nexa/worktrees/<lane> - inside the sandbox
-// root by construction, so every existing path guard still applies. Each
-// lane checks out its own branch; merges become plain `git merge`.
-#[derive(Debug, Serialize)]
-pub struct GitWorktree {
-    pub path: String,
-    pub branch: String,
-}
-
-fn worktree_add_inner(
-    dir: &std::path::Path,
-    root: &std::path::Path,
-    name: &str,
-) -> Result<GitWorktree, String> {
-    let safe: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let safe = safe.trim_matches('-');
-    if safe.is_empty() || safe.len() > 48 {
-        return Err("git_worktree: invalid lane name".to_string());
-    }
-    let wt = root.join(".nexa").join("worktrees").join(safe);
-    if wt.exists() {
-        return Err(format!("git_worktree: {} already exists", wt.display()));
-    }
-    if let Some(parent) = wt.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let branch = format!("vtnexa/{}", safe);
-    if git_cmd(dir, &["worktree", "add", "-b", &branch, &wt.to_string_lossy()]).is_err() {
-        // Branch already exists (re-isolating the same lane): attach to it.
-        git_cmd(dir, &["worktree", "add", &wt.to_string_lossy(), &branch])?;
-    }
-    // Keep .nexa/ (worktrees, sessions, notes) out of the repo's status
-    // noise. .git/info/exclude is local-only - never committed.
-    if let Ok(common) = git_cmd(dir, &["rev-parse", "--git-common-dir"]) {
-        let mut gdir = std::path::PathBuf::from(common.trim());
-        if !gdir.is_absolute() {
-            gdir = dir.join(gdir);
-        }
-        let exclude = gdir.join("info").join("exclude");
-        if let Some(p) = exclude.parent() {
-            let _ = std::fs::create_dir_all(p);
-        }
-        let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
-        if !existing.contains("/.nexa/") {
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&exclude)
-            {
-                let _ = f.write_all(b"\n/.nexa/\n");
-            }
-        }
-    }
-    Ok(GitWorktree {
-        path: wt.to_string_lossy().to_string(),
-        branch,
-    })
-}
-
-#[tauri::command]
-fn git_worktree_add(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
-    cwd: String,
-    name: String,
-) -> Result<GitWorktree, String> {
-    let dir = git_cwd(&state, window.label(), cwd)?;
-    let root = root_snapshot(&state, window.label());
-    worktree_add_inner(&dir, &root, &name)
-}
-
-#[tauri::command]
-fn git_worktree_remove(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
-    cwd: String,
-    path: String,
-) -> Result<(), String> {
-    let dir = git_cwd(&state, window.label(), cwd)?;
-    let p = checked_path(&state, window.label(), path, "git_worktree_remove.path")?;
-    git_cmd(&dir, &["worktree", "remove", "--force", &p.to_string_lossy()])?;
-    let _ = git_cmd(&dir, &["worktree", "prune"]);
-    Ok(())
-}
-
-#[tauri::command]
-fn git_worktree_list(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
-    cwd: String,
-) -> Result<Vec<GitWorktree>, String> {
-    let dir = git_cwd(&state, window.label(), cwd)?;
-    let out = git_cmd(&dir, &["worktree", "list", "--porcelain"])?;
-    let mut list: Vec<GitWorktree> = Vec::new();
-    let mut cur: Option<(String, String)> = None;
-    for line in out.lines() {
-        if let Some(p) = line.strip_prefix("worktree ") {
-            if let Some((path, branch)) = cur.take() {
-                list.push(GitWorktree { path, branch });
-            }
-            cur = Some((p.to_string(), String::new()));
-        } else if let Some(b) = line.strip_prefix("branch ") {
-            if let Some((_, branch)) = cur.as_mut() {
-                *branch = b.trim_start_matches("refs/heads/").to_string();
-            }
-        }
-    }
-    if let Some((path, branch)) = cur {
-        list.push(GitWorktree { path, branch });
-    }
-    Ok(list)
-}
-
 // ---- File create / rename / delete ----
 // All confined to the workspace via checked_path. Create makes empty files
 // (parents included) or dirs and refuses to overwrite; rename refuses to
@@ -1881,10 +1731,6 @@ pub fn run() {
             git_commit,
             git_log,
             git_init,
-            git_merge,
-            git_worktree_add,
-            git_worktree_remove,
-            git_worktree_list,
             shell_run,
             pty_spawn,
             pty_write,
@@ -1927,35 +1773,6 @@ mod tests {
         for bad in ["", "PAD", "../evil", "pad.md", ".nexa/pad.md", "/etc/passwd"] {
             assert!(nexa_path_for(&root, bad).is_err(), "kind {:?} must be rejected", bad);
         }
-    }
-
-    #[test]
-    fn git_worktree_roundtrip() {
-        if Command::new("git").arg("--version").output().is_err() {
-            eprintln!("skipping worktree test (no git)");
-            return;
-        }
-        let repo = std::env::temp_dir().join(format!("vtnexa-wt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&repo);
-        std::fs::create_dir_all(&repo).unwrap();
-        if git_cmd(&repo, &["init", "-b", "main"]).is_err() {
-            git_cmd(&repo, &["init"]).unwrap();
-        }
-        git_cmd(&repo, &["config", "user.email", "t@t.local"]).unwrap();
-        git_cmd(&repo, &["config", "user.name", "test"]).unwrap();
-        std::fs::write(repo.join("a.txt"), b"x").unwrap();
-        git_cmd(&repo, &["add", "a.txt"]).unwrap();
-        git_cmd(&repo, &["commit", "-m", "init"]).unwrap();
-        let root = repo.canonicalize().unwrap();
-        let wt = worktree_add_inner(&root, &root, "Lane 1-ab12").unwrap();
-        assert!(std::path::Path::new(&wt.path).is_dir());
-        assert_eq!(wt.branch, "vtnexa/lane-1-ab12");
-        assert!(std::path::Path::new(&wt.path).join("a.txt").exists());
-        // .nexa (worktrees, sessions) must not leak into git status
-        let st = git_cmd(&root, &["status", "--porcelain"]).unwrap();
-        assert!(!st.contains(".nexa"), "status leaked .nexa: {}", st);
-        git_cmd(&root, &["worktree", "remove", "--force", &wt.path]).unwrap();
-        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[cfg(unix)]
@@ -2015,17 +1832,6 @@ mod tests {
         assert!(key_account("", "model-x").is_err());
         assert!(key_account("https://api.example.com", "").is_err());
         assert!(key_account(&"u".repeat(300), "m").is_err());
-    }
-
-    #[test]
-    fn merge_branches_are_validated() {
-        assert!(valid_merge_branch("vtnexa/lane-1-ab12"));
-        assert!(!valid_merge_branch("main"));
-        assert!(!valid_merge_branch("vtnexa/"));
-        assert!(!valid_merge_branch("vtnexa/../evil"));
-        assert!(!valid_merge_branch("vtnexa/a;b"));
-        assert!(!valid_merge_branch("vtnexa/a b"));
-        assert!(!valid_merge_branch(&format!("vtnexa/{}", "a".repeat(49))));
     }
 
     // Live keychain roundtrip. Passes vacuously where no credential daemon

@@ -40,12 +40,7 @@ export function useInit(opts: {
       opts.setWorkspaceRoot(canon);
       localStorage.setItem(WS_KEY, canon);
       opts.setCwdState(canon);
-      // Pull the workspace inside the new root (worktrees belong to the old one).
-      opts.setWs((w) => ({
-        ...w,
-        worktree: null,
-        cwd: isWithin(canon, w.cwd) && w.cwd ? w.cwd : canon,
-      }));
+      opts.setWs((w) => ({ ...w, cwd: isWithin(canon, w.cwd) && w.cwd ? w.cwd : canon }));
       opts.setOpenPath("");
       opts.nexaReady.current = false;
       await opts.loadNexa();
