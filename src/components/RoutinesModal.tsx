@@ -49,7 +49,7 @@ export default function RoutinesModal({ routines, newRoutine, setNewRoutine, per
           <button onClick={onClose}>Close</button>
         </div>
         <div className="muted small">
-          Each routine runs in its own lane in the background. Review results via the lane's ● dot.
+          Each routine runs a scheduled turn in THIS window. Review results in the chat.
           Stored per-project in .nexa/routines.json.
         </div>
         {routines.map((r) => (
@@ -91,12 +91,12 @@ export default function RoutinesModal({ routines, newRoutine, setNewRoutine, per
                   </option>
                 ))}
               </select>
-              <button onClick={() => runRoutine(r)} title="Run now in its lane">
+              <button onClick={() => runRoutine(r)} title="Run now in this window">
                 Run now
               </button>
               <button
                 onClick={() => persistRoutines(routines.filter((x) => x.id !== r.id))}
-                title="Delete routine (its lane history is kept)"
+                title="Delete routine (chat history is kept)"
               >
                 Delete
               </button>

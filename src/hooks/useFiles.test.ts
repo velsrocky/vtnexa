@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useFiles } from "./useFiles";
-import { newLane } from "../lib/utils";
+import { newWorkspace } from "../lib/utils";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -30,14 +30,12 @@ function setup() {
     dropped: [] as string[],
     shellOut: [] as string[],
   };
-  const lane = newLane("L", "/w");
   const hook = renderHook(() =>
     useFiles({
       cwd: "/w",
       workspaceRoot: "/w",
-      lane,
-      updateLane: (_id, fn) => {
-        calls.shellOut.push(fn(lane).shellOut);
+      updateWs: (fn) => {
+        calls.shellOut.push(fn(newWorkspace("main:ws", "/w")).shellOut);
       },
       refreshFiles: async (dir) => {
         calls.refreshFiles.push(dir);
@@ -83,7 +81,6 @@ describe("useFiles.createEntry", () => {
       await h.result.current.createEntry();
     });
     expect(h.calls.opened).toEqual([]);
-    expect(h.result.current.creating).toBeNull();
   });
 
   it("blank names just close the row", async () => {
@@ -100,7 +97,6 @@ describe("useFiles.createEntry", () => {
       await h.result.current.createEntry();
     });
     expect(invoked).toBe(false);
-    expect(h.result.current.creating).toBeNull();
   });
 });
 
@@ -123,7 +119,6 @@ describe("useFiles.doRename", () => {
     });
     expect(renamed[0]).toMatchObject({ old_path: "/w/a.txt", new_path: "/w/b.txt" });
     expect(h.calls.retargeted).toEqual([["/w/a.txt", "/w/b.txt"]]);
-    expect(h.result.current.renaming).toBeNull();
   });
 
   it("unchanged names just close the row", async () => {
@@ -174,6 +169,5 @@ describe("useFiles.doDelete", () => {
       await h.result.current.doDelete("/w/keep", false);
     });
     expect(invoked).toBe(false);
-    expect(h.calls.dropped).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import type { Lane } from "../types";
+import type { Workspace } from "../types";
 import {
   setWorkspaceRoot as setWsRootBackend,
   workspaceRoot as getWsRoot,
@@ -12,7 +12,6 @@ import { WS_KEY } from "./useWorkspace";
 // per-project domain), and the native picker. The sequencing that used to
 // live inline in App - and that no test could reach - lives here.
 export function useInit(opts: {
-  laneId: string;
   workspaceRoot: string;
   wsCommitted: React.MutableRefObject<string>;
   nexaReady: React.MutableRefObject<boolean>;
@@ -20,9 +19,9 @@ export function useInit(opts: {
   routinesReady: React.MutableRefObject<boolean>;
   setWorkspaceRoot: (v: string) => void;
   setCwdState: React.Dispatch<React.SetStateAction<string>>;
-  setLanes: React.Dispatch<React.SetStateAction<Lane[]>>;
+  setWs: React.Dispatch<React.SetStateAction<Workspace>>;
   setOpenPath: (v: string) => void;
-  updateLane: (id: string, fn: (l: Lane) => Lane) => void;
+  updateWs: (fn: (w: Workspace) => Workspace) => void;
   saveSessionNow: () => Promise<void>;
   loadSession: () => Promise<void>;
   loadNexa: () => Promise<void>;
@@ -41,14 +40,12 @@ export function useInit(opts: {
       opts.setWorkspaceRoot(canon);
       localStorage.setItem(WS_KEY, canon);
       opts.setCwdState(canon);
-      // Pull lanes back inside the new root (worktrees belong to the old one).
-      opts.setLanes((ls) =>
-        ls.map((l) => ({
-          ...l,
-          worktree: null,
-          cwd: isWithin(canon, l.cwd) && l.cwd ? l.cwd : canon,
-        })),
-      );
+      // Pull the workspace inside the new root (worktrees belong to the old one).
+      opts.setWs((w) => ({
+        ...w,
+        worktree: null,
+        cwd: isWithin(canon, w.cwd) && w.cwd ? w.cwd : canon,
+      }));
       opts.setOpenPath("");
       opts.nexaReady.current = false;
       await opts.loadNexa();
@@ -60,7 +57,7 @@ export function useInit(opts: {
       await opts.loadConventions(canon);
     } catch (e) {
       opts.wsCommitted.current = "";
-      opts.updateLane(opts.laneId, (l) => ({ ...l, shellOut: l.shellOut + `\nworkspace change failed: ${e}` }));
+      opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nworkspace change failed: ${e}` }));
     }
   }
 
@@ -70,13 +67,13 @@ export function useInit(opts: {
       const sel = await open({ directory: true, multiple: false, defaultPath: opts.workspaceRoot || undefined });
       if (typeof sel === "string" && sel) await changeWorkspace(sel);
     } catch (e) {
-      opts.updateLane(opts.laneId, (l) => ({ ...l, shellOut: l.shellOut + `\nbrowse failed: ${e}` }));
+      opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nbrowse failed: ${e}` }));
     }
   }
 
-  // Init: localStorage → backend ($HOME default). Default lane's PTY must
-  // start in the project, not $HOME: defer the only empty-cwd fix until
-  // canon is known, and don't overwrite a restored cwd.
+  // Init: localStorage → backend ($HOME default). The PTY must start in the
+  // project, not $HOME: defer the empty-cwd fix until canon is known, and
+  // don't overwrite a restored cwd.
   useEffect(() => {
     (async () => {
       try {
@@ -87,17 +84,15 @@ export function useInit(opts: {
         opts.setWorkspaceRoot(canon);
         localStorage.setItem(WS_KEY, canon);
         opts.setCwdState((c) => c || canon);
-        opts.setLanes((ls) => ls.map((l) => (!l.cwd ? { ...l, cwd: canon } : l)));
+        opts.setWs((w) => (w.cwd ? w : { ...w, cwd: canon }));
         await opts.loadNexa();
         await opts.loadSession();
         await opts.loadRoutines();
         await opts.refreshSkills();
         await opts.loadConventions(canon);
-        // Restored lanes may still carry empty cwd (pre-fix sessions) - clamp
-        // them without clobbering a real per-lane directory.
-        opts.setLanes((ls) =>
-          ls.map((l) => (!l.cwd || !isWithin(canon, l.cwd) ? { ...l, cwd: canon } : l)),
-        );
+        // A restored workspace may still carry an empty/outside cwd - clamp
+        // it without clobbering a real directory.
+        opts.setWs((w) => (!w.cwd || !isWithin(canon, w.cwd) ? { ...w, cwd: canon } : w));
       } catch (e) {
         console.warn("workspace init failed", e);
       }

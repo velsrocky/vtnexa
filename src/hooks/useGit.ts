@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import type { AuditInput } from "../types";
 import {
   gitCommit,
@@ -9,12 +9,11 @@ import {
   type GitLogEntry,
 } from "../lib/tauri";
 
-// Git tab state + actions. Pure git status/diff/log/commit — worktree
-// isolate/merge stays in App (needs lanes + PTY + files).
+// Git tab state + actions for this window: status/diff/log/commit.
+// Worktree isolate/merge lives in useWorktree (needs PTY + file-tree coordination).
 export function useGit(opts: {
   getRoot: () => string;
-  laneId: string;
-  logAudit: (laneId: string, e: AuditInput) => void;
+  logAudit: (e: AuditInput) => void;
 }) {
   const [branch, setBranch] = useState("");
   const [root, setRoot] = useState("");
@@ -25,58 +24,6 @@ export function useGit(opts: {
   const [msg, setMsg] = useState("");
   const [note, setNote] = useState("");
   const [commitMsg, setCommitMsg] = useState("");
-
-  // Per-lane cache: each lane keeps its own git context (branch, files,
-  // drafts) so switching lanes never flashes another lane's repo. The
-  // caller still refreshes after switching for fresh data.
-  interface GitSnapshot {
-    branch: string;
-    root: string;
-    files: GitFile[];
-    sel: string;
-    diffText: string;
-    logList: GitLogEntry[];
-    msg: string;
-    note: string;
-    commitMsg: string;
-  }
-  const blankSnapshot = (): GitSnapshot => ({
-    branch: "",
-    root: "",
-    files: [],
-    sel: "",
-    diffText: "",
-    logList: [],
-    msg: "",
-    note: "",
-    commitMsg: "",
-  });
-  const cacheRef = useRef<Record<string, GitSnapshot>>({});
-  const laneIdRef = useRef(opts.laneId);
-  if (laneIdRef.current !== opts.laneId) {
-    cacheRef.current[laneIdRef.current] = {
-      branch,
-      root,
-      files,
-      sel,
-      diffText,
-      logList,
-      msg,
-      note,
-      commitMsg,
-    };
-    const cached = cacheRef.current[opts.laneId] ?? blankSnapshot();
-    setBranch(cached.branch);
-    setRoot(cached.root);
-    setFiles(cached.files);
-    setSel(cached.sel);
-    setDiffText(cached.diffText);
-    setLogList(cached.logList);
-    setMsg(cached.msg);
-    setNote(cached.note);
-    setCommitMsg(cached.commitMsg);
-    laneIdRef.current = opts.laneId;
-  }
 
   async function refreshGit(selPath?: string) {
     const r = opts.getRoot();
@@ -145,7 +92,7 @@ export function useGit(opts: {
       // Set the confirmation AFTER the refresh: refreshGit() rewrites the
       // note, so setting it first would flash and vanish.
       setNote(`committed ${res.hash.slice(0, 7)}`);
-      opts.logAudit(opts.laneId, {
+      opts.logAudit({
         tool: "git_commit",
         args: JSON.stringify({ files: files.map((f) => f.path), message: m }).slice(0, 1000),
         decision: "approved",
@@ -156,7 +103,7 @@ export function useGit(opts: {
     } catch (e) {
       await refreshGit();
       setNote(`commit failed: ${e}`);
-      opts.logAudit(opts.laneId, {
+      opts.logAudit({
         tool: "git_commit",
         args: JSON.stringify({ files: files.map((f) => f.path), message: m }).slice(0, 1000),
         decision: "approved",

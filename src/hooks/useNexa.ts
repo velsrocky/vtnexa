@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { nexaRead, nexaWrite } from "../lib/tauri";
 
 export const PAD_DEFAULT = "# Nexa Pad\nAgents can read/write this.\n";
-export const PLAN_DEFAULT = "# Nexa Plan\n1. Agree the work first\n2. Then execute in lanes\n";
+export const PLAN_DEFAULT = "# Nexa Plan\n1. Agree the work first\n2. Then execute in windows\n";
 export const MEMORY_DEFAULT =
   "# Nexa Memory\nDurable project memory: decisions, context, and what we agreed. Survives across sessions.\n";
 

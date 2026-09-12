@@ -1,10 +1,10 @@
 import type { MutableRefObject } from "react";
-import type { Lane, SideTab } from "../types";
+import type { SideTab, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
 
-export default function ChatPane({ lane, laneBusy, sideTab, setSideTab, width, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote }: {
-  lane: Lane;
-  laneBusy: boolean;
+export default function ChatPane({ ws, busy, sideTab, setSideTab, width, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote }: {
+  ws: Workspace;
+  busy: boolean;
   sideTab: SideTab;
   setSideTab: (t: SideTab) => void;
   width: number;
@@ -36,7 +36,7 @@ export default function ChatPane({ lane, laneBusy, sideTab, setSideTab, width, m
           <button
             key={t}
             className={sideTab === t ? "active" : ""} onClick={() => setSideTab(t)}
-            title={t === "audit" ? "Every tool call + your approve/reject decisions, this lane" : undefined}
+            title={t === "audit" ? "Every tool call + your approve/reject decisions, this window" : undefined}
           >
             {t === "chat"
               ? "Commander"
@@ -46,7 +46,7 @@ export default function ChatPane({ lane, laneBusy, sideTab, setSideTab, width, m
                   ? "Nexa Plan"
                   : t === "memory"
                     ? "Memory"
-                    : `Audit${lane.audit.length ? ` (${lane.audit.length})` : ""}`}
+                    : `Audit${ws.audit.length ? ` (${ws.audit.length})` : ""}`}
           </button>
         ))}
       </div>
@@ -63,7 +63,7 @@ export default function ChatPane({ lane, laneBusy, sideTab, setSideTab, width, m
               setShowJump(!nearBottom);
             }}
           >
-            {lane.messages.map((m) => (
+            {ws.messages.map((m) => (
               <div key={m.id} className={`msg ${m.role}`}>
                 <b>{m.role}</b>
                 <pre>{m.content}</pre>
@@ -85,12 +85,12 @@ export default function ChatPane({ lane, laneBusy, sideTab, setSideTab, width, m
           )}
           <div className="row">
             <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendChat()} placeholder="Talk. It drives the workspace. /skill for skills." className="grow" />
-            <button onClick={sendChat} disabled={laneBusy}>
+            <button onClick={sendChat} disabled={busy}>
               Send
             </button>
-            {laneBusy && (
+            {busy && (
               <button
-                onClick={() => stopTurn(lane.id)}
+                onClick={() => stopTurn(ws.id)}
                 title="Stop this turn: aborts the request and releases waiting approvals (applied side effects are not undone)"
               >
                 ■ Stop
@@ -99,18 +99,18 @@ export default function ChatPane({ lane, laneBusy, sideTab, setSideTab, width, m
           </div>
           <div
             className="muted small"
-            title="Cumulative tokens, estimated cost, tool calls and tool time for this lane (persisted in session.json)"
+            title="Cumulative tokens, estimated cost, tool calls and tool time for this window (persisted in session.json)"
           >
-            {lane.usage.input + lane.usage.output > 0 || lane.usage.tools > 0 ? (
+            {ws.usage.input + ws.usage.output > 0 || ws.usage.tools > 0 ? (
               <>
-                {(lane.usage.input / 1000).toFixed(1)}k in · {(lane.usage.output / 1000).toFixed(1)}k out
-                {lane.usage.cost > 0 ? <> · ~${lane.usage.cost.toFixed(4)}</> : null}
-                {lane.usage.tools > 0 ? (
-                  <> · {lane.usage.tools} tools ({(lane.usage.toolMs / 1000).toFixed(1)}s)</>
+                {(ws.usage.input / 1000).toFixed(1)}k in · {(ws.usage.output / 1000).toFixed(1)}k out
+                {ws.usage.cost > 0 ? <> · ~${ws.usage.cost.toFixed(4)}</> : null}
+                {ws.usage.tools > 0 ? (
+                  <> · {ws.usage.tools} tools ({(ws.usage.toolMs / 1000).toFixed(1)}s)</>
                 ) : null}
               </>
             ) : (
-              <>no usage yet this lane</>
+              <>no usage yet</>
             )}
           </div>
         </>
@@ -137,27 +137,27 @@ export default function ChatPane({ lane, laneBusy, sideTab, setSideTab, width, m
         <>
           <div className="row">
             <span className="muted small">
-              {lane.audit.length} event{lane.audit.length === 1 ? "" : "s"} · {lane.name} · persisted in session.json
+              {ws.audit.length} event{ws.audit.length === 1 ? "" : "s"} · {ws.id} · persisted in session.json
             </span>
             <button
               onClick={async () => {
                 try {
-                  await navigator.clipboard.writeText(JSON.stringify(lane.audit, null, 2));
-                  setAuditNote(`copied ${lane.audit.length} events`);
+                  await navigator.clipboard.writeText(JSON.stringify(ws.audit, null, 2));
+                  setAuditNote(`copied ${ws.audit.length} events`);
                 } catch {
                   setAuditNote("copy failed");
                 }
                 setTimeout(() => setAuditNote(""), 2500);
               }}
-              disabled={!lane.audit.length}
-              title="Copy this lane's audit trail as JSON"
+              disabled={!ws.audit.length}
+              title="Copy this window's audit trail as JSON"
             >
               Copy JSON
             </button>
           </div>
           {auditNote && <div className="muted small">{auditNote}</div>}
           <div className="msgs">
-            {[...lane.audit].reverse().map((e) => (
+            {[...ws.audit].reverse().map((e) => (
               <div key={e.id} className="msg">
                 <div className="row" style={{ gap: 6 }}>
                   <span className="muted small">{new Date(e.ts).toLocaleTimeString()}</span>
@@ -184,7 +184,7 @@ export default function ChatPane({ lane, laneBusy, sideTab, setSideTab, width, m
                 {e.note && <div className="muted small">{e.note}</div>}
               </div>
             ))}
-            {lane.audit.length === 0 && <div className="muted">no tool calls yet this lane</div>}
+            {ws.audit.length === 0 && <div className="muted">no tool calls yet</div>}
           </div>
         </>
       )}

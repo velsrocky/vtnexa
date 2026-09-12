@@ -1,4 +1,4 @@
-import type { AuditInput, Lane } from "../types";
+import type { AuditInput, Workspace } from "../types";
 import { fsRead, fsWrite, gitCommit } from "../lib/tauri";
 import { baseName } from "../lib/utils";
 
@@ -6,8 +6,8 @@ import { baseName } from "../lib/utils";
 // writes), approve with drift guard, optionally commit. Composes on the
 // tab/buffer state owned by useEditorTabs.
 export function useDiffGate(opts: {
-  lane: Lane;
-  updateLane: (id: string, fn: (l: Lane) => Lane) => void;
+  ws: Workspace;
+  updateWs: (fn: (w: Workspace) => Workspace) => void;
   workspaceRoot: string;
   cwd: string;
   openPath: string;
@@ -17,26 +17,26 @@ export function useDiffGate(opts: {
   setBuffers: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   setOriginalText: (v: string) => void;
   setEditorText: (v: string) => void;
-  refreshFiles: (dir: string, laneId?: string) => Promise<void>;
+  refreshFiles: (dir: string) => Promise<void>;
   refreshGit: () => void;
   refreshSkills: () => void;
   commitMsg: string;
   setCommitMsg: (v: string) => void;
-  logAudit: (laneId: string, e: AuditInput) => void;
+  logAudit: (e: AuditInput) => void;
 }) {
-  const { lane, updateLane, openPath, editorText, originalText } = opts;
+  const { ws, updateWs, openPath, editorText, originalText } = opts;
   const { setOriginals, setBuffers, setOriginalText, setEditorText } = opts;
   async function saveFile() {
     if (!openPath) return;
-    if (lane.pendingDiff && lane.pendingDiff.path !== openPath) {
-      updateLane(lane.id, (l) => ({
-        ...l,
-        shellOut: l.shellOut + `\n⚠ gate holds ${l.pendingDiff!.path} - staging ${openPath} replaces it`,
+    if (ws.pendingDiff && ws.pendingDiff.path !== openPath) {
+      updateWs((w) => ({
+        ...w,
+        shellOut: w.shellOut + `\n⚠ gate holds ${w.pendingDiff!.path} - staging ${openPath} replaces it`,
       }));
     }
     // review gate: stage as pending diff instead of direct write
-    updateLane(lane.id, (l) => ({
-      ...l,
+    updateWs((w) => ({
+      ...w,
       pendingDiff: { path: openPath, content: editorText, original: originalText },
     }));
   }
@@ -51,7 +51,7 @@ export function useDiffGate(opts: {
   }
 
   // Drift guard: the staged diff carries the on-disk original from staging
-  // time. If the file changed since (another lane applied something, an
+  // time. If the file changed since (another window applied something, an
   // external editor touched it), Approve would silently clobber - ask first.
   async function driftOk(d: { path: string; original: string }): Promise<boolean> {
     let current = "";
@@ -62,20 +62,20 @@ export function useDiffGate(opts: {
     }
     if (current === d.original) return true;
     return window.confirm(
-      `${baseName(d.path)} changed on disk since this diff was staged (another lane, the agent, or an external editor).\n\nApply anyway and overwrite those changes?`,
+      `${baseName(d.path)} changed on disk since this diff was staged (another window, the agent, or an external editor).\n\nApply anyway and overwrite those changes?`,
     );
   }
 
   async function approveDiff() {
-    const d = lane.pendingDiff;
+    const d = ws.pendingDiff;
     if (!d) return;
     if (!(await driftOk(d))) return;
     await fsWrite(d.path, d.content);
     markApplied(d.path, d.content);
-    updateLane(lane.id, (l) => ({
-      ...l,
+    updateWs((w) => ({
+      ...w,
       pendingDiff: null,
-      shellOut: l.shellOut + `\n✓ applied ${d.path}`,
+      shellOut: w.shellOut + `\n✓ applied ${d.path}`,
     }));
     opts.refreshFiles(opts.cwd);
     opts.refreshGit();
@@ -83,24 +83,24 @@ export function useDiffGate(opts: {
   }
 
   // Approve + immediately commit that file. User-initiated (the click IS the
-  // approval), so no popup - but it is recorded in the lane audit trail.
+  // approval), so no popup - but it is recorded in this window's audit trail.
   async function approveAndCommit() {
-    const d = lane.pendingDiff;
+    const d = ws.pendingDiff;
     if (!d) return;
     if (!(await driftOk(d))) return;
-    const laneId = lane.id;
+    
     await fsWrite(d.path, d.content);
     markApplied(d.path, d.content);
     const msg = opts.commitMsg.trim() || `Update ${d.path.split("/").pop()}`;
     const t0 = Date.now();
     try {
-      const r = await gitCommit(lane.cwd || opts.cwd, msg, [d.path]);
-      updateLane(laneId, (l) => ({
-        ...l,
+      const r = await gitCommit(ws.cwd || opts.cwd, msg, [d.path]);
+      updateWs((w) => ({
+        ...w,
         pendingDiff: null,
-        shellOut: l.shellOut + `\n✓ applied + committed ${d.path} (${r.hash.slice(0, 7)})`,
+        shellOut: w.shellOut + `\n✓ applied + committed ${d.path} (${r.hash.slice(0, 7)})`,
       }));
-      opts.logAudit(laneId, {
+      opts.logAudit({
         tool: "git_commit",
         args: JSON.stringify({ files: [d.path], message: msg }).slice(0, 1000),
         decision: "approved",
@@ -109,12 +109,12 @@ export function useDiffGate(opts: {
         note: "user-approved from Diff gate",
       });
     } catch (e) {
-      updateLane(laneId, (l) => ({
-        ...l,
+      updateWs((w) => ({
+        ...w,
         pendingDiff: null,
-        shellOut: l.shellOut + `\n✓ applied ${d.path} (commit failed: ${e})`,
+        shellOut: w.shellOut + `\n✓ applied ${d.path} (commit failed: ${e})`,
       }));
-      opts.logAudit(laneId, {
+      opts.logAudit({
         tool: "git_commit",
         args: JSON.stringify({ files: [d.path], message: msg }).slice(0, 1000),
         decision: "approved",

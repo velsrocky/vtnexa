@@ -1,65 +1,59 @@
-import type { CenterTab, Lane } from "../types";
+import type { CenterTab, Workspace } from "../types";
 import { fsRead } from "../lib/tauri";
 import { baseName, isWithin } from "../lib/utils";
 
-// Per-lane tabs and buffers: open/close files, rename/delete retargeting,
-// shell/PTY heights. Lane-patching state lives here; the Diff gate and
+// Per-window tabs and buffers: open/close files, rename/delete retargeting,
+// shell/PTY heights. Window-state patching lives here; the Diff gate and
 // preview compose on top (see useDiffGate, useEditor).
 export function useEditorTabs(opts: {
-  lane: Lane;
-  setLanes: React.Dispatch<React.SetStateAction<Lane[]>>;
-  updateLane: (id: string, fn: (l: Lane) => Lane) => void;
+  ws: Workspace;
+  setWs: React.Dispatch<React.SetStateAction<Workspace>>;
+  updateWs: (fn: (w: Workspace) => Workspace) => void;
   workspaceRoot: string;
   setCenterTab: (t: CenterTab) => void;
 }) {
-  const { lane, setLanes, updateLane, workspaceRoot } = opts;
-  const openPath = lane.openPath ?? "";
-  const tabs = lane.tabs ?? [];
-  const buffers = lane.buffers ?? {};
-  const originals = lane.originals ?? {};
+  const { ws, setWs, updateWs, workspaceRoot } = opts;
+  const openPath = ws.openPath ?? "";
+  const tabs = ws.tabs ?? [];
+  const buffers = ws.buffers ?? {};
+  const originals = ws.originals ?? {};
   const editorText = openPath ? (buffers[openPath] ?? "") : "// open a file from the tree";
   const originalText = openPath ? (originals[openPath] ?? "") : "// open a file from the tree";
-  const shellH = lane.shellH ?? 80;
-  const ptyH = lane.ptyH ?? 220;
-  const previewUrl = lane.previewUrl ?? "";
+  const shellH = ws.shellH ?? 80;
+  const ptyH = ws.ptyH ?? 220;
+  const previewUrl = ws.previewUrl ?? "";
   const setPreviewUrl = (v: string) =>
-    setLanes((ls) =>
-      ls.map((l) => (l.id === lane.id ? { ...l, previewUrl: v } : l)),
-    );
+    setWs((w) => ({ ...w, previewUrl: v }));
 
   const setOpenPath = (v: string | ((p: string) => string)) => {
     const next = typeof v === "function" ? (v as (p: string) => string)(openPath) : v;
-    setLanes((ls) => ls.map((l) => (l.id === lane.id ? { ...l, openPath: next } : l)));
+    setWs((w) => ({ ...w, openPath: next }));
   };
   const setEditorText = (v: string | ((p: string) => string)) => {
     if (!openPath) return;
     const next = typeof v === "function" ? (v as (p: string) => string)(editorText) : v;
-    setLanes((ls) =>
-      ls.map((l) => (l.id === lane.id ? { ...l, buffers: { ...(l.buffers ?? {}), [openPath]: next } } : l)),
-    );
+    setWs((w) => ({ ...w, buffers: { ...(w.buffers ?? {}), [openPath]: next } }));
   };
   const setOriginalText = (v: string | ((p: string) => string)) => {
     if (!openPath) return;
     const next = typeof v === "function" ? (v as (p: string) => string)(originalText) : v;
-    setLanes((ls) =>
-      ls.map((l) => (l.id === lane.id ? { ...l, originals: { ...(l.originals ?? {}), [openPath]: next } } : l)),
-    );
+    setWs((w) => ({ ...w, originals: { ...(w.originals ?? {}), [openPath]: next } }));
   };
   const setTabs: React.Dispatch<React.SetStateAction<string[]>> = (v) => {
     const next = typeof v === "function" ? (v as (p: string[]) => string[])(tabs) : v;
-    setLanes((ls) => ls.map((l) => (l.id === lane.id ? { ...l, tabs: next } : l)));
+    setWs((w) => ({ ...w, tabs: next }));
   };
   const setBuffers: React.Dispatch<React.SetStateAction<Record<string, string>>> = (v) => {
     const next = typeof v === "function" ? (v as (p: Record<string, string>) => Record<string, string>)(buffers) : v;
-    setLanes((ls) => ls.map((l) => (l.id === lane.id ? { ...l, buffers: next } : l)));
+    setWs((w) => ({ ...w, buffers: next }));
   };
   const setOriginals: React.Dispatch<React.SetStateAction<Record<string, string>>> = (v) => {
     const next = typeof v === "function" ? (v as (p: Record<string, string>) => Record<string, string>)(originals) : v;
-    setLanes((ls) => ls.map((l) => (l.id === lane.id ? { ...l, originals: next } : l)));
+    setWs((w) => ({ ...w, originals: next }));
   };
   const setShellH: React.Dispatch<React.SetStateAction<number>> = (v) => {
     const next = typeof v === "function" ? (v as (p: number) => number)(shellH) : v;
-    setLanes((ls) => ls.map((l) => (l.id === lane.id ? { ...l, shellH: next } : l)));
+    setWs((w) => ({ ...w, shellH: next }));
     try {
       localStorage.setItem("vtai.shellH", String(next));
     } catch {
@@ -68,7 +62,7 @@ export function useEditorTabs(opts: {
   };
   const setPtyH: React.Dispatch<React.SetStateAction<number>> = (v) => {
     const next = typeof v === "function" ? (v as (p: number) => number)(ptyH) : v;
-    setLanes((ls) => ls.map((l) => (l.id === lane.id ? { ...l, ptyH: next } : l)));
+    setWs((w) => ({ ...w, ptyH: next }));
     try {
       localStorage.setItem("vtai.ptyH", String(next));
     } catch {
@@ -109,7 +103,7 @@ export function useEditorTabs(opts: {
   }
   async function openFile(path: string) {
     if (workspaceRoot && !isWithin(workspaceRoot, path)) {
-      updateLane(lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\nblocked: outside workspace` }));
+      updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nblocked: outside workspace` }));
       return;
     }
     // Already open → just activate (buffer preserved, edits intact).
@@ -130,7 +124,7 @@ export function useEditorTabs(opts: {
       setOriginalText(text);
       opts.setCenterTab("edit");
     } catch (e) {
-      updateLane(lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\nopen failed: ${e}` }));
+      updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nopen failed: ${e}` }));
     }
   }
 
@@ -142,20 +136,17 @@ export function useEditorTabs(opts: {
     const next = tabs.filter((p) => p !== path);
     const closingActive = openPath === path;
     const nxt = closingActive ? next[Math.min(idx, next.length - 1)] ?? "" : openPath;
-    setLanes((ls) =>
-      ls.map((l) => {
-        if (l.id !== lane.id) return l;
-        const b = { ...(l.buffers ?? {}) };
-        const o = { ...(l.originals ?? {}) };
-        delete b[path];
-        delete o[path];
-        return { ...l, tabs: next, buffers: b, originals: o, openPath: nxt };
-      }),
-    );
+    setWs((w) => {
+      const b = { ...(w.buffers ?? {}) };
+      const o = { ...(w.originals ?? {}) };
+      delete b[path];
+      delete o[path];
+      return { ...w, tabs: next, buffers: b, originals: o, openPath: nxt };
+    });
   }
 
   // After a rename, retarget every tab/buffer under the old path (handles
-  // renamed directories containing open files) and every lane's pending diff.
+  // renamed directories containing open files) and the pending diff.
   function retargetTabs(oldP: string, newP: string) {
     const swap = (p: string) => (p === oldP ? newP : p.startsWith(oldP + "/") ? newP + p.slice(oldP.length) : p);
     const rekey = (m: Record<string, string>) => {
@@ -167,17 +158,15 @@ export function useEditorTabs(opts: {
     setBuffers(rekey);
     setOriginals(rekey);
     if (openPath === oldP || openPath.startsWith(oldP + "/")) setOpenPath(swap(openPath));
-    setLanes((ls) =>
-      ls.map((l) =>
-        l.pendingDiff && (l.pendingDiff.path === oldP || l.pendingDiff.path.startsWith(oldP + "/"))
-          ? { ...l, pendingDiff: { ...l.pendingDiff, path: swap(l.pendingDiff.path) } }
-          : l,
-      ),
+    setWs((w) =>
+      w.pendingDiff && (w.pendingDiff.path === oldP || w.pendingDiff.path.startsWith(oldP + "/"))
+        ? { ...w, pendingDiff: { ...w.pendingDiff, path: swap(w.pendingDiff.path) } }
+        : w,
     );
   }
 
-  // After a delete, drop any tabs under the deleted path and clear any
-  // lane's pending diff that is now dangling.
+  // After a delete, drop any tabs under the deleted path and clear a
+  // dangling pending diff.
   function dropTabsUnder(path: string) {
     const under = (p: string) => p === path || p.startsWith(path + "/");
     const next = tabs.filter((p) => !under(p));
@@ -197,8 +186,9 @@ export function useEditorTabs(opts: {
       setEditorText("// open a file from the tree");
       setOriginalText("// open a file from the tree");
     }
-    setLanes((ls) => ls.map((l) => (l.pendingDiff && under(l.pendingDiff.path) ? { ...l, pendingDiff: null } : l)));
+    setWs((w) => (w.pendingDiff && under(w.pendingDiff.path) ? { ...w, pendingDiff: null } : w));
   }
+
   return {
     openPath,
     setOpenPath,

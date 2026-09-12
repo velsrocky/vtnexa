@@ -1,19 +1,17 @@
 import type { ReactNode } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
-import type { CenterTab, Lane } from "../types";
+import type { CenterTab, Workspace } from "../types";
 import BrowserPane from "./BrowserPane";
 import TerminalPane from "./TerminalPane";
 import { languageFromPath } from "../lib/preview";
 import { baseName } from "../lib/utils";
 
 // Center column: tabbed edit/diff/preview/browser/git panes + review-gate
-// row + one-shot shell + per-lane PTY stack.
-export default function EditorPane({ lane, lanes, laneBusy, openPath, tabs, buffers, originals, editorText, originalText, setEditorText, monacoTheme, centerTab, setCenterTab, gitCount, gitPane, previewUrl, setPreviewUrl, previewDoc, openFile, closeTab,   saveFile,
-  leaveWorktree,
-  mergeWorktree, commitMsg, setCommitMsg, approveDiff, approveAndCommit, onRejectDiff, shellCmd, onShellCmdChange, runShell, shellH, ptyH, themeId, onHResizerDown }: {
-  lane: Lane;
-  lanes: Lane[];
-  laneBusy: boolean;
+// row + one-shot shell + this window's PTY.
+export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, originals, editorText, originalText, setEditorText, monacoTheme, centerTab, setCenterTab, gitCount, gitPane, previewUrl, setPreviewUrl, previewDoc, openFile, closeTab, saveFile, isolateWorktree, leaveWorktree, mergeWorktree, commitMsg, setCommitMsg, approveDiff, approveAndCommit, onRejectDiff, shellCmd, onShellCmdChange, runShell, shellH, ptyH, themeId, onHResizerDown }: {
+  ws: Workspace;
+  ptyId: string;
+  busy: boolean;
   openPath: string;
   tabs: string[];
   buffers: Record<string, string>;
@@ -32,6 +30,7 @@ export default function EditorPane({ lane, lanes, laneBusy, openPath, tabs, buff
   openFile: (path: string) => void;
   closeTab: (path: string) => void;
   saveFile: () => void;
+  isolateWorktree: () => void;
   leaveWorktree: () => void;
   mergeWorktree: () => void;
   commitMsg: string;
@@ -52,9 +51,9 @@ export default function EditorPane({ lane, lanes, laneBusy, openPath, tabs, buff
       <div className="pane-title row-between">
         <span className="ellipsis">
           {openPath || "(no file)"}
-          {lane.pendingDiff && (
+          {ws.pendingDiff && (
             <span className="pill" style={{ marginLeft: 8 }}>
-              {lane.pendingDiff.path === openPath ? `review: ${openPath.split("/").pop()}` : `review: ${lane.pendingDiff.path.split("/").pop()} (not open)`}
+              {ws.pendingDiff.path === openPath ? `review: ${openPath.split("/").pop()}` : `review: ${ws.pendingDiff.path.split("/").pop()} (not open)`}
             </span>
           )}
         </span>
@@ -118,9 +117,9 @@ export default function EditorPane({ lane, lanes, laneBusy, openPath, tabs, buff
           <DiffEditor
             height="100%"
             theme={monacoTheme}
-            language={languageFromPath(lane.pendingDiff ? lane.pendingDiff.path : openPath)}
-            original={lane.pendingDiff ? lane.pendingDiff.original : originalText}
-            modified={lane.pendingDiff ? lane.pendingDiff.content : editorText}
+            language={languageFromPath(ws.pendingDiff ? ws.pendingDiff.path : openPath)}
+            original={ws.pendingDiff ? ws.pendingDiff.original : originalText}
+            modified={ws.pendingDiff ? ws.pendingDiff.content : editorText}
             options={{ renderSideBySide: true, automaticLayout: true }}
           />
         </div>
@@ -153,26 +152,33 @@ export default function EditorPane({ lane, lanes, laneBusy, openPath, tabs, buff
       {centerTab === "git" && gitPane}
       <div className="row">
         <button onClick={saveFile}>Stage → review gate</button>
-        {lane.worktree && (
+        {ws.worktree ? (
           <>
             <span
               className="pill"
               style={{ background: "var(--accent)", color: "var(--accent-text)" }}
-              title={`Isolated in worktree ${lane.worktree.path} - committed work stays on ${lane.worktree.branch}`}
+              title={`Isolated in worktree ${ws.worktree.path} - committed work stays on ${ws.worktree.branch}`}
             >
-              {`⎇ ${lane.worktree.branch.replace(/^vtnexa\//, "")}`}
+              {`⎇ ${ws.worktree.branch.replace(/^vtnexa\//, "")}`}
             </span>
-            <button onClick={mergeWorktree} title="git merge this lane's branch into the main checkout">
+            <button onClick={mergeWorktree} title="git merge this window's branch into the main checkout">
               ⇣ merge to main
             </button>
             <button onClick={leaveWorktree} title="Leave the worktree (uncommitted changes are discarded)">
               leave
             </button>
           </>
+        ) : (
+          <button
+            onClick={isolateWorktree}
+            title="Isolate this window in its own git worktree + branch so parallel windows never edit the same files"
+          >
+            ⎇ isolate
+          </button>
         )}
-        {lane.pendingDiff && (
+        {ws.pendingDiff && (
           <span className="gate">
-            pending: {lane.pendingDiff.path}
+            pending: {ws.pendingDiff.path}
             <button onClick={approveDiff}>Approve & apply</button>
             <input
               value={commitMsg}
@@ -193,28 +199,19 @@ export default function EditorPane({ lane, lanes, laneBusy, openPath, tabs, buff
           value={shellCmd}
           onChange={(e) => onShellCmdChange(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && runShell()}
-          placeholder="one-shot shell (per lane)"
+          placeholder="one-shot shell"
           className="grow"
         />
-        <button onClick={runShell} disabled={laneBusy}>
+        <button onClick={runShell} disabled={busy}>
           Run
         </button>
       </div>
       <div className="hresizer" onMouseDown={onHResizerDown("shell")} title="Drag to resize shell output" />
-      <pre className="term small" style={{ height: shellH }}>{lane.shellOut || "$ one-shot ready"}</pre>
-      <div className="pane-title">terminal - real PTY per lane (interactive)</div>
+      <pre className="term small" style={{ height: shellH }}>{ws.shellOut || "$ one-shot ready"}</pre>
+      <div className="pane-title">terminal - real PTY (interactive)</div>
       <div className="hresizer" onMouseDown={onHResizerDown("pty")} title="Drag to resize terminal" />
       <div className="pty-stack">
-        {lanes.map((l) => (
-          <TerminalPane
-            key={l.id}
-            laneId={l.id}
-            cwd={l.cwd}
-            active={l.id === lane.id}
-            themeId={themeId}
-            height={ptyH}
-          />
-        ))}
+        <TerminalPane ptyId={ptyId} cwd={ws.cwd} themeId={themeId} height={ptyH} />
       </div>
     </section>
   );

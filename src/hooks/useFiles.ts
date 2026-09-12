@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Lane } from "../types";
+import type { Workspace } from "../types";
 import { fsCreate, fsDelete, fsRename } from "../lib/tauri";
 import { baseName, dirName } from "../lib/utils";
 
@@ -18,9 +18,8 @@ export interface RenamingState {
 export function useFiles(opts: {
   cwd: string;
   workspaceRoot: string;
-  lane: Lane;
-  updateLane: (id: string, fn: (l: Lane) => Lane) => void;
-  refreshFiles: (dir: string, laneId?: string) => Promise<void>;
+  updateWs: (fn: (w: Workspace) => Workspace) => void;
+  refreshFiles: (dir: string) => Promise<void>;
   openFile: (path: string) => void;
   retargetTabs: (oldP: string, newP: string) => void;
   dropTabsUnder: (path: string) => void;
@@ -44,7 +43,7 @@ export function useFiles(opts: {
       opts.refreshFiles(opts.cwd);
       if (!creating.isDir) opts.openFile(target);
     } catch (e) {
-      opts.updateLane(opts.lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\ncreate failed: ${e}` }));
+      opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\ncreate failed: ${e}` }));
     }
   }
 
@@ -62,7 +61,7 @@ export function useFiles(opts: {
       setRenaming(null);
       opts.refreshFiles(opts.cwd);
     } catch (e) {
-      opts.updateLane(opts.lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\nrename failed: ${e}` }));
+      opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nrename failed: ${e}` }));
     }
   }
 
@@ -72,9 +71,9 @@ export function useFiles(opts: {
       await fsDelete(path, isDir);
       opts.dropTabsUnder(path);
       opts.refreshFiles(opts.cwd);
-      opts.updateLane(opts.lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\n✓ deleted ${path}` }));
+      opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\n✓ deleted ${path}` }));
     } catch (e) {
-      opts.updateLane(opts.lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\ndelete failed: ${e}` }));
+      opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\ndelete failed: ${e}` }));
     }
   }
 

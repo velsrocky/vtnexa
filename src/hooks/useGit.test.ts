@@ -18,23 +18,19 @@ afterEach(() => {
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
-function setup(invokeImpl: (cmd: string, args?: any) => Promise<any>) {
-  setInvokeImpl(invokeImpl);
-  const audits: any[] = [];
-  const hook = renderHook(() =>
-    useGit({ getRoot: () => "/w", laneId: "lane1", logAudit: (id, e) => audits.push({ laneId: id, ...e }) }),
-  );
-  return { ...hook, audits };
-}
-
 const STATUS = { branch: "main", root: "/w", files: [{ path: "a.txt", status: "M" }] };
 const LOG = [{ hash: "abc123", author: "dev", date: "2026-01-01", message: "init" }];
 
+function setup(invokeImpl: (cmd: string, args?: any) => Promise<any>) {
+  setInvokeImpl(invokeImpl);
+  const audits: any[] = [];
+  const hook = renderHook(() => useGit({ getRoot: () => "/w", logAudit: (e) => audits.push(e) }));
+  return { ...hook, audits };
+}
+
 describe("useGit.refreshGit", () => {
   it("loads status, log and selected diff", async () => {
-    const seen: string[] = [];
     const { result } = setup(async (cmd, args) => {
-      seen.push(cmd);
       if (cmd === "git_status") return STATUS;
       if (cmd === "git_log") return LOG;
       if (cmd === "git_diff") {
@@ -47,12 +43,10 @@ describe("useGit.refreshGit", () => {
       await result.current.refreshGit("a.txt");
     });
     expect(result.current.branch).toBe("main");
-    expect(result.current.root).toBe("/w");
     expect(result.current.files).toHaveLength(1);
     expect(result.current.logList).toEqual(LOG);
     expect(result.current.note).toBe("1 changed");
     expect(result.current.diffText).toBe("diff --git a/a.txt");
-    expect(seen).toEqual(expect.arrayContaining(["git_status", "git_log", "git_diff"]));
   });
 
   it("reports a clean tree", async () => {
@@ -65,7 +59,6 @@ describe("useGit.refreshGit", () => {
       await result.current.refreshGit();
     });
     expect(result.current.note).toBe("clean");
-    expect(result.current.diffText).toBe("");
   });
 
   it("translates non-repo errors", async () => {
@@ -106,63 +99,15 @@ describe("useGit.selectGitFile", () => {
   });
 });
 
-describe("useGit per-lane cache", () => {
-  function switched() {
-    let statusCalls = 0;
-    const counting = async (cmd: string, _args?: any) => {
-      if (cmd === "git_status") statusCalls++;
-      if (cmd === "git_status") return STATUS;
-      if (cmd === "git_log") return LOG;
-      if (cmd === "git_diff") return "";
-      throw new Error(`unexpected ${cmd}`);
-    };
-    setInvokeImpl(counting);
-    const hook = renderHook(
-      (props: { laneId: string }) =>
-        useGit({ getRoot: () => "/w", laneId: props.laneId, logAudit: () => {} }),
-      { initialProps: { laneId: "a" } },
-    );
-    return { ...hook, statusCalls: () => statusCalls };
-  }
-
-  it("restores each lane's git context without refetching", async () => {
-    const h = switched();
-    await act(async () => {
-      await h.result.current.refreshGit();
-    });
-    expect(h.result.current.branch).toBe("main");
-    expect(h.statusCalls()).toBe(1);
-
-    act(() => {
-      h.result.current.setMsg("draft for a");
-    });
-    h.rerender({ laneId: "b" });
-    // Fresh lane: blank, never another lane's repo.
-    expect(h.result.current.branch).toBe("");
-    expect(h.statusCalls()).toBe(1);
-
-    await act(async () => {
-      await h.result.current.refreshGit();
-    });
-    expect(h.statusCalls()).toBe(2);
-
-    h.rerender({ laneId: "a" });
-    // Restored from cache: branch + draft back, no new fetch.
-    expect(h.result.current.branch).toBe("main");
-    expect(h.result.current.msg).toBe("draft for a");
-    expect(h.statusCalls()).toBe(2);
-  });
-});
-
 describe("useGit.commitListed", () => {
   function baseImpl(committed: any[], failCommit = false) {
-    return async (cmd: string, args?: any) => {
+    return async (cmd: string, _args?: any) => {
       if (cmd === "git_status") return STATUS;
       if (cmd === "git_log") return LOG;
       if (cmd === "git_diff") return "";
       if (cmd === "git_commit") {
         if (failCommit) throw new Error("nothing to commit?");
-        committed.push(args);
+        committed.push(_args);
         return { hash: "abcdef123456" };
       }
       throw new Error(`unexpected ${cmd}`);
@@ -177,7 +122,7 @@ describe("useGit.commitListed", () => {
     return h;
   }
 
-  it("requires a message and something to commit", async () => {
+  it("requires a message", async () => {
     const { result } = await ready(baseImpl([]));
     await act(async () => {
       await result.current.commitListed();

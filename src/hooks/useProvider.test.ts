@@ -2,8 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useProvider } from "./useProvider";
-import { newLane } from "../lib/utils";
-import type { Lane } from "../types";
+import { newWorkspace } from "../lib/utils";
+import type { Workspace } from "../types";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -27,32 +27,27 @@ afterEach(() => {
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
-function setup(lane?: Lane) {
-  const updated: { id: string; fn: (l: Lane) => Lane }[] = [];
-  const base = lane ?? newLane("L", "/w");
+function setup() {
+  let ws: Workspace = newWorkspace("main:ws", "/w");
   const hook = renderHook(() =>
     useProvider({
-      lane: base,
-      updateLane: (id, fn) => updated.push({ id, fn }),
+      ws,
+      updateWs: (fn) => {
+        ws = fn(ws);
+      },
     }),
   );
-  return { ...hook, updated, lane: base };
+  return { ...hook, wsOf: () => ws };
 }
 
-function applyUpdates(updated: { id: string; fn: (l: Lane) => Lane }[], lane: Lane): Lane {
-  return updated.reduce((l, u) => (u.id === lane.id ? u.fn(l) : l), lane);
-}
-
-describe("useProvider per-lane config", () => {
-  it("reads the lane's own config and patches only that lane", () => {
-    const { result, updated, lane } = setup();
+describe("useProvider per-window config", () => {
+  it("reads the window's own config and patches it", () => {
+    const { result, wsOf } = setup();
     expect(result.current.editCfg.model).toBe("qwen2.5-coder:7b");
     act(() => {
       result.current.setEditCfg({ model: "new-model" });
     });
-    expect(updated).toHaveLength(1);
-    expect(updated[0].id).toBe(lane.id);
-    expect(applyUpdates(updated, lane).provider.model).toBe("new-model");
+    expect(wsOf().provider.model).toBe("new-model");
   });
 });
 
@@ -72,12 +67,12 @@ describe("useProvider keychain", () => {
       "vtai.providerHistory",
       JSON.stringify([{ baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder:7b", apiKey: "PLAIN", kind: "auto" }]),
     );
-    const { result, updated, lane } = setup();
+    const { result, wsOf } = setup();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600);
     });
     expect(result.current.keychainOk).toBe(true);
-    expect(applyUpdates(updated, lane).provider.apiKey).toBe("K-SECRET");
+    expect(wsOf().provider.apiKey).toBe("K-SECRET");
     expect(keySets).toContainEqual(
       expect.objectContaining({ baseUrl: "http://localhost:11434/v1", secret: "PLAIN" }),
     );
@@ -136,18 +131,5 @@ describe("useProvider.refreshModels", () => {
     });
     expect(result.current.provModels).toEqual(["a", "b"]);
     expect(result.current.modelsNote).toMatch(/2 models/);
-  });
-});
-
-describe("useProvider lane isolation", () => {
-  it("edits never address another lane", () => {
-    const { result, updated, lane } = setup();
-    act(() => {
-      result.current.setEditCfg({ baseUrl: "https://other.test", model: "m2" });
-    });
-    expect(updated).toHaveLength(1);
-    expect(updated[0].id).toBe(lane.id);
-    const patched = applyUpdates(updated, lane);
-    expect(patched.provider).toMatchObject({ baseUrl: "https://other.test", model: "m2" });
   });
 });

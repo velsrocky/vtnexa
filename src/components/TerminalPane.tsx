@@ -7,14 +7,13 @@ import { ptyKill, ptyResize, ptySpawn, ptyWrite } from "../lib/pty";
 import { THEMES, asThemeId } from "../lib/theme";
 
 interface Props {
-  laneId: string;
+  ptyId: string;
   cwd: string;
-  active: boolean;
   themeId: string;
   height: number;
 }
 
-export default function TerminalPane({ laneId, cwd, active, themeId, height }: Props) {
+export default function TerminalPane({ ptyId, cwd, themeId, height }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -48,7 +47,7 @@ export default function TerminalPane({ laneId, cwd, active, themeId, height }: P
       if (!spawnedRef.current) {
         spawnedRef.current = true;
         try {
-          await ptySpawn(laneId, cwd || ".", cols, rows);
+          await ptySpawn(ptyId, cwd || ".", cols, rows);
         } catch (e) {
           term.writeln(`\r\npty spawn failed: ${e}`);
         }
@@ -64,26 +63,25 @@ export default function TerminalPane({ laneId, cwd, active, themeId, height }: P
       return el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
     };
     (async () => {
-      unlistenOut = await listen<string>(`pty-output-${laneId}`, (e) => {
+      unlistenOut = await listen<string>(`pty-output-${ptyId}`, (e) => {
         const follow = atBottom();
         term.write(e.payload, () => {
           if (follow) term.scrollToBottom();
         });
       });
-      unlistenExit = await listen(`pty-exit-${laneId}`, () => {
+      unlistenExit = await listen(`pty-exit-${ptyId}`, () => {
         term.writeln("\r\n[pty exited — press Restart]", () => term.scrollToBottom());
       });
     })();
 
     const onData = term.onData((data) => {
-      ptyWrite(laneId, data).catch(() => {});
+      ptyWrite(ptyId, data).catch(() => {});
     });
 
     const onResize = () => {
-      if (!active) return;
       try {
         fit.fit();
-        ptyResize(laneId, term.cols, term.rows).catch(() => {});
+        ptyResize(ptyId, term.cols, term.rows).catch(() => {});
       } catch {
         /* ignore */
       }
@@ -95,13 +93,13 @@ export default function TerminalPane({ laneId, cwd, active, themeId, height }: P
       onData.dispose();
       if (unlistenOut) unlistenOut();
       if (unlistenExit) unlistenExit();
-      // NOTE: keep PTY alive on unmount for lane persistence;
-      // killed explicitly via Restart or lane close.
+      // NOTE: keep PTY alive on unmount; killed on window close (backend)
+      // or explicitly via Restart.
       term.dispose();
       termRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [laneId]);
+  }, [ptyId]);
 
   // Live-apply palette changes.
   useEffect(() => {
@@ -113,16 +111,14 @@ export default function TerminalPane({ laneId, cwd, active, themeId, height }: P
     }
   }, [themeId]);
 
-  // fit when activated (hidden panes have 0 size) and when the box height
-  // changes via the row resizer (debounced by the timeout).
+  // fit when the box height changes via the row resizer (debounced).
   useEffect(() => {
-    if (!active) return;
     const t = setTimeout(() => {
       try {
         fitRef.current?.fit();
         const term = termRef.current;
         if (term) {
-          ptyResize(laneId, term.cols, term.rows).catch(() => {});
+          ptyResize(ptyId, term.cols, term.rows).catch(() => {});
           term.scrollToBottom();
         }
       } catch {
@@ -130,12 +126,12 @@ export default function TerminalPane({ laneId, cwd, active, themeId, height }: P
       }
     }, 50);
     return () => clearTimeout(t);
-  }, [active, laneId, height]);
+  }, [ptyId, height]);
 
   async function restart() {
     const term = termRef.current;
     try {
-      await ptyKill(laneId);
+      await ptyKill(ptyId);
     } catch {
       /* ignore */
     }
@@ -149,7 +145,7 @@ export default function TerminalPane({ laneId, cwd, active, themeId, height }: P
     const cols = term?.cols || 80;
     const rows = term?.rows || 24;
     try {
-      await ptySpawn(laneId, cwd || ".", cols, rows);
+      await ptySpawn(ptyId, cwd || ".", cols, rows);
       spawnedRef.current = true;
     } catch (e) {
       term?.writeln(`restart failed: ${e}`);
@@ -157,10 +153,10 @@ export default function TerminalPane({ laneId, cwd, active, themeId, height }: P
   }
 
   return (
-    <div className={active ? "pty-box" : "pty-box hidden"}>
+    <div className="pty-box">
       <div className="row pty-bar">
-        <span className="muted small">pty · {laneId.slice(0, 6)} · {cwd}</span>
-        <button onClick={restart} title="Kill and respawn this lane's shell">Restart</button>
+        <span className="muted small">pty · {ptyId.slice(0, 6)} · {cwd}</span>
+        <button onClick={restart} title="Kill and respawn this window's shell">Restart</button>
       </div>
       <div ref={hostRef} className="xterm-host" style={{ height }} />
     </div>

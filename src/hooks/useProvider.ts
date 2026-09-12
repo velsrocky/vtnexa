@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import type { Lane, ProviderConfig } from "../types";
+import type { ProviderConfig, Workspace } from "../types";
 import { keyGet, keySet } from "../lib/tauri";
 import { listModels } from "../lib/providers";
 import { loadHist, saveHist, type ProviderEntry } from "../lib/providerHistory";
 
 export type { ProviderEntry };
 
-// Per-lane provider config: the bar always edits the ACTIVE lane's own
-// copy - there is no shared global. Keychain + history + model discovery
-// are app-level services shared by all lanes.
+// Per-window provider config: the bar edits THIS window's own copy - there
+// is no shared global. Keychain + history + model discovery are app-level
+// services shared by all windows.
 export function useProvider(opts: {
-  lane: Lane;
-  updateLane: (id: string, fn: (l: Lane) => Lane) => void;
+  ws: Workspace;
+  updateWs: (fn: (w: Workspace) => Workspace) => void;
 }) {
   const [provHist, setProvHist] = useState<ProviderEntry[]>(loadHist);
   const [provModels, setProvModels] = useState<string[]>([]);
@@ -22,18 +22,17 @@ export function useProvider(opts: {
   const [keychainOk, setKeychainOk] = useState<boolean | null>(null);
   const keychainMigrated = useRef(false);
 
-  const lane = opts.lane;
-  const editCfg: ProviderConfig = lane.provider;
+  const ws = opts.ws;
+  const editCfg: ProviderConfig = ws.provider;
   function setEditCfg(patch: Partial<ProviderConfig>) {
-    const base = lane.provider;
-    opts.updateLane(lane.id, (l) => ({ ...l, provider: { ...base, ...patch } }));
+    opts.updateWs((w) => ({ ...w, provider: { ...w.provider, ...patch } }));
   }
 
-  // Resolve the apiKey from the OS keychain whenever the lane's
+  // Resolve the apiKey from the OS keychain whenever this window's
   // endpoint+model change (debounced). First success also migrates any
   // plaintext history keys.
-  const baseUrl = lane.provider.baseUrl;
-  const model = lane.provider.model;
+  const baseUrl = ws.provider.baseUrl;
+  const model = ws.provider.model;
   useEffect(() => {
     if (!baseUrl.trim() || !model.trim()) return;
     const t = setTimeout(async () => {
@@ -41,9 +40,7 @@ export function useProvider(opts: {
         const k = await keyGet(baseUrl, model);
         setKeychainOk(true);
         if (k) {
-          opts.updateLane(lane.id, (l) =>
-            l.provider.apiKey === k ? l : { ...l, provider: { ...l.provider, apiKey: k } },
-          );
+          opts.updateWs((w) => (w.provider.apiKey === k ? w : { ...w, provider: { ...w.provider, apiKey: k } }));
         }
         if (!keychainMigrated.current) {
           keychainMigrated.current = true;
@@ -69,7 +66,7 @@ export function useProvider(opts: {
     }, 500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lane.id, baseUrl, model]);
+  }, [baseUrl, model]);
 
   // "Correct" = the provider answered without throwing. Most-recent first.
   // Working keys are mirrored to the OS keychain; localStorage keeps them

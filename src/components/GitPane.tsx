@@ -1,7 +1,7 @@
 import { gitInit } from "../lib/tauri";
 import type { GitFile, GitLogEntry } from "../lib/tauri";
 
-export default function GitPane({ branch, files, sel, diffText, logList, msg, setMsg, note, setNote, laneCwd, fallbackCwd, refreshGit, selectGitFile, commitListed }: {
+export default function GitPane({ branch, files, sel, diffText, logList, msg, setMsg, note, setNote, wsCwd, fallbackCwd, refreshGit, selectGitFile, commitListed }: {
   branch: string;
   files: GitFile[];
   sel: string;
@@ -11,7 +11,7 @@ export default function GitPane({ branch, files, sel, diffText, logList, msg, se
   setMsg: (v: string) => void;
   note: string;
   setNote: (v: string) => void;
-  laneCwd: string;
+  wsCwd: string;
   fallbackCwd: string;
   refreshGit: () => void;
   selectGitFile: (relPath: string) => void;
@@ -26,7 +26,7 @@ export default function GitPane({ branch, files, sel, diffText, logList, msg, se
           <button
             onClick={async () => {
               try {
-                await gitInit(laneCwd || fallbackCwd);
+                await gitInit(wsCwd || fallbackCwd);
                 refreshGit();
               } catch (e) {
                 setNote(`init failed: ${e}`);

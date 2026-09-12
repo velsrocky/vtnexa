@@ -631,7 +631,7 @@ export async function chatWithTools(
   // calling. Models without tool support (e.g. some Ollama vision models) get
   // a plain-chat retry instead of a hard failure.
   const MAX_ROUNDS = 8;
-  // History window: a long lane currently resends EVERYTHING each turn —
+  // History window: a long chat currently resends EVERYTHING each turn —
   // unbounded payloads that gateways kill mid-flight ("Load failed").
   // Keep sys + last 20, cutting only at user boundaries so tool
   // request/response pairs are never orphaned (orphans → provider 400).

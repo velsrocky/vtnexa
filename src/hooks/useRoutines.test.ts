@@ -2,8 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useRoutines } from "./useRoutines";
-import { newLane } from "../lib/utils";
-import type { Lane, Routine } from "../types";
+import type { Routine } from "../types";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -20,33 +19,20 @@ afterEach(() => {
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
-function setup(opts?: {
-  lanes?: Lane[];
-  busyLanes?: Record<string, boolean>;
-  saved?: unknown;
-}) {
-  setInvokeImpl(async (cmd) => {
-    if (cmd === "routines_load") return opts?.saved ?? "";
-    if (cmd === "routines_save") return {};
-    throw new Error(`unexpected ${cmd}`);
-  });
-  const addLane = vi.fn((_root: string, _cwd: string, _p: unknown, _o?: unknown) => "new-lane");
-  const isolateLane = vi.fn(async (_id: string, _root: string) => {});
-  const runAgentTurn = vi.fn();
-  const inheritProvider = { baseUrl: "http://localhost:11434/v1", apiKey: "", model: "q", kind: "auto" as const };
-  const hook = renderHook(() =>
-    useRoutines({
-      lanes: opts?.lanes ?? [],
-      workspaceRoot: "/w",
-      cwd: "/w",
-      busyLanes: opts?.busyLanes ?? {},
-      runAgentTurn,
-      addLane: addLane as any,
-      isolateLane,
-      inheritProvider,
-    }),
+function setup(opts?: { busy?: boolean; saved?: unknown; impl?: (cmd: string, args?: any) => Promise<any> }) {
+  setInvokeImpl(
+    opts?.impl ??
+      (async (cmd: string) => {
+        if (cmd === "routines_load") return opts?.saved ?? "";
+        if (cmd === "routines_save") return {};
+        throw new Error(`unexpected ${cmd}`);
+      }),
   );
-  return { ...hook, addLane, isolateLane, runAgentTurn };
+  const runAgentTurn = vi.fn();
+  const hook = renderHook(() =>
+    useRoutines({ busy: opts?.busy ?? false, runAgentTurn }),
+  );
+  return { ...hook, runAgentTurn };
 }
 
 describe("useRoutines.loadRoutines", () => {
@@ -88,47 +74,26 @@ describe("useRoutines.loadRoutines", () => {
       await empty.result.current.loadRoutines();
     });
     expect(empty.result.current.routines).toEqual([]);
-
-    setInvokeImpl(async () => {
-      throw new Error("io gone");
-    });
-    const broken = setup({});
-    await act(async () => {
-      await broken.result.current.loadRoutines();
-    });
-    expect(broken.result.current.routines).toEqual([]);
   });
 });
 
 describe("useRoutines.addRoutine", () => {
   it("validates, persists and resets the draft", async () => {
     const saves: any[] = [];
-    setInvokeImpl(async (cmd, args) => {
-      if (cmd === "routines_load") return "";
-      if (cmd === "routines_save") {
-        saves.push(JSON.parse((args as any).content));
-        return {};
-      }
-      throw new Error(`unexpected ${cmd}`);
+    const { result } = setup({
+      impl: async (cmd: string, args?: any) => {
+        if (cmd === "routines_load") return "";
+        if (cmd === "routines_save") {
+          saves.push(JSON.parse(args.content));
+          return {};
+        }
+        throw new Error(`unexpected ${cmd}`);
+      },
     });
-    const { result } = renderHook(() =>
-      useRoutines({
-        lanes: [],
-        workspaceRoot: "/w",
-        cwd: "/w",
-        busyLanes: {},
-        runAgentTurn: vi.fn(),
-        addLane: vi.fn(() => "x"),
-        isolateLane: vi.fn(async () => {}),
-        inheritProvider: { baseUrl: "b", apiKey: "", model: "m", kind: "auto" },
-      }),
-    );
-    // Empty draft is a no-op.
     await act(async () => {
       await result.current.addRoutine();
     });
     expect(result.current.routines).toHaveLength(0);
-
     act(() => {
       result.current.setNewRoutine({ name: "  Morning triage  ", prompt: "check inbox", everyMs: 0 });
     });
@@ -153,36 +118,19 @@ describe("useRoutines.runRoutine", () => {
     ...over,
   });
 
-  it("reuses the dedicated lane and fires the agent turn", async () => {
-    const lane = newLane("Triage", "/w");
-    const { result, runAgentTurn, addLane, isolateLane } = setup({ lanes: [lane] });
-    await act(async () => {
-      await result.current.runRoutine(routine({ laneId: lane.id }));
-    });
-    expect(addLane).not.toHaveBeenCalled();
-    expect(isolateLane).not.toHaveBeenCalled();
-    expect(runAgentTurn).toHaveBeenCalledTimes(1);
-    expect(runAgentTurn.mock.calls[0][0]).toBe(lane.id);
-    expect(runAgentTurn.mock.calls[0][1]).toMatch(/Triage.*check inbox/s);
-  });
-
-  it("creates and isolates a lane lazily on first run", async () => {
-    const { result, runAgentTurn, addLane, isolateLane } = setup({ lanes: [] });
+  it("runs in this window and fires the agent turn", async () => {
+    const { result, runAgentTurn } = setup();
     await act(async () => {
       await result.current.runRoutine(routine());
     });
-    expect(addLane).toHaveBeenCalledTimes(1);
-    expect(addLane.mock.calls[0][3]).toMatchObject({ name: "Triage", activate: false });
-    expect(isolateLane).toHaveBeenCalledWith("new-lane", "/w");
     expect(runAgentTurn).toHaveBeenCalledTimes(1);
-    expect(runAgentTurn.mock.calls[0][0]).toBe("new-lane");
+    expect(runAgentTurn.mock.calls[0][0]).toMatch(/Triage.*check inbox/s);
   });
 
-  it("defers when the lane is busy instead of piling up", async () => {
-    const lane = newLane("Triage", "/w");
-    const { result, runAgentTurn } = setup({ lanes: [lane], busyLanes: { [lane.id]: true } });
+  it("defers when busy instead of piling up", async () => {
+    const { result, runAgentTurn } = setup({ busy: true });
     await act(async () => {
-      await result.current.runRoutine(routine({ laneId: lane.id }));
+      await result.current.runRoutine(routine());
     });
     expect(runAgentTurn).not.toHaveBeenCalled();
   });

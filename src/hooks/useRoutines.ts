@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import type { Lane, ProviderConfig, Routine } from "../types";
+import type { Routine } from "../types";
 import { routinesLoad, routinesSave } from "../lib/tauri";
 import { uid } from "../lib/utils";
 
@@ -16,17 +16,10 @@ export const ROUTINE_PRESETS = [
 ];
 
 export function useRoutines(opts: {
-  lanes: Lane[];
-  workspaceRoot: string;
-  cwd: string;
-  busyLanes: Record<string, boolean>;
-  runAgentTurn: (laneId: string, prompt: string) => void;
-  /** Created by useLanes: owns numbering/activation. Isolation follows. */
-  addLane: (workspaceRoot: string, cwd: string, provider: ProviderConfig, opts?: { name?: string; activate?: boolean }) => string;
-  isolateLane: (id: string, workspaceRoot: string) => Promise<void>;
-  inheritProvider: ProviderConfig;
+  busy: boolean;
+  runAgentTurn: (prompt: string) => void;
 }) {
-  const { lanes, workspaceRoot, cwd, busyLanes, runAgentTurn, addLane, isolateLane, inheritProvider } = opts;
+  const { busy, runAgentTurn } = opts;
   const [routines, setRoutines] = useState<Routine[]>([]);
   const routinesReady = useRef(false);
   const [showRoutines, setShowRoutines] = useState(false);
@@ -58,7 +51,6 @@ export function useRoutines(opts: {
               prompt: r.prompt.slice(0, 8000),
               everyMs: em <= 0 ? 0 : Math.max(MIN_EVERY_MS, em),
               enabled: r.enabled !== false,
-              laneId: typeof r.laneId === "string" ? r.laneId : undefined,
               lastRun: typeof r.lastRun === "number" ? r.lastRun : undefined,
               nextRun: typeof r.nextRun === "number" ? r.nextRun : undefined,
               runCount: typeof r.runCount === "number" ? r.runCount : 0,
@@ -101,44 +93,31 @@ export function useRoutines(opts: {
     setNewRoutine({ name: "", prompt: "", everyMs: 60 * 60 * 1000 });
   }
 
-  // Run one routine in its dedicated lane (created lazily, isolated
-  // immediately, reused after).
+  // Run a routine in THIS window (it is this window's scheduled job).
+  // If a turn is already running, defer instead of piling up.
   async function runRoutine(r: Routine) {
-    let lid = r.laneId;
-    if (!lid || !lanes.some((l) => l.id === lid)) {
-      lid = addLane(workspaceRoot, cwd, inheritProvider, {
-        name: r.name.slice(0, 40) || "Routine",
-        activate: false,
-      });
-      persistRoutines(routines.map((x) => (x.id === r.id ? { ...x, laneId: lid } : x)));
-      await isolateLane(lid, workspaceRoot);
-    }
-    if (busyLanes[lid]) {
-      persistRoutines(routines.map((x) => (x.id === r.id ? { ...x, nextRun: Date.now() + 5 * 60 * 1000 } : x)));
+    if (busy) {
+      setRoutines((prev) =>
+        saveNow(prev.map((x) => (x.id === r.id ? { ...x, nextRun: Date.now() + 5 * 60 * 1000 } : x))),
+      );
       return;
     }
     const now = Date.now();
     setRoutines((prev) =>
-      prev.map((x) =>
-        x.id === r.id ? { ...x, lastRun: now, runCount: x.runCount + 1, nextRun: x.everyMs > 0 ? now + x.everyMs : undefined } : x,
+      saveNow(
+        prev.map((x) =>
+          x.id === r.id ? { ...x, lastRun: now, runCount: x.runCount + 1, nextRun: x.everyMs > 0 ? now + x.everyMs : undefined } : x,
+        ),
       ),
     );
-    try {
-      await routinesSave(
-        JSON.stringify({
-          version: 1,
-          routines: routines.map((x) =>
-            x.id === r.id ? { ...x, lastRun: now, runCount: x.runCount + 1, nextRun: x.everyMs > 0 ? now + x.everyMs : undefined } : x,
-          ),
-        }),
-      );
-    } catch {
-      /* ignore */
-    }
     runAgentTurn(
-      lid,
       `🔁 Routine "${r.name}" scheduled run:\n${r.prompt}\n\n[Be concise. Record durable outcomes/decisions in Memory via nexa_write.]`,
     );
+  }
+
+  function saveNow(next: Routine[]): Routine[] {
+    routinesSave(JSON.stringify({ version: 1, routines: next })).catch(() => {});
+    return next;
   }
 
   return {

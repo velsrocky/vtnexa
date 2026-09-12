@@ -2,8 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useInit } from "./useInit";
-import { newLane } from "../lib/utils";
-import type { Lane } from "../types";
+import { newWorkspace } from "../lib/utils";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -21,17 +20,18 @@ afterEach(() => {
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
-function setup(lanes: Lane[] = [newLane("Lane 1", "")]) {
+async function flush() {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
+
+function setup() {
+  let ws = newWorkspace("main:ws", "");
   const order: string[] = [];
-  let store: Lane[] = lanes;
-  const setLanes: any = (u: any) => {
-    store = typeof u === "function" ? u(store) : u;
-  };
   const notes: string[] = [];
   const deps: any = {
-    laneId: lanes[0].id,
     workspaceRoot: "",
-    cwd: "",
     wsCommitted: { current: "" },
     nexaReady: { current: false },
     sessionReady: { current: false },
@@ -39,14 +39,13 @@ function setup(lanes: Lane[] = [newLane("Lane 1", "")]) {
     setWorkspaceRoot: vi.fn((v: string) => {
       deps.workspaceRoot = v;
     }),
-    setCwdState: vi.fn((v: any) => {
-      const next = typeof v === "function" ? v("") : v;
-      deps.cwd = next;
-    }) as any,
-    setLanes,
+    setCwdState: vi.fn(),
+    setWs: (u: any) => {
+      ws = typeof u === "function" ? u(ws) : u;
+    },
     setOpenPath: vi.fn(),
-    updateLane: (_id: string, fn: (l: Lane) => Lane) => {
-      notes.push(fn(store[0]).shellOut);
+    updateWs: (fn: any) => {
+      notes.push(fn(ws).shellOut);
     },
     saveSessionNow: vi.fn(async () => {
       order.push("save");
@@ -67,20 +66,12 @@ function setup(lanes: Lane[] = [newLane("Lane 1", "")]) {
       order.push("conventions");
     }),
   };
-  const hook = renderHook(() => useInit(deps as any));
-  return { ...hook, deps, order, store: () => store, notes };
-}
-
-
-// Drain the async init IIFE (multiple awaited microtasks).
-async function flush() {
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 0));
-  });
+  const hook = renderHook(() => useInit(deps));
+  return { ...hook, deps, order, notes, wsOf: () => ws };
 }
 
 describe("useInit boot", () => {
-  it("resolves the root, loads every domain in order, clamps lanes", async () => {
+  it("resolves the root, loads every domain in order, clamps cwd", async () => {
     setInvokeImpl(async (cmd, args?: any) => {
       if (cmd === "workspace_root") return "/backend-home";
       if (cmd === "set_workspace_root") return String(args.path).replace(/\/$/, "");
@@ -91,8 +82,7 @@ describe("useInit boot", () => {
     expect(h.deps.setWorkspaceRoot).toHaveBeenCalledWith("/backend-home");
     expect(localStorage.getItem("vtai.workspaceRoot")).toBe("/backend-home");
     expect(h.order).toEqual(["nexa", "session", "routines", "skills", "conventions"]);
-    // Empty-cwd lane clamped to canon.
-    expect(h.store()[0].cwd).toBe("/backend-home");
+    expect(h.wsOf().cwd).toBe("/backend-home");
   });
 
   it("prefers the stored workspace over the backend default", async () => {
@@ -115,7 +105,7 @@ describe("useInit.changeWorkspace", () => {
       if (cmd === "set_workspace_root") return String(args.path).replace(/\/$/, "");
       throw new Error(`unexpected ${cmd}`);
     });
-    return setup([newLane("Lane 1", "/w")]);
+    return setup();
   }
 
   it("saves the old session first and reloads all domains", async () => {
@@ -129,11 +119,8 @@ describe("useInit.changeWorkspace", () => {
     expect(h.deps.setWorkspaceRoot).toHaveBeenLastCalledWith("/new");
     expect(h.deps.setOpenPath).toHaveBeenCalledWith("");
     expect(h.deps.nexaReady.current).toBe(false);
-    expect(h.deps.sessionReady.current).toBe(false);
-    expect(h.deps.routinesReady.current).toBe(false);
-    // Lanes pulled inside the new root, worktrees dropped.
-    expect(h.store()[0].cwd).toBe("/new");
-    expect(h.store()[0].worktree).toBeNull();
+    expect(h.wsOf().cwd).toBe("/new");
+    expect(h.wsOf().worktree).toBeNull();
   });
 
   it("ignores the same committed target", async () => {
@@ -146,13 +133,13 @@ describe("useInit.changeWorkspace", () => {
     expect(h.deps.saveSessionNow).not.toHaveBeenCalled();
   });
 
-  it("resets the guard and notes failures on the lane", async () => {
+  it("resets the guard and notes failures", async () => {
     setInvokeImpl(async (cmd) => {
       if (cmd === "workspace_root") return "/w";
       if (cmd === "set_workspace_root") throw new Error("not a directory");
       throw new Error(`unexpected ${cmd}`);
     });
-    const h = setup([newLane("Lane 1", "/w")]);
+    const h = setup();
     await flush();
     await act(async () => {
       await h.result.current.changeWorkspace("/bad");

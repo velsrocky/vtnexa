@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { baseName, clampW, dirName, fmtDur, isWithin, newLane, uid } from "./utils";
+import { baseName, clampW, dirName, fmtDur, isWithin, newWorkspace, uid } from "./utils";
 
 describe("uid", () => {
   it("returns short unique strings", () => {
@@ -56,10 +56,10 @@ describe("clampW", () => {
   });
 });
 
-describe("newLane", () => {
-  it("builds an isolated lane with zeroed usage", () => {
-    const l = newLane("Lane 1", "/w");
-    expect(l.name).toBe("Lane 1");
+describe("newWorkspace", () => {
+  it("builds a workspace with zeroed usage and defaults", () => {
+    const l = newWorkspace("main:ws", "/w");
+    expect(l.id).toBe("main:ws");
     expect(l.cwd).toBe("/w");
     expect(l.messages).toEqual([]);
     expect(l.pendingDiff).toBeNull();

@@ -2,8 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useShell } from "./useShell";
-import { newLane } from "../lib/utils";
-import type { Lane } from "../types";
+import { newWorkspace } from "../lib/utils";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -21,25 +20,23 @@ afterEach(() => {
 });
 
 function setup() {
-  let store: Lane[] = [newLane("L", "/w")];
-  const setLanes: any = (u: any) => {
-    store = typeof u === "function" ? u(store) : u;
-  };
-  const busy: [string, boolean][] = [];
+  let ws = newWorkspace("main:ws", "/w");
+  const busy: boolean[] = [];
   const hook = renderHook(() =>
     useShell({
-      lane: store[0],
+      ws,
       cwd: "/w",
-      setLanes,
-      setLaneBusy: (id, v) => busy.push([id, v]),
-      updateLane: (id, fn) => setLanes((ls: Lane[]) => ls.map((l) => (l.id === id ? fn(l) : l))),
+      setBusy: (v) => busy.push(v),
+      updateWs: (fn) => {
+        ws = fn(ws);
+      },
     }),
   );
-  return { ...hook, busy, lane: () => store[0] };
+  return { ...hook, wsOf: () => ws, busy };
 }
 
 describe("useShell", () => {
-  it("appends command output to the lane log", async () => {
+  it("appends command output to the shell log", async () => {
     setInvokeImpl(async (cmd, args?: any) => {
       expect(cmd).toBe("shell_run");
       expect(args).toMatchObject({ cwd: "/w" });
@@ -49,10 +46,9 @@ describe("useShell", () => {
     await act(async () => {
       await h.result.current.runShell();
     });
-    expect(h.lane().shellOut).toContain("$ ls -la");
-    expect(h.lane().shellOut).toContain("total 0");
-    expect(h.lane().shellOut).toContain("(exit 0)");
-    expect(h.busy).toEqual([[h.lane().id, true], [h.lane().id, false]]);
+    expect(h.wsOf().shellOut).toContain("$ ls -la");
+    expect(h.wsOf().shellOut).toContain("(exit 0)");
+    expect(h.busy).toEqual([true, false]);
   });
 
   it("logs shell errors without throwing", async () => {
@@ -63,18 +59,17 @@ describe("useShell", () => {
     await act(async () => {
       await h.result.current.runShell();
     });
-    expect(h.lane().shellOut).toMatch(/shell error/);
-    expect(h.busy[h.busy.length - 1]).toEqual([h.lane().id, false]);
+    expect(h.wsOf().shellOut).toMatch(/shell error/);
+    expect(h.busy[h.busy.length - 1]).toBe(false);
   });
 
-  it("tracks a per-lane command draft", () => {
+  it("tracks the command draft", () => {
     setInvokeImpl(async () => ({}));
-    const h = setup();
-    expect(h.result.current.shellCmd).toBe("ls -la");
+    const { result } = setup();
+    expect(result.current.shellCmd).toBe("ls -la");
     act(() => {
-      h.result.current.onShellCmdChange("echo hi");
+      result.current.onShellCmdChange("echo hi");
     });
-    h.rerender();
-    expect(h.result.current.shellCmd).toBe("echo hi");
+    expect(result.current.shellCmd).toBe("echo hi");
   });
 });

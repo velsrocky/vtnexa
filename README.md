@@ -17,12 +17,13 @@ without your explicit approval.
   agent can navigate, read, click, type, and screenshot (vision).
 - **Nexa Pad / Plan / Memory** — live shared notes at `.nexa/`; Memory is
   durable cross-session context.
-- **Lanes + routines** — each lane is its own app instance: own provider
-  config, own git worktree + branch (auto-isolated, cleaned on close), own
-  tabs/UI/chat/audit. Routines run in dedicated background lanes with
-  review-later dots.
+- **Windows + routines** — every OS window is an independent VTNexa
+  instance: own workspace folder, provider config, PTY, editor tabs, chat,
+  audit, and session file. ⧉ New Window (or a second app launch) opens a
+  sibling window; `⎇ isolate` puts a window on its own git worktree +
+  branch. Routines run scheduled turns in this window.
 - **Git tab** — status, diffs, log, commits; Approve-&-commit from the gate.
-- **Transparency** — per-lane tokens, estimated cost, tool timing, and a
+- **Transparency** — per-window tokens, estimated cost, tool timing, and a
   persisted audit trail of every tool call + decision.
 - **Skills** — 8 ready-made slash skills (`/commit`, `/review`, `/explain`, `/map`, `/fix`, `/refactor`, `/test`, `/docs`) in `.vtnexa/skills/`. Invoke as `/name` in Commander or let the agent load them via `skill_read`; project `AGENTS.md`/`CLAUDE.md` is auto-loaded every turn.
 - **Local by default** — keys in the OS keychain, files and sessions under

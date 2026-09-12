@@ -2,9 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useEditor } from "./useEditor";
-import { newLane } from "../lib/utils";
-import type { Lane } from "../types";
-import type { CenterTab } from "../types";
+import { newWorkspace } from "../lib/utils";
+import type { CenterTab, Workspace } from "../types";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -17,68 +16,47 @@ function setInvokeImpl(fn: (cmd: string, args?: any) => Promise<any>) {
   (globalThis as any).__invokeImpl = fn;
 }
 
-const realConfirm = (window as any).confirm;
-
 afterEach(() => {
-  (window as any).confirm = realConfirm;
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
-function setup(initialLane?: Lane, tab: CenterTab = "edit") {
-  let store: Lane[] = [initialLane ?? newLane("L", "/w")];
-  const setLanes: any = (u: any) => {
-    store = typeof u === "function" ? u(store) : u;
+function setup(over: Partial<Workspace> = {}, tab: CenterTab = "edit") {
+  let ws: Workspace = { ...newWorkspace("main:ws", "/w"), id: "main:ws", ...over };
+  const setWs: any = (u: any) => {
+    ws = typeof u === "function" ? u(ws) : u;
   };
-  const calls = {
-    centerTab: [] as string[],
-    commitMsg: [] as string[],
-    audits: [] as any[],
-    refreshFiles: 0,
-    refreshGit: 0,
-    refreshSkills: 0,
-  };
-  let centerTab: CenterTab = tab;
   const hook = renderHook(() =>
     useEditor({
-      lane: store[0],
-      setLanes,
-      updateLane: (id, fn) => setLanes((ls: Lane[]) => ls.map((l) => (l.id === id ? fn(l) : l))),
+      ws,
+      setWs,
+      updateWs: (fn) => {
+        ws = fn(ws);
+      },
       workspaceRoot: "/w",
       cwd: "/w",
-      centerTab,
-      setCenterTab: (t) => calls.centerTab.push(t),
-      refreshFiles: async () => {
-        calls.refreshFiles++;
-      },
-      refreshGit: () => {
-        calls.refreshGit++;
-      },
-      refreshSkills: () => {
-        calls.refreshSkills++;
-      },
+      centerTab: tab,
+      setCenterTab: vi.fn(),
+      refreshFiles: async () => {},
+      refreshGit: vi.fn(),
+      refreshSkills: vi.fn(),
       commitMsg: "",
-      setCommitMsg: (v) => calls.commitMsg.push(v),
-      logAudit: (_id, e) => calls.audits.push(e),
+      setCommitMsg: vi.fn(),
+      logAudit: vi.fn(),
     }),
   );
-  const lane = () => store[0];
-  const refresh = () => hook.rerender();
-  return { ...hook, calls, lane, refresh, store: () => store };
+  return { ...hook, wsOf: () => ws, refresh: () => hook.rerender() };
 }
 
-function laneWith(over: Partial<Lane>): Lane {
-  return { ...newLane("L", "/w"), id: "lane1", ...over };
-}
 describe("useEditor preview", () => {
   it("renders markdown to a sanitized doc", async () => {
     setInvokeImpl(async () => "");
     const h = setup(
-      laneWith({
+      {
         tabs: ["/w/a.md"],
         buffers: { "/w/a.md": "# Title" },
         originals: { "/w/a.md": "# Title" },
         openPath: "/w/a.md",
-      }),
+      },
       "preview",
     );
     await act(async () => {});
@@ -94,15 +72,12 @@ describe("useEditor composition", () => {
       if (cmd === "fs_write") return {};
       throw new Error(`unexpected ${cmd}`);
     });
-    const h = setup(
-      laneWith({
-        tabs: ["/w/a.txt"],
-        buffers: { "/w/a.txt": "v1" },
-        originals: { "/w/a.txt": "old" },
-        openPath: "/w/a.txt",
-      }),
-    );
-    // Edit through the tab API, then stage: the gate must see v2, not v1.
+    const h = setup({
+      tabs: ["/w/a.txt"],
+      buffers: { "/w/a.txt": "v1" },
+      originals: { "/w/a.txt": "old" },
+      openPath: "/w/a.txt",
+    });
     act(() => {
       h.result.current.setEditorText("v2");
     });
@@ -110,13 +85,12 @@ describe("useEditor composition", () => {
     act(() => {
       h.result.current.saveFile();
     });
-    expect(h.lane().pendingDiff).toEqual({ path: "/w/a.txt", content: "v2", original: "old" });
-    // Rerender so the gate sees the staged diff (React does this per update).
+    expect(h.wsOf().pendingDiff).toEqual({ path: "/w/a.txt", content: "v2", original: "old" });
     h.refresh();
     await act(async () => {
       await h.result.current.approveDiff();
     });
-    expect(h.lane().pendingDiff).toBeNull();
-    expect(h.lane().buffers["/w/a.txt"]).toBe("v2");
+    expect(h.wsOf().pendingDiff).toBeNull();
+    expect(h.wsOf().buffers["/w/a.txt"]).toBe("v2");
   });
 });

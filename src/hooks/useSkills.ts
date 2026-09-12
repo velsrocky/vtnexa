@@ -1,13 +1,12 @@
 import { useState } from "react";
-import type { Lane, SkillInfo } from "../types";
+import type { SkillInfo, Workspace } from "../types";
 import { fsRead, fsWrite, skillList } from "../lib/tauri";
 
 // Project skills (.vtnexa/skills/*.md) + conventions (AGENTS.md/CLAUDE.md).
 // The agent loads skill bodies on demand; conventions ride every turn.
 export function useSkills(opts: {
   workspaceRoot: string;
-  lane: Lane;
-  updateLane: (id: string, fn: (l: Lane) => Lane) => void;
+  updateWs: (fn: (w: Workspace) => Workspace) => void;
   openFile: (path: string) => void;
 }) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -44,7 +43,7 @@ export function useSkills(opts: {
     if (!raw) return;
     const name = raw.trim();
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
-      opts.updateLane(opts.lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\ninvalid skill name` }));
+      opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\ninvalid skill name` }));
       return;
     }
     if (!opts.workspaceRoot) return;
@@ -54,7 +53,7 @@ export function useSkills(opts: {
       await refreshSkills();
       opts.openFile(path);
     } catch (e) {
-      opts.updateLane(opts.lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\nskill create failed: ${e}` }));
+      opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nskill create failed: ${e}` }));
     }
   }
 

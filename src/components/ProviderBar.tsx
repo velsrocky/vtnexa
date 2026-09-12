@@ -2,8 +2,8 @@ import type { ProviderConfig } from "../types";
 import Combo from "./Combo";
 import { asKind, type ProviderEntry } from "../lib/providerHistory";
 
-export default function ProviderBar({ laneName, editCfg, provHist, provModels, modelsNote, keychainOk, setEditCfg, refreshModels }: {
-  laneName: string;
+export default function ProviderBar({ windowLabel, editCfg, provHist, provModels, modelsNote, keychainOk, setEditCfg, refreshModels }: {
+  windowLabel: string;
   editCfg: ProviderConfig;
   provHist: ProviderEntry[];
   provModels: string[];
@@ -14,8 +14,8 @@ export default function ProviderBar({ laneName, editCfg, provHist, provModels, m
 }) {
   return (
     <div className="configbar">
-      <span className="muted small" title="Every lane has its own provider - this edits the active lane's">
-        {`⚙ ${laneName}`}
+      <span className="muted small" title="Every window has its own provider - this edits this window's">
+        {`⚙ ${windowLabel}`}
       </span>
       <select
         value={editCfg.kind ?? "auto"}

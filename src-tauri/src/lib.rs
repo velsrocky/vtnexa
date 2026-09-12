@@ -124,8 +124,11 @@ fn safe_absolute(raw: String, what: &str) -> Result<std::path::PathBuf, String> 
     Ok(norm)
 }
 
-// ---- Workspace root: allowlist sandbox ----
-struct WorkspaceRoot(Mutex<std::path::PathBuf>);
+// ---- Workspace root: allowlist sandbox, per window ----
+// Each top-level window is an independent app instance with its own root;
+// commands resolve it from the calling window's label.
+#[derive(Default)]
+struct WorkspaceRoots(Mutex<HashMap<String, std::path::PathBuf>>);
 
 fn default_root() -> std::path::PathBuf {
     if let Ok(h) = std::env::var("HOME") {
@@ -136,17 +139,14 @@ fn default_root() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
 }
 
-impl Default for WorkspaceRoot {
-    fn default() -> Self {
-        let r = default_root();
-        // Canonicalize best-effort; fall back to lexical.
-        let canon = r.canonicalize().unwrap_or(r);
-        Self(Mutex::new(canon))
+fn root_snapshot(state: &tauri::State<'_, WorkspaceRoots>, label: &str) -> std::path::PathBuf {
+    let g = state.0.lock().ok();
+    if let Some(r) = g.as_ref().and_then(|m| m.get(label)) {
+        return r.clone();
     }
-}
-
-fn root_snapshot(state: &tauri::State<'_, WorkspaceRoot>) -> Result<std::path::PathBuf, String> {
-    state.0.lock().map(|g| g.clone()).map_err(|e| e.to_string())
+    // Fresh window: default to $HOME (set_workspace_root canonicalizes).
+    let r = default_root();
+    r.canonicalize().unwrap_or(r)
 }
 
 /// Enforce allowlist: target (lexically normalized, absolute) must live inside root.
@@ -203,24 +203,25 @@ fn ensure_within_root(
 }
 
 fn checked_path(
-    state: &tauri::State<'_, WorkspaceRoot>,
+    state: &tauri::State<'_, WorkspaceRoots>,
+    label: &str,
     raw: String,
     what: &str,
 ) -> Result<std::path::PathBuf, String> {
     let norm = safe_absolute(raw, what)?;
-    let root = root_snapshot(state)?;
+    let root = root_snapshot(state, label);
     ensure_within_root(&norm, &root, what)?;
     Ok(norm)
 }
 
 #[tauri::command]
-fn workspace_root(state: tauri::State<'_, WorkspaceRoot>) -> Result<String, String> {
-    Ok(root_snapshot(&state)?.to_string_lossy().to_string())
+fn workspace_root(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>) -> Result<String, String> {
+    Ok(root_snapshot(&state, window.label()).to_string_lossy().to_string())
 }
 
 #[tauri::command]
 fn set_workspace_root(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     path: String,
 ) -> Result<String, String> {
     let norm = safe_absolute(path, "workspace")?;
@@ -229,7 +230,11 @@ fn set_workspace_root(
     }
     let canon = norm.canonicalize().map_err(|e| e.to_string())?;
     reject_sensitive(&canon)?;
-    *state.0.lock().map_err(|e| e.to_string())? = canon.clone();
+    state
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(window.label().to_string(), canon.clone());
     Ok(canon.to_string_lossy().to_string())
 }
 
@@ -253,8 +258,8 @@ fn nexa_path_for(root: &std::path::Path, kind: &str) -> Result<std::path::PathBu
 }
 
 #[tauri::command]
-fn nexa_read(state: tauri::State<'_, WorkspaceRoot>, kind: String) -> Result<String, String> {
-    let root = root_snapshot(&state)?;
+fn nexa_read(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, kind: String) -> Result<String, String> {
+    let root = root_snapshot(&state, window.label());
     let path = nexa_path_for(&root, &kind)?;
     match std::fs::read_to_string(&path) {
         Ok(s) => Ok(truncate_chars(s, NEXA_MAX_BYTES)),
@@ -265,7 +270,7 @@ fn nexa_read(state: tauri::State<'_, WorkspaceRoot>, kind: String) -> Result<Str
 
 #[tauri::command]
 fn nexa_write(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     kind: String,
     content: String,
 ) -> Result<(), String> {
@@ -279,7 +284,7 @@ fn nexa_write(
             NEXA_MAX_BYTES
         ));
     }
-    let root = root_snapshot(&state)?;
+    let root = root_snapshot(&state, window.label());
     let path = nexa_path_for(&root, &kind)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -297,8 +302,8 @@ fn session_path_for(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tauri::command]
-fn session_load(state: tauri::State<'_, WorkspaceRoot>) -> Result<String, String> {
-    let root = root_snapshot(&state)?;
+fn session_load(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>) -> Result<String, String> {
+    let root = root_snapshot(&state, window.label());
     let path = session_path_for(&root);
     match std::fs::read_to_string(&path) {
         Ok(s) => Ok(s),
@@ -308,7 +313,7 @@ fn session_load(state: tauri::State<'_, WorkspaceRoot>) -> Result<String, String
 }
 
 #[tauri::command]
-fn session_save(state: tauri::State<'_, WorkspaceRoot>, content: String) -> Result<(), String> {
+fn session_save(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, content: String) -> Result<(), String> {
     if content.contains('\0') {
         return Err("session: invalid content".to_string());
     }
@@ -319,7 +324,7 @@ fn session_save(state: tauri::State<'_, WorkspaceRoot>, content: String) -> Resu
             SESSION_MAX_BYTES
         ));
     }
-    let root = root_snapshot(&state)?;
+    let root = root_snapshot(&state, window.label());
     let path = session_path_for(&root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -335,8 +340,8 @@ fn routines_path_for(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tauri::command]
-fn routines_load(state: tauri::State<'_, WorkspaceRoot>) -> Result<String, String> {
-    let root = root_snapshot(&state)?;
+fn routines_load(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>) -> Result<String, String> {
+    let root = root_snapshot(&state, window.label());
     let path = routines_path_for(&root);
     match std::fs::read_to_string(&path) {
         Ok(s) => Ok(s),
@@ -346,7 +351,7 @@ fn routines_load(state: tauri::State<'_, WorkspaceRoot>) -> Result<String, Strin
 }
 
 #[tauri::command]
-fn routines_save(state: tauri::State<'_, WorkspaceRoot>, content: String) -> Result<(), String> {
+fn routines_save(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, content: String) -> Result<(), String> {
     if content.contains('\0') {
         return Err("routines: invalid content".to_string());
     }
@@ -357,7 +362,7 @@ fn routines_save(state: tauri::State<'_, WorkspaceRoot>, content: String) -> Res
             ROUTINES_MAX_BYTES
         ));
     }
-    let root = root_snapshot(&state)?;
+    let root = root_snapshot(&state, window.label());
     let path = routines_path_for(&root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -427,10 +432,10 @@ fn key_set(base_url: String, model: String, secret: String) -> Result<(), String
 
 #[tauri::command]
 fn fs_list(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     path: String,
 ) -> Result<Vec<FileEntry>, String> {
-    let safe = checked_path(&state, path, "fs_list")?;
+    let safe = checked_path(&state, window.label(), path, "fs_list")?;
     let entries = std::fs::read_dir(&safe).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for e in entries {
@@ -455,8 +460,8 @@ fn fs_list(
 }
 
 #[tauri::command]
-fn fs_read(state: tauri::State<'_, WorkspaceRoot>, path: String) -> Result<String, String> {
-    let safe = checked_path(&state, path, "fs_read")?;
+fn fs_read(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, path: String) -> Result<String, String> {
+    let safe = checked_path(&state, window.label(), path, "fs_read")?;
     let meta = std::fs::metadata(&safe).map_err(|e| e.to_string())?;
     if meta.len() > MAX_READ_BYTES {
         return Err(format!(
@@ -470,7 +475,7 @@ fn fs_read(state: tauri::State<'_, WorkspaceRoot>, path: String) -> Result<Strin
 
 #[tauri::command]
 fn fs_write(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     path: String,
     content: String,
 ) -> Result<(), String> {
@@ -481,7 +486,7 @@ fn fs_write(
             MAX_WRITE_BYTES
         ));
     }
-    let safe = checked_path(&state, path, "fs_write")?;
+    let safe = checked_path(&state, window.label(), path, "fs_write")?;
     if let Some(parent) = safe.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -586,7 +591,7 @@ fn glob_matches(pat: &str, name: &str) -> bool {
 
 #[tauri::command]
 fn fs_search(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     query: String,
     path: Option<String>,
     glob: Option<String>,
@@ -600,9 +605,9 @@ fn fs_search(
     if query.len() > 512 {
         return Err("fs_search: query too long (512 max)".to_string());
     }
-    let root = root_snapshot(&state)?;
+    let root = root_snapshot(&state, window.label());
     let start = match path {
-        Some(p) if !p.trim().is_empty() => checked_path(&state, p, "fs_search.path")?,
+        Some(p) if !p.trim().is_empty() => checked_path(&state, window.label(), p, "fs_search.path")?,
         _ => root.clone(),
     };
     if !start.is_dir() {
@@ -684,7 +689,7 @@ fn fs_search(
 
 #[tauri::command]
 fn fs_glob(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     pattern: String,
     path: Option<String>,
 ) -> Result<Vec<String>, String> {
@@ -695,9 +700,9 @@ fn fs_glob(
     if pattern.len() > 512 {
         return Err("fs_glob: pattern too long".to_string());
     }
-    let root = root_snapshot(&state)?;
+    let root = root_snapshot(&state, window.label());
     let start = match path {
-        Some(p) if !p.trim().is_empty() => checked_path(&state, p, "fs_glob.path")?,
+        Some(p) if !p.trim().is_empty() => checked_path(&state, window.label(), p, "fs_glob.path")?,
         _ => root.clone(),
     };
     if !start.is_dir() {
@@ -744,11 +749,15 @@ fn git_cmd(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-fn git_cwd(state: &tauri::State<'_, WorkspaceRoot>, cwd: String) -> Result<std::path::PathBuf, String> {
+fn git_cwd(
+    state: &tauri::State<'_, WorkspaceRoots>,
+    label: &str,
+    cwd: String,
+) -> Result<std::path::PathBuf, String> {
     let dir = if cwd.is_empty() || cwd == "." {
-        root_snapshot(state)?
+        root_snapshot(state, label)
     } else {
-        checked_path(state, cwd, "git.cwd")?
+        checked_path(state, label, cwd, "git.cwd")?
     };
     if !dir.is_dir() {
         return Err("git.cwd: not a directory".to_string());
@@ -770,8 +779,8 @@ pub struct GitStatus {
 }
 
 #[tauri::command]
-fn git_status(state: tauri::State<'_, WorkspaceRoot>, cwd: String) -> Result<GitStatus, String> {
-    let dir = git_cwd(&state, cwd)?;
+fn git_status(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, cwd: String) -> Result<GitStatus, String> {
+    let dir = git_cwd(&state, window.label(), cwd)?;
     let root = git_cmd(&dir, &["rev-parse", "--show-toplevel"])
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| dir.to_string_lossy().to_string());
@@ -808,19 +817,19 @@ fn git_status(state: tauri::State<'_, WorkspaceRoot>, cwd: String) -> Result<Git
 
 #[tauri::command]
 fn git_diff(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     path: Option<String>,
     staged: Option<bool>,
 ) -> Result<String, String> {
-    let dir = git_cwd(&state, cwd)?;
+    let dir = git_cwd(&state, window.label(), cwd)?;
     let mut argv: Vec<String> = vec!["diff".into(), "--no-color".into(), "--no-ext-diff".into()];
     if staged.unwrap_or(false) {
         argv.push("--cached".into());
     }
     if let Some(p) = path {
         if !p.trim().is_empty() {
-            let safe = checked_path(&state, p, "git_diff.path")?;
+            let safe = checked_path(&state, window.label(), p, "git_diff.path")?;
             argv.push("--".into());
             argv.push(safe.to_string_lossy().to_string());
         }
@@ -837,7 +846,7 @@ pub struct GitCommitOut {
 
 #[tauri::command]
 fn git_commit(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     message: String,
     files: Option<Vec<String>>,
@@ -852,7 +861,7 @@ fn git_commit(
     if message.contains('\0') {
         return Err("git_commit: invalid message".to_string());
     }
-    let dir = git_cwd(&state, cwd)?;
+    let dir = git_cwd(&state, window.label(), cwd)?;
     let list = files.unwrap_or_default();
     if list.len() > 100 {
         return Err("git_commit: too many files (100 max)".to_string());
@@ -861,7 +870,7 @@ fn git_commit(
     if !list.is_empty() {
         let mut add_argv: Vec<String> = vec!["add".into(), "--".into()];
         for f in &list {
-            let safe = checked_path(&state, f.clone(), "git_commit.files")?;
+            let safe = checked_path(&state, window.label(), f.clone(), "git_commit.files")?;
             add_argv.push(safe.to_string_lossy().to_string());
         }
         let addrefs: Vec<&str> = add_argv.iter().map(|s| s.as_str()).collect();
@@ -882,11 +891,11 @@ pub struct GitLogEntry {
 
 #[tauri::command]
 fn git_log(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     limit: Option<u32>,
 ) -> Result<Vec<GitLogEntry>, String> {
-    let dir = git_cwd(&state, cwd)?;
+    let dir = git_cwd(&state, window.label(), cwd)?;
     let n = limit.unwrap_or(20).clamp(1, 50);
     let out = git_cmd(
         &dir,
@@ -914,8 +923,8 @@ fn git_log(
 }
 
 #[tauri::command]
-fn git_init(state: tauri::State<'_, WorkspaceRoot>, cwd: String) -> Result<String, String> {
-    let dir = git_cwd(&state, cwd)?;
+fn git_init(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, cwd: String) -> Result<String, String> {
+    let dir = git_cwd(&state, window.label(), cwd)?;
     git_cmd(&dir, &["init"])?;
     Ok(dir.to_string_lossy().to_string())
 }
@@ -939,14 +948,14 @@ pub struct GitMergeOut {
 
 #[tauri::command]
 fn git_merge(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     branch: String,
 ) -> Result<GitMergeOut, String> {
     if !valid_merge_branch(&branch) {
         return Err("git_merge: branch must match vtnexa/[a-z0-9-]{1,48}".to_string());
     }
-    let dir = git_cwd(&state, cwd)?;
+    let dir = git_cwd(&state, window.label(), cwd)?;
     let out = git_cmd(&dir, &["merge", "--no-edit", &branch])?;
     Ok(GitMergeOut {
         output: truncate_chars(out, 20_000),
@@ -1021,23 +1030,23 @@ fn worktree_add_inner(
 
 #[tauri::command]
 fn git_worktree_add(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     name: String,
 ) -> Result<GitWorktree, String> {
-    let dir = git_cwd(&state, cwd)?;
-    let root = root_snapshot(&state)?;
+    let dir = git_cwd(&state, window.label(), cwd)?;
+    let root = root_snapshot(&state, window.label());
     worktree_add_inner(&dir, &root, &name)
 }
 
 #[tauri::command]
 fn git_worktree_remove(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     path: String,
 ) -> Result<(), String> {
-    let dir = git_cwd(&state, cwd)?;
-    let p = checked_path(&state, path, "git_worktree_remove.path")?;
+    let dir = git_cwd(&state, window.label(), cwd)?;
+    let p = checked_path(&state, window.label(), path, "git_worktree_remove.path")?;
     git_cmd(&dir, &["worktree", "remove", "--force", &p.to_string_lossy()])?;
     let _ = git_cmd(&dir, &["worktree", "prune"]);
     Ok(())
@@ -1045,10 +1054,10 @@ fn git_worktree_remove(
 
 #[tauri::command]
 fn git_worktree_list(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
 ) -> Result<Vec<GitWorktree>, String> {
-    let dir = git_cwd(&state, cwd)?;
+    let dir = git_cwd(&state, window.label(), cwd)?;
     let out = git_cmd(&dir, &["worktree", "list", "--porcelain"])?;
     let mut list: Vec<GitWorktree> = Vec::new();
     let mut cur: Option<(String, String)> = None;
@@ -1075,8 +1084,8 @@ fn git_worktree_list(
 // (parents included) or dirs and refuses to overwrite; rename refuses to
 // overwrite; delete refuses the workspace root itself.
 #[tauri::command]
-fn fs_create(state: tauri::State<'_, WorkspaceRoot>, path: String, is_dir: Option<bool>) -> Result<String, String> {
-    let safe = checked_path(&state, path, "fs_create")?;
+fn fs_create(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, path: String, is_dir: Option<bool>) -> Result<String, String> {
+    let safe = checked_path(&state, window.label(), path, "fs_create")?;
     if safe.exists() {
         return Err("fs_create: already exists".to_string());
     }
@@ -1095,12 +1104,12 @@ fn fs_create(state: tauri::State<'_, WorkspaceRoot>, path: String, is_dir: Optio
 
 #[tauri::command]
 fn fs_rename(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     old_path: String,
     new_path: String,
 ) -> Result<String, String> {
-    let from = checked_path(&state, old_path, "fs_rename.from")?;
-    let to = checked_path(&state, new_path, "fs_rename.to")?;
+    let from = checked_path(&state, window.label(), old_path, "fs_rename.from")?;
+    let to = checked_path(&state, window.label(), new_path, "fs_rename.to")?;
     if !from.exists() {
         return Err("fs_rename: source does not exist".to_string());
     }
@@ -1118,12 +1127,12 @@ fn fs_rename(
 
 #[tauri::command]
 fn fs_delete(
-    state: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
     path: String,
     recursive: Option<bool>,
 ) -> Result<(), String> {
-    let safe = checked_path(&state, path, "fs_delete")?;
-    let root = root_snapshot(&state)?;
+    let safe = checked_path(&state, window.label(), path, "fs_delete")?;
+    let root = root_snapshot(&state, window.label());
     if safe == root {
         return Err("fs_delete: refusing to delete the workspace root".to_string());
     }
@@ -1205,8 +1214,8 @@ fn bundled_skills_dir() -> Option<std::path::PathBuf> {
 }
 
 #[tauri::command]
-fn skill_list(state: tauri::State<'_, WorkspaceRoot>, app: tauri::AppHandle) -> Result<Vec<SkillInfo>, String> {
-    let root = root_snapshot(&state)?;
+fn skill_list(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, app: tauri::AppHandle) -> Result<Vec<SkillInfo>, String> {
+    let root = root_snapshot(&state, window.label());
     let mut map = std::collections::HashMap::new();
     // Project skills first (win on collision).
     skill_entries(&root.join(".vtnexa").join("skills"), &mut map);
@@ -1223,11 +1232,11 @@ fn skill_list(state: tauri::State<'_, WorkspaceRoot>, app: tauri::AppHandle) -> 
 }
 
 #[tauri::command]
-fn skill_read(state: tauri::State<'_, WorkspaceRoot>, app: tauri::AppHandle, name: String) -> Result<String, String> {
+fn skill_read(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, app: tauri::AppHandle, name: String) -> Result<String, String> {
     if !valid_skill_name(&name) {
         return Err("skill_read: invalid skill name".to_string());
     }
-    let root = root_snapshot(&state)?;
+    let root = root_snapshot(&state, window.label());
     let candidates = [
         root.join(".vtnexa").join("skills").join(format!("{}.md", name)),
         app.path().resource_dir().ok().map(|r| r.join(".vtnexa").join("skills").join(format!("{}.md", name))).unwrap_or_default(),
@@ -1530,7 +1539,7 @@ fn shell_deny_reason(cmd: &str) -> Option<String> {
 
 #[tauri::command]
 fn shell_run(
-    ws: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow, ws: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     cmd: String,
 ) -> Result<ShellResult, String> {
@@ -1551,9 +1560,9 @@ fn shell_run(
     }
     // cwd must be inside the workspace root. "." resolves to the root for legacy callers.
     let dir = if cwd.is_empty() || cwd == "." {
-        root_snapshot(&ws)?
+        root_snapshot(&ws, window.label())
     } else {
-        let safe = checked_path(&ws, cwd, "shell_run.cwd")?;
+        let safe = checked_path(&ws, window.label(), cwd, "shell_run.cwd")?;
         if !safe.is_dir() {
             return Err("shell_run.cwd: not a directory".to_string());
         }
@@ -1606,10 +1615,12 @@ struct PtySession {
 struct PtyStore(Mutex<HashMap<String, PtySession>>);
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn pty_spawn(
     app: tauri::AppHandle,
     store: tauri::State<'_, PtyStore>,
-    ws: tauri::State<'_, WorkspaceRoot>,
+    window: tauri::WebviewWindow,
+    ws: tauri::State<'_, WorkspaceRoots>,
     id: String,
     cwd: String,
     cols: u16,
@@ -1623,9 +1634,9 @@ fn pty_spawn(
     pty_kill_inner(&store, &id);
     // Interactive PTY is NOT agent-gated, but it must stay inside the workspace.
     let dir = if cwd.is_empty() || cwd == "." {
-        root_snapshot(&ws)?
+        root_snapshot(&ws, window.label())
     } else {
-        let safe = checked_path(&ws, cwd, "pty_spawn.cwd")?;
+        let safe = checked_path(&ws, window.label(), cwd, "pty_spawn.cwd")?;
         if !safe.is_dir() {
             return Err("pty_spawn.cwd: not a directory".to_string());
         }
@@ -1747,42 +1758,104 @@ fn pty_kill(store: tauri::State<'_, PtyStore>, id: String) -> Result<(), String>
     Ok(())
 }
 
+fn next_window_label(app: &tauri::AppHandle) -> String {
+    let existing = app.webview_windows().len();
+    let mut n = existing + 1;
+    loop {
+        let label = format!("main-{n}");
+        if app.get_webview_window(&label).is_none() {
+            return label;
+        }
+        n += 1;
+    }
+}
+
+/// Open an independent top-level window: own workspace root, PTYs, session,
+/// provider, chat. Windows are siblings - no parent/child relationship.
+#[tauri::command]
+fn create_window(app: tauri::AppHandle) -> Result<String, String> {
+    let label = next_window_label(&app);
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+        .title("VTNexa")
+        .inner_size(1400.0, 900.0)
+        .build()
+        .map_err(|e| format!("create_window: {e}"))?;
+    Ok(label)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Second launch focuses the existing window instead of clobbering
-            // session.json from two writers (the dev+installed race we warned
-            // about). Works on Linux via the single-instance socket lock.
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.show();
+            // Second launch opens a NEW independent window (each window is
+            // its own app instance with its own session file - no clobbering).
+            let label = next_window_label(app);
+            if let Ok(w) = tauri::WebviewWindowBuilder::new(
+                app,
+                &label,
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("VTNexa")
+            .inner_size(1400.0, 900.0)
+            .build()
+            {
                 let _ = w.set_focus();
             }
         }))
         .manage(PtyStore::default())
-        .manage(WorkspaceRoot::default())
+        .manage(WorkspaceRoots::default())
         .manage(browser::BrowserState::default())
-        // Explicit sidecar stop on window close. kill_on_drop (set at spawn)
-        // is the backstop for abnormal exits; this is the clean path.
+        // Stop the browser sidecar only when the LAST window closes - other
+        // windows would lose a running browser otherwise. kill_on_drop (set
+        // at spawn) is the backstop for abnormal exits; this is the clean path.
         .on_window_event(|window, event| {
-            if matches!(
-                event,
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-            ) {
-                if let Some(state) = window.try_state::<browser::BrowserState>() {
-                    if let Ok(mut inner) = state.0.lock() {
-                        if let Some(mut child) = inner.child.take() {
-                            let _ = child.kill();
-                            let _ = child.wait();
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                // Reap this window's per-window state: sandbox root + PTYs
+                // (ids are namespaced "<window-label>:<n>" by the frontend).
+                let label = window.label().to_string();
+                if let Some(state) = window.try_state::<WorkspaceRoots>() {
+                    if let Ok(mut m) = state.0.lock() {
+                        m.remove(&label);
+                    }
+                }
+                if let Some(store) = window.try_state::<PtyStore>() {
+                    if let Ok(mut map) = store.0.lock() {
+                        let doomed: Vec<String> = map
+                            .keys()
+                            .filter(|k| k.starts_with(&format!("{label}:")))
+                            .cloned()
+                            .collect();
+                        for id in doomed {
+                            if let Some(sess) = map.remove(&id) {
+                                drop(sess.writer);
+                                drop(sess.master);
+                                #[cfg(unix)]
+                                if let Some(pid) = sess.pid {
+                                    unsafe {
+                                        libc::kill(pid as i32, libc::SIGKILL);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // <=1: robust to whether the destroyed window is still listed.
+                if window.webview_windows().len() <= 1 {
+                    if let Some(state) = window.try_state::<browser::BrowserState>() {
+                        if let Ok(mut inner) = state.0.lock() {
+                            if let Some(mut child) = inner.child.take() {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                            }
                         }
                     }
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
+            create_window,
             key_get,
             key_set,
             workspace_root,

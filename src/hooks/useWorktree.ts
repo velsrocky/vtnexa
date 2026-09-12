@@ -1,58 +1,90 @@
-import type { AuditInput, Lane } from "../types";
-import { gitMerge, gitWorktreeRemove } from "../lib/tauri";
+import type { AuditInput, Workspace } from "../types";
+import { gitMerge, gitWorktreeAdd, gitWorktreeRemove } from "../lib/tauri";
 import { ptyWrite } from "../lib/pty";
 
-// Per-lane git worktrees (filesystem isolation for parallel agents).
-// Worktrees live at <workspace>/.nexa/worktrees/<lane> - inside the sandbox
-// root by construction, so every existing path guard still applies. Each
-// lane checks out its own branch; merges become plain `git merge`.
+// Per-window git worktree: isolate this window into its own branch +
+// checkout under <workspace>/.nexa/worktrees/<label> so parallel windows
+// never edit the same files. Manual: isolate, merge to main, leave.
 export function useWorktree(opts: {
-  lane: Lane;
+  ws: Workspace;
   workspaceRoot: string;
-  updateLane: (id: string, fn: (l: Lane) => Lane) => void;
+  updateWs: (fn: (w: Workspace) => Workspace) => void;
   setCwdState: (v: string) => void;
-  refreshFiles: (dir: string, laneId?: string) => Promise<void>;
+  refreshFiles: (dir: string) => Promise<void>;
   refreshGit: () => void;
-  logAudit: (laneId: string, e: AuditInput) => void;
+  logAudit: (e: AuditInput) => void;
+  ptyId: string;
 }) {
+  async function isolateWorktree() {
+    const { ws, workspaceRoot, updateWs, setCwdState, refreshFiles, ptyId } = opts;
+    if (ws.worktree) return;
+    try {
+      const wt = await gitWorktreeAdd(
+        ws.cwd || workspaceRoot,
+        ws.id.replace(/[^a-zA-Z0-9_-]+/g, "-").toLowerCase(),
+      );
+      updateWs((w) => ({
+        ...w,
+        worktree: { path: wt.path, branch: wt.branch },
+        cwd: wt.path,
+        shellOut:
+          w.shellOut +
+          `\n✓ window isolated in worktree ${wt.path}\n  branch ${wt.branch} - merge later with "⇣ merge to main" or: git merge ${wt.branch}`,
+      }));
+      setCwdState(wt.path);
+      refreshFiles(wt.path);
+      ptyWrite(ptyId, `cd '${wt.path.replace(/'/g, "'\\''")}'\n`).catch(() => {});
+    } catch (e) {
+      updateWs((w) => ({
+        ...w,
+        shellOut:
+          w.shellOut +
+          `\nworktree add failed: ${e}\n(needs a git repo at the workspace root - init one in the Git tab first)`,
+      }));
+    }
+  }
+
   async function leaveWorktree() {
-    const l = opts.lane;
-    const { workspaceRoot, updateLane, setCwdState, refreshFiles } = opts;
-    if (!l.worktree) return;
+    const { ws, workspaceRoot, updateWs, setCwdState, refreshFiles, ptyId } = opts;
+    if (!ws.worktree) return;
     if (
       !window.confirm(
-        `Leave worktree ${l.worktree.branch}?\n\nUncommitted changes inside it are DISCARDED (committed work stays on the branch - merge it first if unsure).`,
+        `Leave worktree ${ws.worktree.branch}?\n\nUncommitted changes inside it are DISCARDED (committed work stays on the branch - merge it first if unsure).`,
       )
     )
       return;
     try {
       // Remove from the main checkout: git refuses to remove the worktree
       // you are currently standing in.
-      await gitWorktreeRemove(workspaceRoot, l.worktree.path);
-      updateLane(l.id, (x) => ({ ...x, worktree: null, cwd: workspaceRoot }));
+      await gitWorktreeRemove(workspaceRoot, ws.worktree.path);
+      updateWs((w) => ({ ...w, worktree: null, cwd: workspaceRoot }));
       setCwdState(workspaceRoot);
-      refreshFiles(workspaceRoot, l.id);
-      ptyWrite(l.id, `cd '${workspaceRoot.replace(/'/g, "'\\''")}'\n`).catch(() => {});
+      refreshFiles(workspaceRoot);
+      ptyWrite(ptyId, `cd '${workspaceRoot.replace(/'/g, "'\\''")}'\n`).catch(() => {});
     } catch (e) {
-      updateLane(l.id, (x) => ({ ...x, shellOut: x.shellOut + `\nworktree remove failed: ${e}` }));
+      updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nworktree remove failed: ${e}` }));
     }
   }
 
   async function mergeWorktree() {
-    const { lane, workspaceRoot, updateLane, refreshGit, logAudit } = opts;
-    const wt = lane.worktree;
+    const { ws, workspaceRoot, updateWs, refreshGit, logAudit } = opts;
+    const wt = ws.worktree;
     if (!wt) return;
-    if (!window.confirm(`Merge ${wt.branch} into the main checkout at ${workspaceRoot}?\n\nOnly committed work merges - stage & commit in this lane first if needed.`))
+    if (
+      !window.confirm(
+        `Merge ${wt.branch} into the main checkout at ${workspaceRoot}?\n\nOnly committed work merges - stage & commit in this window first if needed.`,
+      )
+    )
       return;
     const t0 = Date.now();
     try {
-      // No shell interpolation: backend validates vtnexa/<lane> and runs git merge directly.
+      // No shell interpolation: backend validates vtnexa/<id> and runs git merge directly.
       const r = await gitMerge(workspaceRoot, wt.branch);
-      updateLane(lane.id, (l) => ({
-        ...l,
-        shellOut: l.shellOut + `\n$ git merge --no-edit ${wt.branch}\n${r.output}\n`,
+      updateWs((w) => ({
+        ...w,
+        shellOut: w.shellOut + `\n$ git merge --no-edit ${wt.branch}\n${r.output}\n`,
       }));
-      logAudit(lane.id, {
+      logAudit({
         tool: "git_merge",
         args: wt.branch,
         decision: "approved",
@@ -60,8 +92,8 @@ export function useWorktree(opts: {
         ms: Date.now() - t0,
       });
     } catch (e) {
-      updateLane(lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\nmerge failed: ${e}` }));
-      logAudit(lane.id, {
+      updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nmerge failed: ${e}` }));
+      logAudit({
         tool: "git_merge",
         args: wt.branch,
         decision: "approved",
@@ -73,5 +105,5 @@ export function useWorktree(opts: {
     refreshGit();
   }
 
-  return { leaveWorktree, mergeWorktree };
+  return { isolateWorktree, leaveWorktree, mergeWorktree };
 }

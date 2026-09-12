@@ -1,5 +1,4 @@
 export interface PendingTool {
-  laneId: string;
   tool: string;
   args: Record<string, any>;
   resolve: (ok: boolean) => void;
@@ -26,9 +25,8 @@ export function shellEscapeWarning(tool: string, args: Record<string, any>): str
   return `⚠ escapes workspace sandbox: ${hits.join("; ")} — only Approve if you inspected the command.`;
 }
 
-export default function ApprovalModal({ queue, laneName, onResolve }: {
+export default function ApprovalModal({ queue, onResolve }: {
   queue: PendingTool[];
-  laneName: (id: string) => string;
   onResolve: (ok: boolean) => void;
 }) {
   if (!queue.length) return null;
@@ -58,10 +56,7 @@ export default function ApprovalModal({ queue, laneName, onResolve }: {
       >
         <h3 style={{ margin: "0 0 8px" }}>
           Agent wants approval: {head.tool}{" "}
-          <span className="muted small">
-            · {laneName(head.laneId)}
-            {queue.length > 1 ? ` · +${queue.length - 1} waiting` : ""}
-          </span>
+          {queue.length > 1 && <span className="muted small">· +{queue.length - 1} waiting</span>}
         </h3>
         {warn && (
           <div

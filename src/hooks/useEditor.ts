@@ -1,37 +1,37 @@
 import { useEffect, useState } from "react";
-import type { AuditInput, CenterTab, Lane } from "../types";
+import type { AuditInput, CenterTab, Workspace } from "../types";
 import { isHtmlPreview, isMarkdownPreview, markdownToHtmlSrcDoc, textToHtmlSrcDoc } from "../lib/preview";
 import { useEditorTabs } from "./useEditorTabs";
 import { useDiffGate } from "./useDiffGate";
 
-// Per-lane editor composition: tab/buffer state (useEditorTabs), the Diff
+// Per-window editor composition: tab/buffer state (useEditorTabs), the Diff
 // review gate (useDiffGate), live preview. App sees one hook with the same
 // contract as before; domains stay separate and separately tested.
 export function useEditor(opts: {
-  lane: Lane;
-  setLanes: React.Dispatch<React.SetStateAction<Lane[]>>;
-  updateLane: (id: string, fn: (l: Lane) => Lane) => void;
+  ws: Workspace;
+  setWs: React.Dispatch<React.SetStateAction<Workspace>>;
+  updateWs: (fn: (w: Workspace) => Workspace) => void;
   workspaceRoot: string;
   cwd: string;
   centerTab: CenterTab;
   setCenterTab: (t: CenterTab) => void;
-  refreshFiles: (dir: string, laneId?: string) => Promise<void>;
+  refreshFiles: (dir: string) => Promise<void>;
   refreshGit: () => void;
   refreshSkills: () => void;
   commitMsg: string;
   setCommitMsg: (v: string) => void;
-  logAudit: (laneId: string, e: AuditInput) => void;
+  logAudit: (e: AuditInput) => void;
 }) {
   const tabs = useEditorTabs({
-    lane: opts.lane,
-    setLanes: opts.setLanes,
-    updateLane: opts.updateLane,
+    ws: opts.ws,
+    setWs: opts.setWs,
+    updateWs: opts.updateWs,
     workspaceRoot: opts.workspaceRoot,
     setCenterTab: opts.setCenterTab,
   });
   const gate = useDiffGate({
-    lane: opts.lane,
-    updateLane: opts.updateLane,
+    ws: opts.ws,
+    updateWs: opts.updateWs,
     workspaceRoot: opts.workspaceRoot,
     cwd: opts.cwd,
     openPath: tabs.openPath,

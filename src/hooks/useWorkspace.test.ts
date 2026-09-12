@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { useLaneFollow, useWorkspace } from "./useWorkspace";
-import { newLane } from "../lib/utils";
+import { useWorkspace } from "./useWorkspace";
+import { newWorkspace } from "../lib/utils";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -20,11 +20,18 @@ afterEach(() => {
 });
 
 function setup() {
-  const updates: { id: string; fn: (l: any) => any }[] = [];
+  let ws = newWorkspace("main:ws", "/w");
+  const updates: string[] = [];
   const hook = renderHook(() =>
-    useWorkspace({ laneId: "lane1", updateLane: (id, fn) => updates.push({ id, fn }) }),
+    useWorkspace({
+      updateWs: (fn) => {
+        ws = fn(ws);
+        updates.push(ws.cwd);
+      },
+      ptyId: "main:pty",
+    }),
   );
-  return { ...hook, updates };
+  return { ...hook, wsOf: () => ws, updates };
 }
 
 describe("useWorkspace.refreshFiles", () => {
@@ -35,23 +42,21 @@ describe("useWorkspace.refreshFiles", () => {
     });
     const { result } = setup();
     await act(async () => {
-      await result.current.refreshFiles("/w", "lane1");
+      await result.current.refreshFiles("/w");
     });
     expect(result.current.files).toEqual([{ name: "a.txt", path: "/w/a.txt", is_dir: false }]);
   });
 
-  it("clears the tree and logs fs errors to the lane", async () => {
+  it("clears the tree and logs fs errors to the workspace", async () => {
     setInvokeImpl(async () => {
       throw new Error("denied");
     });
-    const { result, updates } = setup();
+    const { result, wsOf } = setup();
     await act(async () => {
-      await result.current.refreshFiles("/w", "lane1");
+      await result.current.refreshFiles("/w");
     });
     expect(result.current.files).toEqual([]);
-    expect(updates).toHaveLength(1);
-    const lane = updates[0].fn(newLane("L", "/w"));
-    expect(lane.shellOut).toMatch(/fs error/);
+    expect(wsOf().shellOut).toMatch(/fs error/);
   });
 
   it("ignores empty dirs without touching the backend", async () => {
@@ -68,96 +73,21 @@ describe("useWorkspace.refreshFiles", () => {
   });
 });
 
-describe("per-lane folder memory", () => {
-  function twoLanes() {
-    let store = [
-      { ...newLane("Lane 1", "/w"), id: "lane1" },
-      { ...newLane("Lane 2", "/w"), id: "lane2" },
-    ];
-    const updateLane = (id: string, fn: (l: any) => any) => {
-      store = store.map((l) => (l.id === id ? fn(l) : l));
-    };
-    const hook = renderHook(
-      (props: { activeId: string; laneId: string; laneCwd: string }) => {
-        const ws = useWorkspace({ laneId: props.laneId, updateLane });
-        useLaneFollow({
-          activeId: props.activeId,
-          laneId: props.laneId,
-          laneCwd: props.laneCwd,
-          cwd: ws.cwd,
-          workspaceRoot: ws.workspaceRoot,
-          setCwdState: ws.setCwdState,
-        });
-        return ws;
-      },
-      { initialProps: { activeId: "lane1", laneId: "lane1", laneCwd: "/w" } },
-    );
-    const cwdOf = (id: string) => store.find((l) => l.id === id)?.cwd;
-    return { ...hook, cwdOf, store: () => store };
-  }
-
-  it("selecting a folder touches only the active lane", () => {
-    setInvokeImpl(async () => ({}));
-    const h = twoLanes();
-    act(() => {
-      h.result.current.setWorkspaceRoot("/w");
-    });
-    act(() => {
-      h.result.current.setCwd("/w/src");
-    });
-    expect(h.cwdOf("lane1")).toBe("/w/src");
-    expect(h.cwdOf("lane2")).toBe("/w");
-    expect(h.result.current.cwd).toBe("/w/src");
-  });
-
-  it("switching lanes restores each lane's own folder", () => {
-    setInvokeImpl(async () => ({}));
-    const h = twoLanes();
-    act(() => {
-      h.result.current.setWorkspaceRoot("/w");
-    });
-    // Lane 1 selects src.
-    act(() => {
-      h.result.current.setCwd("/w/src");
-    });
-    expect(h.cwdOf("lane1")).toBe("/w/src");
-
-    // Switch to lane 2: tree follows lane 2's folder.
-    h.rerender({ activeId: "lane2", laneId: "lane2", laneCwd: "/w" });
-    expect(h.result.current.cwd).toBe("/w");
-
-    // Lane 2 selects tests; lane 1 must be untouched.
-    act(() => {
-      h.result.current.setCwd("/w/tests");
-    });
-    expect(h.cwdOf("lane2")).toBe("/w/tests");
-    expect(h.cwdOf("lane1")).toBe("/w/src");
-
-    // Switch back: lane 1's folder restored, lane 2 intact.
-    h.rerender({ activeId: "lane1", laneId: "lane1", laneCwd: "/w/src" });
-    expect(h.result.current.cwd).toBe("/w/src");
-    expect(h.cwdOf("lane1")).toBe("/w/src");
-    expect(h.cwdOf("lane2")).toBe("/w/tests");
-  });
-});
 describe("useWorkspace.setCwd", () => {
   it("blocks navigation outside the workspace", () => {
     setInvokeImpl(async () => []);
-    const { result, updates } = setup();
+    const { result, wsOf } = setup();
     act(() => {
       result.current.setWorkspaceRoot("/w");
     });
     act(() => {
       result.current.setCwd("/etc");
     });
-    expect(updates).toHaveLength(1);
-    expect(updates[0].id).toBe("lane1");
-    const lane = updates[0].fn(newLane("L", "/w"));
-    expect(lane.shellOut).toMatch(/outside workspace/);
-    expect(lane.cwd).toBe("/w");
+    expect(wsOf().shellOut).toMatch(/outside workspace/);
+    expect(wsOf().cwd).toBe("/w");
   });
 
-  it("accepts inside paths (lane + PTY follow)", () => {
+  it("accepts inside paths (workspace cwd follows)", () => {
     setInvokeImpl(async () => []);
     const { result, updates } = setup();
     act(() => {
@@ -167,7 +97,6 @@ describe("useWorkspace.setCwd", () => {
       result.current.setCwd("/w/sub");
     });
     expect(result.current.cwd).toBe("/w/sub");
-    const lane = updates[0].fn(newLane("L", "/w"));
-    expect(lane.cwd).toBe("/w/sub");
+    expect(updates).toContain("/w/sub");
   });
 });

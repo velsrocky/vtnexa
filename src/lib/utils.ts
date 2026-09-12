@@ -1,11 +1,10 @@
-import { DEFAULT_PROVIDER, type Lane, type ProviderConfig } from "../types";
+import { DEFAULT_PROVIDER, type ProviderConfig, type Workspace } from "../types";
 
 export const uid = () => Math.random().toString(36).slice(2, 9);
 
-export function newLane(name: string, cwd: string, provider?: ProviderConfig): Lane {
+export function newWorkspace(id: string, cwd: string, provider?: ProviderConfig): Workspace {
   return {
-    id: uid(),
-    name,
+    id,
     cwd,
     messages: [],
     pendingDiff: null,

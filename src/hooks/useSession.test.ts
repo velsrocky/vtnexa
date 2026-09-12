@@ -2,8 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useSession } from "./useSession";
-import { newLane } from "../lib/utils";
-import type { Lane } from "../types";
+import { newWorkspace } from "../lib/utils";
+import type { Workspace } from "../types";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -21,9 +21,8 @@ afterEach(() => {
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
-const BASE_LANE: Lane = {
-  ...newLane("Lane 1", "/w"),
-  id: "lane1",
+const BASE_WS: Workspace = {
+  ...newWorkspace("main:ws", "/w", { baseUrl: "http://x", apiKey: "SHOULD-BE-STRIPPED", model: "m", kind: "auto" }),
   messages: [
     { id: "u1", role: "user", content: "hi" },
     { id: "a1", role: "assistant", content: "hello" },
@@ -35,10 +34,9 @@ const BASE_LANE: Lane = {
   buffers: { "clean.txt": "same" },
   originals: { "clean.txt": "same" },
   openPath: "clean.txt",
-  provider: { baseUrl: "http://x", model: "m", apiKey: "SHOULD-BE-STRIPPED", kind: "auto" },
 };
 
-function setup(lanes: Lane[] = [BASE_LANE], activeId = "lane1") {
+function setup(ws: Workspace = BASE_WS) {
   const saves: string[] = [];
   setInvokeImpl(async (cmd, args?: any) => {
     if (cmd === "session_save") {
@@ -50,52 +48,46 @@ function setup(lanes: Lane[] = [BASE_LANE], activeId = "lane1") {
     if (cmd === "fs_list") return [];
     throw new Error(`unexpected ${cmd}`);
   });
-  const updated: { id: string; fn: (l: Lane) => Lane }[] = [];
-  const hook = renderHook(
-    (props: { lanes: Lane[]; activeId: string }) =>
-      useSession({
-        lanes: props.lanes,
-        activeId: props.activeId,
-        workspaceRoot: "/w",
-        setLanes: vi.fn(),
-        setActiveId: vi.fn(),
-        setCwdState: vi.fn(),
-        updateLane: (id, fn) => updated.push({ id, fn }),
-      }),
-    { initialProps: { lanes, activeId } },
+  const notes: string[] = [];
+  const hook = renderHook(() =>
+    useSession({
+      ws,
+      workspaceRoot: "/w",
+      setWs: vi.fn(),
+      setCwdState: vi.fn(),
+      note: (t) => notes.push(t),
+    }),
   );
-  return { ...hook, saves, updated };
+  return { ...hook, saves, notes };
 }
 
 describe("useSession.saveSessionNow", () => {
-  it("persists versioned lanes, strips secrets and non-chat roles", async () => {
+  it("persists v6 single workspace, strips secrets and non-chat roles", async () => {
     const { result, saves } = setup();
     await act(async () => {
       await result.current.saveSessionNow();
     });
     expect(saves).toHaveLength(1);
     const data = JSON.parse(saves[0]);
-    expect(data.version).toBe(5);
-    expect(data.activeId).toBe("lane1");
-    const [lane] = data.lanes;
-    expect(lane.messages.map((m: any) => m.role)).toEqual(["user", "assistant"]);
-    expect(lane.provider).toMatchObject({ baseUrl: "http://x", model: "m", apiKey: "" });
-    // Clean buffers are omitted to protect the 2MB cap.
-    expect(lane.buffers).toEqual({});
-    expect(lane.usage).toMatchObject({ input: 10, tools: 2 });
-    // Per-lane UI travels with the lane.
-    expect(lane).toMatchObject({ centerTab: "edit", sideTab: "chat", chatDraft: "", previewUrl: "" });
+    expect(data.version).toBe(6);
+    expect(data.workspace.messages.map((m: any) => m.role)).toEqual(["user", "assistant"]);
+    expect(data.workspace.provider).toMatchObject({ baseUrl: "http://x", model: "m", apiKey: "" });
+    expect(data.workspace.buffers).toEqual({});
+    expect(data.workspace).toMatchObject({ centerTab: "edit", sideTab: "chat", chatDraft: "", previewUrl: "" });
   });
 
-  it("persists per-lane UI state", async () => {
-    const { result, saves } = setup([
-      { ...BASE_LANE, centerTab: "git" as const, sideTab: "audit" as const, chatDraft: "half-typed", previewUrl: "http://localhost:5173" },
-    ]);
+  it("persists per-window UI state", async () => {
+    const { result, saves } = setup({
+      ...BASE_WS,
+      centerTab: "git" as const,
+      sideTab: "audit" as const,
+      chatDraft: "half-typed",
+      previewUrl: "http://localhost:5173",
+    });
     await act(async () => {
       await result.current.saveSessionNow();
     });
-    expect(saves).toHaveLength(1);
-    expect(JSON.parse(saves[0]).lanes[0]).toMatchObject({
+    expect(JSON.parse(saves[0]).workspace).toMatchObject({
       centerTab: "git",
       sideTab: "audit",
       chatDraft: "half-typed",
@@ -109,15 +101,12 @@ describe("useSession.saveSessionNow", () => {
       role: i % 2 ? ("assistant" as const) : ("user" as const),
       content: "x".repeat(4096),
     }));
-    const { result, saves, updated } = setup([{ ...BASE_LANE, messages: big }]);
+    const { result, saves, notes } = setup({ ...BASE_WS, messages: big });
     await act(async () => {
       await result.current.saveSessionNow();
     });
-    expect(saves).toHaveLength(1);
-    const data = JSON.parse(saves[0]);
-    expect(data.lanes[0].messages.length).toBeLessThan(500);
-    const noted = updated.map((u) => u.fn(BASE_LANE).shellOut).join("");
-    expect(noted).toMatch(/trimmed oldest messages/);
+    expect(JSON.parse(saves[0]).workspace.messages.length).toBeLessThan(500);
+    expect(notes.join("")).toMatch(/trimmed oldest messages/);
   });
 
   it("keeps the last save when even trimmed state overflows", async () => {
@@ -128,19 +117,18 @@ describe("useSession.saveSessionNow", () => {
       buffers[t] = "b".repeat(50000);
       originals[t] = "o".repeat(50000);
     }
-    const { result, saves, updated } = setup([{ ...BASE_LANE, tabs, buffers, originals }]);
+    const { result, saves, notes } = setup({ ...BASE_WS, tabs, buffers, originals });
     await act(async () => {
       await result.current.saveSessionNow();
     });
     expect(saves).toHaveLength(0);
-    const noted = updated.map((u) => u.fn(BASE_LANE).shellOut).join("");
-    expect(noted).toMatch(/too large to save/);
+    expect(notes.join("")).toMatch(/too large to save/);
   });
 });
 
 describe("useSession.loadSession", () => {
   function loadSetup(raw: string) {
-    const lanes: Lane[][] = [];
+    const restored: Workspace[] = [];
     setInvokeImpl(async (cmd, args?: any) => {
       if (cmd === "session_load") return raw;
       if (cmd === "session_save") return {};
@@ -151,99 +139,51 @@ describe("useSession.loadSession", () => {
       }
       throw new Error(`unexpected ${cmd}`);
     });
-    const hook = renderHook(
-      (props: { lanes: Lane[]; activeId: string }) =>
-        useSession({
-          lanes: props.lanes,
-          activeId: props.activeId,
-          workspaceRoot: "/w",
-          setLanes: ((u: any) => {
-            lanes.push(typeof u === "function" ? u([]) : u);
-          }) as any,
-          setActiveId: vi.fn(),
-          setCwdState: vi.fn(),
-          updateLane: vi.fn(),
-        }),
-      { initialProps: { lanes: [], activeId: "" } },
+    const hook = renderHook(() =>
+      useSession({
+        ws: BASE_WS,
+        workspaceRoot: "/w",
+        setWs: ((u: any) => {
+          restored.push(typeof u === "function" ? u(BASE_WS) : u);
+        }) as any,
+        setCwdState: vi.fn(),
+        note: vi.fn(),
+      }),
     );
-    return { ...hook, lanes };
+    return { ...hook, restored };
   }
 
-  it("restores lanes, drops dangling worktrees, refills keys", async () => {
+  it("restores v6, drops dangling worktrees, refills keys", async () => {
     const raw = JSON.stringify({
-      version: 4,
-      activeId: "lane1",
-      lanes: [
-        {
-          id: "lane1",
-          name: "Lane 1",
-          cwd: "/w",
-          messages: [{ id: "m1", role: "user", content: "hi" }],
-          usage: { input: 1, output: 2, cost: 0, tools: 0, toolMs: 0 },
-          audit: [],
-          tabs: [],
-          buffers: {},
-          originals: {},
-          openPath: "",
-          providerOverride: { baseUrl: "http://x", model: "m", kind: "openai" },
-          worktree: { path: "/w/.nexa/worktrees/gone", branch: "vtnexa/x" },
-        },
-      ],
+      version: 6,
+      workspace: {
+        id: "main:ws",
+        cwd: "/w",
+        messages: [{ id: "m1", role: "user", content: "hi" }],
+        usage: { input: 1, output: 2, cost: 0, tools: 0, toolMs: 0 },
+        audit: [],
+        tabs: [],
+        buffers: {},
+        originals: {},
+        openPath: "",
+        provider: { baseUrl: "http://x", model: "m", kind: "openai" },
+        worktree: { path: "/w/.nexa/worktrees/gone", branch: "vtnexa/x" },
+      },
     });
-    const { result, lanes } = loadSetup(raw);
+    const { result, restored } = loadSetup(raw);
     await act(async () => {
       await result.current.loadSession();
     });
-    expect(lanes).toHaveLength(1);
-    const [restored] = lanes[0];
-    expect(restored.messages).toEqual([{ id: "m1", role: "user", content: "hi" }]);
-    expect(restored.worktree).toBeNull();
-    // v4 override adopted as the lane's own provider, key refilled.
-    expect(restored.provider).toMatchObject({ baseUrl: "http://x", model: "m", apiKey: "REFILLED", kind: "openai" });
+    expect(restored).toHaveLength(1);
+    expect(restored[0].messages).toEqual([{ id: "m1", role: "user", content: "hi" }]);
+    expect(restored[0].worktree).toBeNull();
+    expect(restored[0].provider).toMatchObject({ apiKey: "REFILLED", kind: "openai" });
     expect(result.current.sessionReady.current).toBe(true);
   });
 
-  it("restores v5 providers and defaults missing ones", async () => {
+  it("adopts the first lane of a v4/v5 lanes[] session", async () => {
     const raw = JSON.stringify({
       version: 5,
-      activeId: "lane1",
-      lanes: [
-        {
-          id: "lane1", name: "Lane 1", cwd: "/w", messages: [],
-          usage: { input: 0, output: 0, cost: 0, tools: 0, toolMs: 0 },
-          audit: [], tabs: [], buffers: {}, originals: {}, openPath: "",
-          provider: { baseUrl: "https://y.test", model: "ym", apiKey: "OLD", kind: "gemini" },
-        },
-        {
-          id: "lane2", name: "Lane 2", cwd: "/w", messages: [],
-          usage: { input: 0, output: 0, cost: 0, tools: 0, toolMs: 0 },
-          audit: [], tabs: [], buffers: {}, originals: {}, openPath: "",
-        },
-      ],
-    });
-    const { result, lanes } = loadSetup(raw);
-    await act(async () => {
-      await result.current.loadSession();
-    });
-    const [one, two] = lanes[0];
-    expect(one.provider).toMatchObject({ baseUrl: "https://y.test", apiKey: "REFILLED", kind: "gemini" });
-    expect(two.provider).toMatchObject({ baseUrl: "http://localhost:11434/v1", apiKey: "REFILLED", kind: "auto" });
-  });
-
-  it("ignores empty or corrupt payloads but still readies", async () => {
-    for (const raw of ["", "not json{{"]) {
-      const { result } = loadSetup(raw);
-      await act(async () => {
-        await result.current.loadSession();
-      });
-      expect(result.current.sessionReady.current).toBe(true);
-    }
-  });
-
-  it("validates per-lane UI and caps drafts", async () => {
-    const raw = JSON.stringify({
-      version: 4,
-      activeId: "lane1",
       lanes: [
         {
           id: "lane1",
@@ -256,60 +196,52 @@ describe("useSession.loadSession", () => {
           buffers: {},
           originals: {},
           openPath: "",
-          centerTab: "bogus",
-          sideTab: "bogus",
-          chatDraft: "x".repeat(25000),
-          previewUrl: "http://localhost:5173",
+          provider: { baseUrl: "https://y.test", model: "ym", apiKey: "OLD", kind: "gemini" },
         },
       ],
     });
-    const { result, lanes } = loadSetup(raw);
+    const { result, restored } = loadSetup(raw);
     await act(async () => {
       await result.current.loadSession();
     });
-    const [restored] = lanes[0];
-    expect(restored.centerTab).toBe("edit");
-    expect(restored.sideTab).toBe("chat");
-    expect(restored.chatDraft).toHaveLength(20000);
-    expect(restored.previewUrl).toBe("http://localhost:5173");
+    expect(restored[0].provider).toMatchObject({ baseUrl: "https://y.test", apiKey: "REFILLED", kind: "gemini" });
   });
-});
 
-describe("useSession autosave", () => {
-  it("debounces lane changes into a save", async () => {
-    vi.useFakeTimers();
-    const saves: string[] = [];
-    setInvokeImpl(async (cmd, args?: any) => {
-      if (cmd === "session_load") return "";
-      if (cmd === "session_save") {
-        saves.push(args.content);
-        return {};
-      }
-      if (cmd === "key_get") return "";
-      if (cmd === "fs_list") return [];
-      throw new Error(`unexpected ${cmd}`);
+  it("validates UI fields and caps drafts", async () => {
+    const raw = JSON.stringify({
+      version: 6,
+      workspace: {
+        id: "main:ws",
+        cwd: "/w",
+        messages: [],
+        usage: { input: 0, output: 0, cost: 0, tools: 0, toolMs: 0 },
+        audit: [],
+        tabs: [],
+        buffers: {},
+        originals: {},
+        openPath: "",
+        centerTab: "bogus",
+        sideTab: "bogus",
+        chatDraft: "x".repeat(25000),
+        previewUrl: "http://localhost:5173",
+      },
     });
-    const { result, rerender } = renderHook(
-      (props: { lanes: Lane[] }) =>
-        useSession({
-          lanes: props.lanes,
-          activeId: "lane1",
-          workspaceRoot: "/w",
-          setLanes: vi.fn(),
-          setActiveId: vi.fn(),
-          setCwdState: vi.fn(),
-          updateLane: vi.fn(),
-        }),
-      { initialProps: { lanes: [BASE_LANE] } },
-    );
+    const { result, restored } = loadSetup(raw);
     await act(async () => {
       await result.current.loadSession();
     });
-    expect(saves).toHaveLength(0);
-    rerender({ lanes: [{ ...BASE_LANE, shellOut: "changed" }] });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(500);
-    });
-    expect(saves).toHaveLength(1);
+    expect(restored[0].centerTab).toBe("edit");
+    expect(restored[0].sideTab).toBe("chat");
+    expect(restored[0].chatDraft).toHaveLength(20000);
+  });
+
+  it("ignores empty or corrupt payloads but still readies", async () => {
+    for (const raw of ["", "not json{{"]) {
+      const { result } = loadSetup(raw);
+      await act(async () => {
+        await result.current.loadSession();
+      });
+      expect(result.current.sessionReady.current).toBe(true);
+    }
   });
 });

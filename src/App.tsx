@@ -16,8 +16,10 @@ import EditorPane from "./components/EditorPane";
 import TopBar from "./components/TopBar";
 import ProviderBar from "./components/ProviderBar";
 import WorkspaceBar from "./components/WorkspaceBar";
+import { invoke } from "@tauri-apps/api/core";
+import { baseName } from "./lib/utils";
 import { useGit } from "./hooks/useGit";
-import { useLanes } from "./hooks/useLanes";
+import { useWorkspaceState, windowLabel, ptyId } from "./hooks/useWorkspaceState";
 import { useAgentTurn } from "./hooks/useAgentTurn";
 import { useNexa } from "./hooks/useNexa";
 import { useSession } from "./hooks/useSession";
@@ -28,52 +30,42 @@ import { useWorktree } from "./hooks/useWorktree";
 import { useShell } from "./hooks/useShell";
 import { usePrefs } from "./hooks/usePrefs";
 import { useSkills } from "./hooks/useSkills";
-import { useWorkspace, useLaneFollow } from "./hooks/useWorkspace";
+import { useWorkspace } from "./hooks/useWorkspace";
 import { useInit } from "./hooks/useInit";
 import { useRoutines } from "./hooks/useRoutines";
 
+// One OS window = one independent VTNexa instance. Multiple windows are
+// siblings: separate workspace roots (enforced per-label in the Rust
+// backend), separate PTYs, separate sessions, separate everything.
 export default function App() {
   const [auditNote, setAuditNote] = useState("");
   const { themeId, setThemeId, theme, leftW, rightW, onResizerDown } = usePrefs();
 
   const {
-    lanes,
-    setLanes,
-    activeId,
-    setActiveId,
-    activeIdRef,
-    lane,
-    laneBusy,
-    busyLanes,
-    setLaneBusy,
-    unseen,
-    setUnseen,
-    turnAborts,
-    streamRafs,
+    ws,
+    setWs,
+    busy,
+    setBusy,
+    turnAbort,
+    streamRaf,
     pendingTools,
     setPendingTools,
     resolveHead,
-    updateLane,
+    updateWs,
     logAudit,
     stopTurn,
     flushStreamFrame,
-    laneName,
-    addLane,
-    isolateLane,
-    closeLane,
-  } = useLanes();
+  } = useWorkspaceState();
 
-  // Per-lane UI: each lane remembers its own center tab, side tab, chat
-  // draft and preview URL - switching lanes restores the lane as left.
-  const centerTab = lane.centerTab;
+  const centerTab = ws.centerTab;
   const setCenterTab = (t: CenterTab) =>
-    updateLane(lane.id, (l) => (l.centerTab === t ? l : { ...l, centerTab: t }));
-  const sideTab = lane.sideTab;
+    updateWs((w) => (w.centerTab === t ? w : { ...w, centerTab: t }));
+  const sideTab = ws.sideTab;
   const setSideTab = (t: SideTab) =>
-    updateLane(lane.id, (l) => (l.sideTab === t ? l : { ...l, sideTab: t }));
-  const input = lane.chatDraft;
+    updateWs((w) => (w.sideTab === t ? w : { ...w, sideTab: t }));
+  const input = ws.chatDraft;
   const setInput = (v: string) =>
-    updateLane(lane.id, (l) => (l.chatDraft === v ? l : { ...l, chatDraft: v }));
+    updateWs((w) => (w.chatDraft === v ? w : { ...w, chatDraft: v }));
 
   const {
     workspaceRoot,
@@ -84,7 +76,7 @@ export default function App() {
     files,
     refreshFiles,
     wsCommitted,
-  } = useWorkspace({ laneId: lane.id, updateLane });
+  } = useWorkspace({ updateWs, ptyId });
 
   const {
     provHist,
@@ -95,7 +87,7 @@ export default function App() {
     refreshModels,
     editCfg,
     setEditCfg,
-  } = useProvider({ lane, updateLane });
+  } = useProvider({ ws, updateWs });
 
   const {
     branch: gitBranch,
@@ -113,8 +105,7 @@ export default function App() {
     selectGitFile,
     commitListed,
   } = useGit({
-    getRoot: () => lane.cwd || cwd,
-    laneId: lane.id,
+    getRoot: () => ws.cwd || cwd,
     logAudit,
   });
 
@@ -127,8 +118,7 @@ export default function App() {
     createSkill,
   } = useSkills({
     workspaceRoot,
-    lane,
-    updateLane,
+    updateWs,
     // Resolved when createSkill runs (event time), after useEditor below.
     openFile: (path: string) => openFile(path),
   });
@@ -156,9 +146,9 @@ export default function App() {
     approveDiff,
     approveAndCommit,
   } = useEditor({
-    lane,
-    setLanes,
-    updateLane,
+    ws,
+    setWs,
+    updateWs,
     workspaceRoot,
     cwd,
     centerTab,
@@ -182,35 +172,33 @@ export default function App() {
   } = useFiles({
     cwd,
     workspaceRoot,
-    lane,
-    updateLane,
+    updateWs,
     refreshFiles,
     openFile,
     retargetTabs,
     dropTabsUnder,
   });
 
-  const { leaveWorktree, mergeWorktree } = useWorktree({
-    lane,
+  const { isolateWorktree, leaveWorktree, mergeWorktree } = useWorktree({
+    ws,
     workspaceRoot,
-    updateLane,
+    updateWs,
     setCwdState,
     refreshFiles,
     refreshGit,
     logAudit,
+    ptyId,
   });
 
   const { shellCmd, onShellCmdChange, runShell } = useShell({
-    lane,
+    ws,
     cwd,
-    setLanes,
-    setLaneBusy,
-    updateLane,
+    setBusy,
+    updateWs,
   });
 
-
-  // Chat autoscroll: stick to bottom on new/streamed messages, unless the user
-  // scrolled up to read history (then show a jump button instead of yanking).
+  // Chat autoscroll: stick to bottom on new/streamed messages, unless the
+  // user scrolled up to read history (then show a jump button).
   const msgsRef = useRef<HTMLDivElement>(null);
   const stickBottom = useRef(true);
   const [showJump, setShowJump] = useState(false);
@@ -221,22 +209,6 @@ export default function App() {
     else el.scrollTop = el.scrollHeight;
   }, []);
 
-  // Switching lanes follows that lane's directory in the file tree and
-  // keeps its PTY in that directory (see useLaneFollow). Here: re-stick
-  // chat to the newly active lane's latest message.
-  const prevLaneId = useRef(activeId);
-  useEffect(() => {
-    if (prevLaneId.current === activeId) return;
-    prevLaneId.current = activeId;
-    // New lane, new conversation: re-stick chat to the latest message.
-    stickBottom.current = true;
-    setShowJump(false);
-  }, [activeId]);
-  useLaneFollow({ activeId, laneId: lane.id, laneCwd: lane.cwd, cwd, workspaceRoot, setCwdState });
-
-  // ---- Routines: scheduled agent runs, one dedicated lane each ----
-  // Stored per-project in .nexa/routines.json. The 30s ticker fires at most
-  // one due routine per tick (backpressure for local models).
   const {
     padText,
     setPadText,
@@ -252,24 +224,21 @@ export default function App() {
   } = useNexa({ workspaceRoot });
 
   const { expandSkill, runAgentTurn } = useAgentTurn({
-    lanes,
-    lane,
+    ws,
     workspaceRoot,
     conventions,
     conventionsName,
     skills,
     provHistLength: provHist.length,
-    busyLanes,
-    activeIdRef,
-    turnAborts,
-    streamRafs,
+    busy,
+    turnAbort,
+    streamRaf,
     stickBottom,
     lastSynced,
-    updateLane,
-    setLaneBusy,
+    updateWs,
+    setBusy,
     logAudit,
     rememberProvider,
-    setUnseen,
     setPendingTools,
     setCenterTab,
     setPadText,
@@ -281,13 +250,11 @@ export default function App() {
   });
 
   const { saveSessionNow, loadSession, sessionReady } = useSession({
-    lanes,
-    activeId,
+    ws,
     workspaceRoot,
-    setLanes,
-    setActiveId,
+    setWs,
     setCwdState,
-    updateLane,
+    note: (text) => updateWs((w) => ({ ...w, shellOut: w.shellOut + text })),
   });
 
   const {
@@ -301,19 +268,9 @@ export default function App() {
     setShowRoutines,
     newRoutine,
     setNewRoutine,
-  } = useRoutines({
-    lanes,
-    workspaceRoot,
-    cwd,
-    busyLanes,
-    runAgentTurn,
-    addLane,
-    isolateLane,
-    inheritProvider: lane.provider,
-  });
+  } = useRoutines({ busy, runAgentTurn });
 
   const { changeWorkspace, browseWorkspace } = useInit({
-    laneId: lane.id,
     workspaceRoot,
     wsCommitted,
     nexaReady,
@@ -321,9 +278,9 @@ export default function App() {
     routinesReady,
     setWorkspaceRoot,
     setCwdState,
-    setLanes,
+    setWs,
     setOpenPath,
-    updateLane,
+    updateWs,
     saveSessionNow,
     loadSession,
     loadNexa,
@@ -333,8 +290,8 @@ export default function App() {
   });
 
   useEffect(() => {
-    refreshFiles(cwd, lane?.id);
-  }, [cwd, lane?.id, refreshFiles]);
+    refreshFiles(cwd);
+  }, [cwd, refreshFiles]);
 
   // Scroll after paint (rAF): layout (flex/scrollHeight) is settled then.
   useLayoutEffect(() => {
@@ -342,22 +299,34 @@ export default function App() {
     if (!stickBottom.current) return;
     const raf = requestAnimationFrame(() => scrollMsgsToBottom());
     return () => cancelAnimationFrame(raf);
-  }, [lane.messages, lane.id, sideTab, busyLanes, scrollMsgsToBottom]);
+  }, [ws.messages, sideTab, busy, scrollMsgsToBottom]);
 
-  // Git tab: refresh status when opened, when the lane changes, or when
-  // the lane cwd changes (fresh data over the restored per-lane cache).
+  // Git tab: refresh status when opened or when the cwd changes.
   useEffect(() => {
     if (centerTab !== "git") return;
     refreshGit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [centerTab, lane.id, lane.cwd]);
+  }, [centerTab, ws.cwd]);
 
   async function sendChat() {
-    if (!input.trim() || busyLanes[activeId]) return;
+    if (!input.trim() || busy) return;
     const text = input;
     setInput("");
-    runAgentTurn(activeId, await expandSkill(text));
+    runAgentTurn(await expandSkill(text));
   }
+
+  // Ctrl/Cmd+Shift+N: open an independent window (same as the TopBar button;
+  // second app launch does this too via the single-instance hook).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        invoke("create_window").catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Scheduler: every 30s, fire the single most-overdue routine (at most one
   // per tick - backpressure for local models). Also catches overdue runs
@@ -378,7 +347,7 @@ export default function App() {
       clearTimeout(once);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routines, lanes, busyLanes, workspaceRoot, padText, planText, memoryText]);
+  }, [routines, busy, workspaceRoot, padText, planText, memoryText]);
 
   return (
     <div className="shell">
@@ -393,29 +362,17 @@ export default function App() {
           onClose={() => setShowRoutines(false)}
         />
       )}
-      <ApprovalModal
-        queue={pendingTools}
-        laneName={laneName}
-        onResolve={resolveHead}
-      />
+      <ApprovalModal queue={pendingTools} onResolve={resolveHead} />
       <TopBar
-        lanes={lanes}
-        activeLaneId={lane.id}
-        busyLanes={busyLanes}
-        unseen={unseen}
+        workspaceLabel={baseName(workspaceRoot)}
+        windowLabel={windowLabel}
         scheduledCount={routines.filter((r) => r.enabled && r.everyMs > 0).length}
         themeId={themeId}
-        onSelectLane={setActiveId}
-        onAddLane={() => {
-          const id = addLane(workspaceRoot, cwd, lane.provider);
-          void isolateLane(id, workspaceRoot);
-        }}
         onOpenRoutines={() => setShowRoutines(true)}
         onThemeChange={setThemeId}
-        onCloseLane={(id) => closeLane(id, workspaceRoot)}
       />
       <ProviderBar
-        laneName={lane.name}
+        windowLabel={windowLabel}
         editCfg={editCfg}
         provHist={provHist}
         provModels={provModels}
@@ -456,9 +413,9 @@ export default function App() {
         <div className="resizer" onMouseDown={onResizerDown("left")} title="Drag to resize panels" />
 
         <EditorPane
-          lane={lane}
-          lanes={lanes}
-          laneBusy={laneBusy}
+          ws={ws}
+          ptyId={ptyId}
+          busy={busy}
           openPath={openPath}
           tabs={tabs}
           buffers={buffers}
@@ -481,7 +438,7 @@ export default function App() {
               setMsg={setGitMsg}
               note={gitNote}
               setNote={setGitNote}
-              laneCwd={lane.cwd}
+              wsCwd={ws.cwd}
               fallbackCwd={cwd}
               refreshGit={refreshGit}
               selectGitFile={selectGitFile}
@@ -494,13 +451,14 @@ export default function App() {
           openFile={openFile}
           closeTab={closeTab}
           saveFile={saveFile}
+          isolateWorktree={isolateWorktree}
           leaveWorktree={leaveWorktree}
           mergeWorktree={mergeWorktree}
           commitMsg={commitMsg}
           setCommitMsg={setCommitMsg}
           approveDiff={approveDiff}
           approveAndCommit={approveAndCommit}
-          onRejectDiff={() => updateLane(lane.id, (l) => ({ ...l, pendingDiff: null }))}
+          onRejectDiff={() => updateWs((w) => ({ ...w, pendingDiff: null }))}
           shellCmd={shellCmd}
           onShellCmdChange={onShellCmdChange}
           runShell={runShell}
@@ -512,8 +470,8 @@ export default function App() {
         <div className="resizer" onMouseDown={onResizerDown("right")} title="Drag to resize panels" />
 
         <ChatPane
-          lane={lane}
-          laneBusy={laneBusy}
+          ws={ws}
+          busy={busy}
           sideTab={sideTab}
           setSideTab={setSideTab}
           width={rightW}

@@ -1,7 +1,7 @@
 import { DEFAULT_PROVIDER, type ProviderConfig, type ProviderKind } from "../types";
 
 // Working provider history: every config that successfully answered once is
-// kept (localStorage) for one-click reuse. Shared across lanes as a
+// kept (localStorage) for one-click reuse. Shared across windows as a
 // convenience - like a browser remembering servers. Keys at rest are
 // plaintext in the app data dir - same trust level as the workspace itself,
 // not a vault.
@@ -49,7 +49,7 @@ export function saveHist(next: ProviderEntry[]): ProviderEntry[] {
   return capped;
 }
 
-/** Seed for fresh lanes: last working config, else the local default. */
+/** Seed for fresh windows: last working config, else the local default. */
 export function loadLastUsed(): ProviderConfig {
   const [head] = loadHist();
   if (head) {
