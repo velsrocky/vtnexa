@@ -1,21 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { type Lane, type ProviderConfig } from "../types";
+import { type AuditInput, type Lane, type ProviderConfig } from "../types";
 import { newLane, uid } from "../lib/utils";
 import { ptyKill } from "../lib/pty";
 import { gitWorktreeAdd, gitWorktreeRemove } from "../lib/tauri";
-import { loadLastUsed } from "./useProvider";
+import { loadLastUsed } from "../lib/providerHistory";
 import type { PendingTool } from "../components/ApprovalModal";
 
 const AUDIT_MAX = 100;
-
-export interface AuditInput {
-  tool: string;
-  args: string;
-  decision: "auto" | "approved" | "rejected";
-  ok: boolean;
-  ms: number;
-  note?: string;
-}
 
 // Lanes: each lane is its own app instance - own provider copy, own
 // worktree, own UI. Owns lane list + selection, per-lane busy/unseen

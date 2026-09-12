@@ -8,13 +8,19 @@ without your explicit approval.
   Anthropic, or Gemini. Token streaming, loop guard, history windowing.
 - **Review gate** — agent writes stage into a Diff view; you Approve & apply
   (optionally commit). Shell, browser actions, renames, deletes, and commits
-  pop an approval dialog. Read-only tools run free.
+  pop an approval dialog. Read-only tools run free. `shell_run` is additionally
+  screened backend-side: destructive patterns (`rm -rf /`, `mkfs`, `dd` to
+  devices, fork bombs) and credential reads (`~/.ssh`, `.aws/credentials`,
+  `/etc/shadow`, …) are refused even if approved blindly. It is a backstop,
+  not a sandbox — approved commands still run as your user.
 - **Browser Use** — real Chromium (persistent profile, signed in as you) the
   agent can navigate, read, click, type, and screenshot (vision).
 - **Nexa Pad / Plan / Memory** — live shared notes at `.nexa/`; Memory is
   durable cross-session context.
-- **Lanes + routines** — concurrent per-lane agents (background work with
-  review-later dots) and scheduled routines, each in its own lane.
+- **Lanes + routines** — each lane is its own app instance: own provider
+  config, own git worktree + branch (auto-isolated, cleaned on close), own
+  tabs/UI/chat/audit. Routines run in dedicated background lanes with
+  review-later dots.
 - **Git tab** — status, diffs, log, commits; Approve-&-commit from the gate.
 - **Transparency** — per-lane tokens, estimated cost, tool timing, and a
   persisted audit trail of every tool call + decision.

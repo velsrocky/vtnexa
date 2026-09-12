@@ -1,57 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { DEFAULT_PROVIDER, type Lane, type ProviderConfig, type ProviderKind } from "../types";
+import type { Lane, ProviderConfig } from "../types";
 import { keyGet, keySet } from "../lib/tauri";
 import { listModels } from "../lib/providers";
+import { loadHist, saveHist, type ProviderEntry } from "../lib/providerHistory";
 
-// Working provider history: every config that successfully answered once is
-// kept (localStorage) for one-click reuse. Shared across lanes as a
-// convenience - like a browser remembering servers. Keys at rest are
-// plaintext in the app data dir - same trust level as the workspace itself,
-// not a vault.
-const HIST_KEY = "vtai.providerHistory";
-const HIST_MAX = 12;
-
-export interface ProviderEntry {
-  baseUrl: string;
-  model: string;
-  apiKey: string;
-  kind?: ProviderKind;
-}
-
-function asKind(v: unknown): ProviderKind {
-  return v === "openai" || v === "anthropic" || v === "gemini" ? v : "auto";
-}
-
-export { asKind };
-
-function loadHist(): ProviderEntry[] {
-  try {
-    const arr = JSON.parse(localStorage.getItem(HIST_KEY) || "[]");
-    if (Array.isArray(arr)) {
-      return arr
-        .filter((e) => e && typeof e.baseUrl === "string" && typeof e.model === "string")
-        .map((e) => ({
-          baseUrl: e.baseUrl,
-          model: e.model,
-          apiKey: typeof e.apiKey === "string" ? e.apiKey : "",
-          kind: asKind(e.kind),
-        }))
-        .slice(0, HIST_MAX);
-    }
-  } catch {
-    /* ignore */
-  }
-  return [];
-}
-
-/** Seed for fresh lanes: last working config, else the local default. */
-export function loadLastUsed(): ProviderConfig {
-  const [head] = loadHist();
-  if (head) {
-    return { baseUrl: head.baseUrl, model: head.model, apiKey: head.apiKey, kind: head.kind ?? "auto" };
-  }
-  return { ...DEFAULT_PROVIDER };
-}
+export type { ProviderEntry };
 
 // Per-lane provider config: the bar always edits the ACTIVE lane's own
 // copy - there is no shared global. Keychain + history + model discovery
@@ -106,11 +59,7 @@ export function useProvider(opts: {
           // Strip plaintext keys from history now that they're migrated.
           setProvHist((h) => {
             const next = h.map((e) => ({ ...e, apiKey: "" }));
-            try {
-              localStorage.setItem(HIST_KEY, JSON.stringify(next));
-            } catch {
-              /* ignore */
-            }
+            saveHist(next);
             return next;
           });
         }
@@ -134,8 +83,8 @@ export function useProvider(opts: {
       .then(() => setKeychainOk(true))
       .catch(() => setKeychainOk(false));
     const keepLocal = !keychainOk;
-    setProvHist((h) => {
-      const next = [
+    setProvHist((h) =>
+      saveHist([
         {
           baseUrl: used.baseUrl,
           model: used.model,
@@ -150,14 +99,8 @@ export function useProvider(opts: {
               (e.kind ?? "auto") === (used.kind ?? "auto")
             ),
         ),
-      ].slice(0, HIST_MAX);
-      try {
-        localStorage.setItem(HIST_KEY, JSON.stringify(next));
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
+      ]),
+    );
   }
 
   // Ask the endpoint what models it actually serves - no more guessing names.

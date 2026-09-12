@@ -32,6 +32,16 @@ export interface AuditEvent {
   note?: string;
 }
 
+/** Audit input: everything but the hook-assigned id/ts. */
+export interface AuditInput {
+  tool: string;
+  args: string;
+  decision: "auto" | "approved" | "rejected";
+  ok: boolean;
+  ms: number;
+  note?: string;
+}
+
 export interface Lane {
   id: string;
   name: string;

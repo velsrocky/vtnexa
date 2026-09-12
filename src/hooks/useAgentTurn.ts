@@ -1,18 +1,9 @@
 import type { MutableRefObject } from "react";
-import type { CenterTab, ChatMsg, Lane, ProviderConfig, SkillInfo } from "../types";
+import type { AuditInput, CenterTab, ChatMsg, Lane, ProviderConfig, SkillInfo } from "../types";
 import { fsRead, skillRead, type NexaKind } from "../lib/tauri";
 import { chatWithTools } from "../lib/providers";
 import { uid } from "../lib/utils";
 import type { PendingTool } from "../components/ApprovalModal";
-
-export interface AgentAuditInput {
-  tool: string;
-  args: string;
-  decision: "auto" | "approved" | "rejected";
-  ok: boolean;
-  ms: number;
-  note?: string;
-}
 
 interface Deps {
   lanes: Lane[];
@@ -30,7 +21,7 @@ interface Deps {
   lastSynced: MutableRefObject<{ pad: string; plan: string; memory: string }>;
   updateLane: (id: string, fn: (l: Lane) => Lane) => void;
   setLaneBusy: (id: string, v: boolean) => void;
-  logAudit: (laneId: string, e: AgentAuditInput) => void;
+  logAudit: (laneId: string, e: AuditInput) => void;
   rememberProvider: (used: ProviderConfig) => void;
   setUnseen: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   setPendingTools: React.Dispatch<React.SetStateAction<PendingTool[]>>;

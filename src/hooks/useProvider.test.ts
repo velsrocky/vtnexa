@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { asKind, useProvider } from "./useProvider";
+import { useProvider } from "./useProvider";
 import { newLane } from "../lib/utils";
 import type { Lane } from "../types";
 
@@ -149,14 +149,5 @@ describe("useProvider lane isolation", () => {
     expect(updated[0].id).toBe(lane.id);
     const patched = applyUpdates(updated, lane);
     expect(patched.provider).toMatchObject({ baseUrl: "https://other.test", model: "m2" });
-  });
-});
-
-describe("asKind", () => {
-  it("allows known backends, auto otherwise", () => {
-    expect(asKind("openai")).toBe("openai");
-    expect(asKind("gemini")).toBe("gemini");
-    expect(asKind("bogus")).toBe("auto");
-    expect(asKind(undefined)).toBe("auto");
   });
 });

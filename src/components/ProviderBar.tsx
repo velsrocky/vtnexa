@@ -1,7 +1,6 @@
 import type { ProviderConfig } from "../types";
 import Combo from "./Combo";
-import { asKind } from "../hooks/useProvider";
-import type { ProviderEntry } from "../hooks/useProvider";
+import { asKind, type ProviderEntry } from "../lib/providerHistory";
 
 export default function ProviderBar({ laneName, editCfg, provHist, provModels, modelsNote, keychainOk, setEditCfg, refreshModels }: {
   laneName: string;

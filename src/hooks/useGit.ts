@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import type { AuditInput } from "../types";
 import {
   gitCommit,
   gitDiff,
@@ -7,15 +8,6 @@ import {
   type GitFile,
   type GitLogEntry,
 } from "../lib/tauri";
-
-export interface AuditInput {
-  tool: string;
-  args: string;
-  decision: "auto" | "approved" | "rejected";
-  ok: boolean;
-  ms: number;
-  note?: string;
-}
 
 // Git tab state + actions. Pure git status/diff/log/commit — worktree
 // isolate/merge stays in App (needs lanes + PTY + files).

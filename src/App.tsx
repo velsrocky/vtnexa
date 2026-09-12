@@ -7,10 +7,6 @@ import { loader } from "@monaco-editor/react";
 loader.config({ paths: { vs: "/vs" } });
 import "./App.css";
 import type { CenterTab, SideTab } from "./types";
-import {
-  workspaceRoot as getWsRoot,
-  setWorkspaceRoot as setWsRootBackend,
-} from "./lib/tauri";
 import ApprovalModal from "./components/ApprovalModal";
 import RoutinesModal from "./components/RoutinesModal";
 import GitPane from "./components/GitPane";
@@ -20,7 +16,6 @@ import EditorPane from "./components/EditorPane";
 import TopBar from "./components/TopBar";
 import ProviderBar from "./components/ProviderBar";
 import WorkspaceBar from "./components/WorkspaceBar";
-import { isWithin } from "./lib/utils";
 import { useGit } from "./hooks/useGit";
 import { useLanes } from "./hooks/useLanes";
 import { useAgentTurn } from "./hooks/useAgentTurn";
@@ -33,7 +28,8 @@ import { useWorktree } from "./hooks/useWorktree";
 import { useShell } from "./hooks/useShell";
 import { usePrefs } from "./hooks/usePrefs";
 import { useSkills } from "./hooks/useSkills";
-import { useWorkspace, useLaneFollow, WS_KEY } from "./hooks/useWorkspace";
+import { useWorkspace, useLaneFollow } from "./hooks/useWorkspace";
+import { useInit } from "./hooks/useInit";
 import { useRoutines } from "./hooks/useRoutines";
 
 export default function App() {
@@ -316,80 +312,25 @@ export default function App() {
     inheritProvider: lane.provider,
   });
 
-  async function changeWorkspace(next: string) {
-    const target = next.trim();
-    if (!target || target === wsCommitted.current) return;
-    wsCommitted.current = target;
-    try {
-      await saveSessionNow();
-      const canon = await setWsRootBackend(target);
-      wsCommitted.current = canon;
-      setWorkspaceRoot(canon);
-      localStorage.setItem(WS_KEY, canon);
-      setCwdState(canon);
-      // Pull lanes back inside the new root (worktrees belong to the old one).
-      setLanes((ls) =>
-        ls.map((l) => ({
-          ...l,
-          worktree: null,
-          cwd: isWithin(canon, l.cwd) && l.cwd ? l.cwd : canon,
-        })),
-      );
-      setOpenPath("");
-      nexaReady.current = false;
-      await loadNexa();
-      sessionReady.current = false;
-      await loadSession();
-      routinesReady.current = false;
-      await loadRoutines();
-      await refreshSkills();
-      await loadConventions(canon);
-    } catch (e) {
-      wsCommitted.current = "";
-      updateLane(lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\nworkspace change failed: ${e}` }));
-    }
-  }
-
-  async function browseWorkspace() {
-    try {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const sel = await open({ directory: true, multiple: false, defaultPath: workspaceRoot || undefined });
-      if (typeof sel === "string" && sel) await changeWorkspace(sel);
-    } catch (e) {
-      updateLane(lane.id, (l) => ({ ...l, shellOut: l.shellOut + `\nbrowse failed: ${e}` }));
-    }
-  }
-
-  // Init: localStorage → backend ($HOME default) - no hardcoded user path.
-  // Default lane's PTY must start in the project, not $HOME: defer the only
-  // empty-cwd fix until canon is known, and don't overwrite a restored cwd.
-  useEffect(() => {
-    (async () => {
-      try {
-        const stored = localStorage.getItem(WS_KEY);
-        const initial = stored || (await getWsRoot());
-        const canon = await setWsRootBackend(initial);
-        wsCommitted.current = canon;
-        setWorkspaceRoot(canon);
-        localStorage.setItem(WS_KEY, canon);
-        setCwdState((c) => c || canon);
-        setLanes((ls) => ls.map((l) => (!l.cwd ? { ...l, cwd: canon } : l)));
-        await loadNexa();
-        await loadSession();
-        await loadRoutines();
-        await refreshSkills();
-        await loadConventions(canon);
-        // Restored lanes may still carry empty cwd (pre-fix sessions) - clamp
-        // them without clobbering a real per-lane directory.
-        setLanes((ls) =>
-          ls.map((l) => (!l.cwd || !isWithin(canon, l.cwd) ? { ...l, cwd: canon } : l)),
-        );
-      } catch (e) {
-        console.warn("workspace init failed", e);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const { changeWorkspace, browseWorkspace } = useInit({
+    laneId: lane.id,
+    workspaceRoot,
+    wsCommitted,
+    nexaReady,
+    sessionReady,
+    routinesReady,
+    setWorkspaceRoot,
+    setCwdState,
+    setLanes,
+    setOpenPath,
+    updateLane,
+    saveSessionNow,
+    loadSession,
+    loadNexa,
+    loadRoutines,
+    refreshSkills,
+    loadConventions,
+  });
 
   useEffect(() => {
     refreshFiles(cwd, lane?.id);

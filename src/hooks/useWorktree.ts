@@ -1,15 +1,6 @@
-import type { Lane } from "../types";
+import type { AuditInput, Lane } from "../types";
 import { gitMerge, gitWorktreeRemove } from "../lib/tauri";
 import { ptyWrite } from "../lib/pty";
-
-export interface AuditInput {
-  tool: string;
-  args: string;
-  decision: "auto" | "approved" | "rejected";
-  ok: boolean;
-  ms: number;
-  note?: string;
-}
 
 // Per-lane git worktrees (filesystem isolation for parallel agents).
 // Worktrees live at <workspace>/.nexa/worktrees/<lane> - inside the sandbox
