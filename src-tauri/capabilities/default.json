@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main"],
+  "description": "Capability for all windows (main + siblings opened via create_window)",
+  "windows": ["main", "main-*"],
   "permissions": [
     "core:default",
     "opener:default",
