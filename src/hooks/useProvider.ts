@@ -26,7 +26,26 @@ export function useProvider(opts: {
   const ws = opts.ws;
   const editCfg: ProviderConfig = ws.provider;
   function setEditCfg(patch: Partial<ProviderConfig>) {
-    opts.updateWs((w) => ({ ...w, provider: { ...w.provider, ...patch } }));
+    opts.updateWs((w) => {
+      const next = { ...w.provider, ...patch };
+      // Keys belong to a baseUrl+model pair: switching either clears the
+      // field; the keychain effect below refills it for the new pair.
+      if (("baseUrl" in patch || "model" in patch) && !("apiKey" in patch)) {
+        next.apiKey = "";
+      }
+      return { ...w, provider: next };
+    });
+    // Mirror to the keychain the moment the key is edited - not only after a
+    // successful turn - so a restart never loses it. Empty key = delete.
+    if (typeof patch.apiKey === "string") {
+      const url = patch.baseUrl ?? ws.provider.baseUrl;
+      const model = patch.model ?? ws.provider.model;
+      if (url.trim() && model.trim()) {
+        keySet(url, model, patch.apiKey)
+          .then(() => setKeychainOk(true))
+          .catch(() => setKeychainOk(false));
+      }
+    }
   }
 
   // Persist this window's draft on every keystroke so reloads never lose it.

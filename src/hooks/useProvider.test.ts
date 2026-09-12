@@ -182,3 +182,66 @@ describe("useProvider draft persistence", () => {
     void wsOf;
   });
 });
+
+describe("useProvider key mirroring", () => {
+  it("writes the key to the keychain immediately on edit", () => {
+    const keySets: any[] = [];
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "key_set") {
+        keySets.push(args);
+        return {};
+      }
+      return "";
+    });
+    const { result } = setup();
+    act(() => {
+      result.current.setEditCfg({ apiKey: "sk-immediate" });
+    });
+    expect(keySets).toEqual([
+      {
+        baseUrl: "http://localhost:11434/v1",
+        model: "qwen2.5-coder:7b",
+        secret: "sk-immediate",
+      },
+    ]);
+  });
+
+  it("switching model clears the key, then refills from the keychain for the new pair", async () => {
+    vi.useFakeTimers();
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "key_get") return args.model === "big" ? "K-BIG" : "";
+      return {};
+    });
+    let ws: Workspace = newWorkspace("main:ws", "/w", {
+      baseUrl: "https://api.test",
+      apiKey: "K-BIG",
+      model: "big",
+      kind: "auto",
+    });
+    const { result, rerender } = renderHook(() =>
+      useProvider({ ws, updateWs: (fn) => { ws = fn(ws); } }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(ws.provider.apiKey).toBe("K-BIG");
+    act(() => {
+      result.current.setEditCfg({ model: "small" });
+      rerender();
+    });
+    expect(ws.provider.apiKey).toBe("");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    // "small" has no stored key -> stays empty; switch back -> refilled.
+    expect(ws.provider.apiKey).toBe("");
+    act(() => {
+      result.current.setEditCfg({ model: "big" });
+      rerender();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(ws.provider.apiKey).toBe("K-BIG");
+  });
+});
