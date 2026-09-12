@@ -62,18 +62,48 @@ function setup(ws: Workspace = BASE_WS) {
 }
 
 describe("useSession.saveSessionNow", () => {
-  it("persists v6 single workspace, strips secrets and non-chat roles", async () => {
+  it("persists v7 per-window slot, strips secrets and non-chat roles", async () => {
     const { result, saves } = setup();
     await act(async () => {
       await result.current.saveSessionNow();
     });
     expect(saves).toHaveLength(1);
     const data = JSON.parse(saves[0]);
-    expect(data.version).toBe(6);
-    expect(data.workspace.messages.map((m: any) => m.role)).toEqual(["user", "assistant"]);
-    expect(data.workspace.provider).toMatchObject({ baseUrl: "http://x", model: "m", apiKey: "" });
-    expect(data.workspace.buffers).toEqual({});
-    expect(data.workspace).toMatchObject({ centerTab: "edit", sideTab: "chat", chatDraft: "", previewUrl: "" });
+    expect(data.version).toBe(7);
+    const w = data.windows.main;
+    expect(w.messages.map((m: any) => m.role)).toEqual(["user", "assistant"]);
+    expect(w.provider).toMatchObject({ baseUrl: "http://x", model: "m", apiKey: "" });
+    expect(w.buffers).toEqual({});
+    expect(w).toMatchObject({ centerTab: "edit", sideTab: "chat", chatDraft: "", previewUrl: "" });
+  });
+
+  it("merges into the existing file without touching sibling slots", async () => {
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "session_load")
+        return JSON.stringify({ version: 7, windows: { "main-2": { cwd: "/other", messages: [] } } });
+      if (cmd === "session_save") {
+        saves2.push(JSON.parse(args.content));
+        return {};
+      }
+      if (cmd === "key_get") return "";
+      if (cmd === "fs_list") return [];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const saves2: any[] = [];
+    const { result } = renderHook(() =>
+      useSession({
+        ws: BASE_WS,
+        workspaceRoot: "/w",
+        setWs: vi.fn(),
+        setCwdState: vi.fn(),
+        note: vi.fn(),
+      }),
+    );
+    await act(async () => {
+      await result.current.saveSessionNow();
+    });
+    expect(saves2[0].windows["main-2"]).toEqual({ cwd: "/other", messages: [] });
+    expect(saves2[0].windows.main).toBeTruthy();
   });
 
   it("persists per-window UI state", async () => {
@@ -87,7 +117,7 @@ describe("useSession.saveSessionNow", () => {
     await act(async () => {
       await result.current.saveSessionNow();
     });
-    expect(JSON.parse(saves[0]).workspace).toMatchObject({
+    expect(JSON.parse(saves[0]).windows.main).toMatchObject({
       centerTab: "git",
       sideTab: "audit",
       chatDraft: "half-typed",
@@ -105,7 +135,7 @@ describe("useSession.saveSessionNow", () => {
     await act(async () => {
       await result.current.saveSessionNow();
     });
-    expect(JSON.parse(saves[0]).workspace.messages.length).toBeLessThan(500);
+    expect(JSON.parse(saves[0]).windows.main.messages.length).toBeLessThan(500);
     expect(notes.join("")).toMatch(/trimmed oldest messages/);
   });
 
@@ -153,10 +183,11 @@ describe("useSession.loadSession", () => {
     return { ...hook, restored };
   }
 
-  it("restores v6, drops dangling worktrees, refills keys", async () => {
+  it("restores its own v7 slot, drops dangling worktrees, refills keys", async () => {
     const raw = JSON.stringify({
-      version: 6,
-      workspace: {
+      version: 7,
+      windows: {
+        main: {
         id: "main:ws",
         cwd: "/w",
         messages: [{ id: "m1", role: "user", content: "hi" }],
@@ -166,8 +197,9 @@ describe("useSession.loadSession", () => {
         buffers: {},
         originals: {},
         openPath: "",
-        provider: { baseUrl: "http://x", model: "m", kind: "openai" },
-        worktree: { path: "/w/.nexa/worktrees/gone", branch: "vtnexa/x" },
+          provider: { baseUrl: "http://x", model: "m", kind: "openai" },
+          worktree: { path: "/w/.nexa/worktrees/gone", branch: "vtnexa/x" },
+        },
       },
     });
     const { result, restored } = loadSetup(raw);
@@ -181,24 +213,41 @@ describe("useSession.loadSession", () => {
     expect(result.current.sessionReady.current).toBe(true);
   });
 
-  it("adopts the first lane of a v4/v5 lanes[] session", async () => {
+  it("starts a fresh window empty when only another label has a slot", async () => {
     const raw = JSON.stringify({
-      version: 5,
-      lanes: [
-        {
-          id: "lane1",
-          name: "Lane 1",
+      version: 7,
+      windows: {
+        "main-2": {
+          id: "main-2:ws",
           cwd: "/w",
-          messages: [],
-          usage: { input: 0, output: 0, cost: 0, tools: 0, toolMs: 0 },
-          audit: [],
-          tabs: [],
-          buffers: {},
-          originals: {},
-          openPath: "",
-          provider: { baseUrl: "https://y.test", model: "ym", apiKey: "OLD", kind: "gemini" },
+          messages: [{ id: "m1", role: "user", content: "not yours" }],
         },
-      ],
+      },
+    });
+    const { result, restored } = loadSetup(raw);
+    await act(async () => {
+      await result.current.loadSession();
+    });
+    expect(restored).toHaveLength(0);
+    expect(result.current.sessionReady.current).toBe(true);
+  });
+
+  it("migrates v6/v4/v5 (single workspace / lanes[0]) into the main slot", async () => {
+    const raw = JSON.stringify({
+      version: 6,
+      workspace: {
+        id: "lane1",
+        name: "Lane 1",
+        cwd: "/w",
+        messages: [],
+        usage: { input: 0, output: 0, cost: 0, tools: 0, toolMs: 0 },
+        audit: [],
+        tabs: [],
+        buffers: {},
+        originals: {},
+        openPath: "",
+        provider: { baseUrl: "https://y.test", model: "ym", apiKey: "OLD", kind: "gemini" },
+      },
     });
     const { result, restored } = loadSetup(raw);
     await act(async () => {

@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { DEFAULT_PROVIDER, type AuditEvent, type CenterTab, type WorkspaceUsage, type ProviderConfig, type SideTab, type Workspace } from "../types";
 import { fsList, keyGet, sessionLoad, sessionSave } from "../lib/tauri";
 import { uid } from "../lib/utils";
+import { windowLabel } from "./useWorkspaceState";
 
 const SESSION_TARGET_BYTES = 1_800_000;
 const AUDIT_MAX = 100;
@@ -60,11 +61,12 @@ function asAudit(v: unknown): AuditEvent[] {
   return out.slice(-AUDIT_MAX);
 }
 
-// Session persistence: this window's workspace survives a restart.
+// Session persistence: each window's workspace survives a restart.
 // Serialized to <workspace>/.nexa/session.json (project-local, inspectable).
-// v6 stores one workspace; v4/v5 stored a lanes[] array - the first lane is
-// adopted so old sessions still open. Two windows on the SAME folder are
-// last-writer-wins by design (windows are meant for different projects).
+// v7 stores a per-window map { windows: { "<label>": workspace } } - a new
+// window starts EMPTY even in a folder another window uses, and saves never
+// clobber each other (each writes only its own slot). v6 (single workspace)
+// and v4/v5 (lanes[]) migrate into the "main" slot.
 export function useSession(opts: {
   ws: Workspace;
   workspaceRoot: string;
@@ -78,54 +80,65 @@ export function useSession(opts: {
   const stateRef = useRef(opts);
   stateRef.current = opts;
 
-  function sessionPayload(): { json: string; trimmed: boolean } | null {
+  function ownWorkspaceSnap(msgCap: number): Record<string, unknown> {
     const { ws } = stateRef.current;
-    const snap = (msgCap: number) => {
-      const dirtyBuffers: Record<string, string> = {};
-      const dirtyOriginals: Record<string, string> = {};
-      for (const t of ws.tabs ?? []) {
-        const b = ws.buffers?.[t];
-        const o = ws.originals?.[t];
-        if (b !== undefined && b !== o) {
-          dirtyBuffers[t] = b.slice(0, 50000);
-          dirtyOriginals[t] = (o ?? "").slice(0, 50000);
-        }
+    const dirtyBuffers: Record<string, string> = {};
+    const dirtyOriginals: Record<string, string> = {};
+    for (const t of ws.tabs ?? []) {
+      const b = ws.buffers?.[t];
+      const o = ws.originals?.[t];
+      if (b !== undefined && b !== o) {
+        dirtyBuffers[t] = b.slice(0, 50000);
+        dirtyOriginals[t] = (o ?? "").slice(0, 50000);
       }
-      return {
-        version: 6,
-        workspace: {
-          id: ws.id,
-          cwd: ws.cwd,
-          messages: ws.messages
-            .filter((m) => m.role === "user" || m.role === "assistant")
-            .slice(-msgCap)
-            .map((m) => ({ id: m.id, role: m.role, content: m.content })),
-          usage: ws.usage,
-          audit: ws.audit.slice(-AUDIT_MAX),
-          tabs: (ws.tabs ?? []).slice(0, 20),
-          buffers: dirtyBuffers,
-          originals: dirtyOriginals,
-          openPath: ws.openPath ?? "",
-          shellH: ws.shellH ?? 80,
-          ptyH: ws.ptyH ?? 220,
-          provider: {
-            baseUrl: ws.provider.baseUrl,
-            model: ws.provider.model,
-            kind: ws.provider.kind ?? "auto",
-            apiKey: "",
-          },
-          worktree: ws.worktree ?? null,
-          centerTab: ws.centerTab ?? "edit",
-          sideTab: ws.sideTab ?? "chat",
-          chatDraft: ws.chatDraft ?? "",
-          previewUrl: ws.previewUrl ?? "",
-        },
-      };
+    }
+    return {
+      id: ws.id,
+      cwd: ws.cwd,
+      messages: ws.messages
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .slice(-msgCap)
+        .map((m) => ({ id: m.id, role: m.role, content: m.content })),
+      usage: ws.usage,
+      audit: ws.audit.slice(-AUDIT_MAX),
+      tabs: (ws.tabs ?? []).slice(0, 20),
+      buffers: dirtyBuffers,
+      originals: dirtyOriginals,
+      openPath: ws.openPath ?? "",
+      shellH: ws.shellH ?? 80,
+      ptyH: ws.ptyH ?? 220,
+      provider: {
+        baseUrl: ws.provider.baseUrl,
+        model: ws.provider.model,
+        kind: ws.provider.kind ?? "auto",
+        apiKey: "",
+      },
+      worktree: ws.worktree ?? null,
+      centerTab: ws.centerTab ?? "edit",
+      sideTab: ws.sideTab ?? "chat",
+      chatDraft: ws.chatDraft ?? "",
+      previewUrl: ws.previewUrl ?? "",
     };
+  }
+
+  // Merge this window's slot into the existing file so sibling windows'
+  // slots survive untouched.
+  async function buildFile(existingRaw: string): Promise<{ json: string; trimmed: boolean } | null> {
+    let windows: Record<string, unknown> = {};
+    try {
+      const prev = JSON.parse(existingRaw || "{}");
+      if (prev && typeof prev === "object" && prev.windows && typeof prev.windows === "object") {
+        windows = prev.windows;
+      }
+    } catch {
+      /* corrupt or absent - start fresh */
+    }
+    delete windows[windowLabel];
     let cap = 500;
     for (let i = 0; i < 4; i++) {
-      const s = JSON.stringify(snap(cap));
-      if (s.length <= SESSION_TARGET_BYTES) return { json: s, trimmed: i > 0 };
+      const next = { ...windows, [windowLabel]: ownWorkspaceSnap(cap) };
+      const json = JSON.stringify({ version: 7, windows: next });
+      if (json.length <= SESSION_TARGET_BYTES) return { json, trimmed: i > 0 };
       cap = Math.floor(cap / 2);
     }
     return null;
@@ -143,7 +156,8 @@ export function useSession(opts: {
 
   async function saveSessionNow() {
     try {
-      const payload = sessionPayload();
+      const existing = await sessionLoad().catch(() => "");
+      const payload = await buildFile(existing);
       if (payload === null) {
         noteTrim("overflow");
         return;
@@ -205,10 +219,17 @@ export function useSession(opts: {
     try {
       const raw = await sessionLoad();
       if (!raw) return;
-      const data = JSON.parse(raw) as { version?: number; workspace?: unknown; lanes?: unknown };
-      // v6: single workspace. v4/v5: lanes array - adopt the first.
-      const src: any =
-        data.workspace ?? (Array.isArray(data.lanes) && data.lanes.length ? data.lanes[0] : null);
+      const data = JSON.parse(raw) as { version?: number; windows?: unknown; workspace?: unknown; lanes?: unknown };
+      let src: any;
+      if (data.windows && typeof data.windows === "object") {
+        // v7: only THIS window's slot. A fresh label starts empty.
+        src = (data.windows as Record<string, unknown>)[windowLabel];
+      } else {
+        // v6 single workspace / v4-v5 lanes[0]: migrate as the main slot.
+        src =
+          data.workspace ?? (Array.isArray(data.lanes) && data.lanes.length ? data.lanes[0] : null);
+        if (src && windowLabel !== "main") src = undefined;
+      }
       if (!src) return;
       const restored = asWorkspace(src, ws.id);
       // Worktree may have been removed outside the app - drop dangling refs.
