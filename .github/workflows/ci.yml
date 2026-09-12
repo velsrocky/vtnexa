@@ -47,7 +47,10 @@ jobs:
             patchelf build-essential curl wget file libxdo-dev libssl-dev
       # tauri.conf.json bundles sidecar-stage/browser - gitignored, built here
       - name: Stage sidecar resources
-        run: pnpm install --frozen-lockfile && pnpm run stage-sidecar
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -C sidecar/browser install --frozen-lockfile
+          pnpm run stage-sidecar
         working-directory: .
       - run: cargo fmt --check
       - run: cargo clippy --lib --tests -- -D warnings
