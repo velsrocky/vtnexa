@@ -1,70 +1,122 @@
-# VTNexa — private, review-gated agentic workspace
+# VTNexa
 
-A Tauri v2 desktop app (Rust + React/TypeScript): a Commander agent drives
-your workspace through tools, with nothing writing, running, or clicking
-without your explicit approval.
+**A private, review-gated agentic workspace for your code.** A desktop app
+(Tauri v2 + React) where a tool-calling agent drives your workspace — and
+*nothing* writes, runs, or clicks without your explicit approval.
 
-- **Commander** — tool-calling agent over any OpenAI-compatible endpoint,
-  Anthropic, or Gemini. Token streaming, loop guard, history windowing.
-- **Review gate** — agent writes stage into a Diff view; you Approve & apply
-  (optionally commit). Shell, browser actions, renames, deletes, and commits
-  pop an approval dialog. Read-only tools run free. `shell_run` is additionally
-  screened backend-side: destructive patterns (`rm -rf /`, `mkfs`, `dd` to
-  devices, fork bombs) and credential reads (`~/.ssh`, `.aws/credentials`,
-  `/etc/shadow`, …) are refused even if approved blindly. It is a backstop,
-  not a sandbox — approved commands still run as your user.
-- **Browser Use** — real Chromium (persistent profile, signed in as you) the
-  agent can navigate, read, click, type, and screenshot (vision).
-- **Nexa Pad / Plan / Memory** — live shared notes at `.nexa/`; Memory is
-  durable cross-session context.
-- **Windows + routines** — every OS window is an independent VTNexa
-  instance: own workspace folder, provider config, PTY, editor tabs, chat,
-  audit, and session file. ⧉ New Window (or a second app launch) opens a
-  sibling window. Routines run scheduled turns in this window.
-- **Git tab** — status, diffs, log, commits; Approve-&-commit from the gate.
-- **Transparency** — per-window tokens, estimated cost, tool timing, and a
-  persisted audit trail of every tool call + decision.
-- **Skills** — 8 ready-made slash skills (`/commit`, `/review`, `/explain`, `/map`, `/fix`, `/refactor`, `/test`, `/docs`) in `.vtnexa/skills/`. Invoke as `/name` in Commander or let the agent load them via `skill_read`; project `AGENTS.md`/`CLAUDE.md` is auto-loaded every turn.
-- **Local by default** — keys in the OS keychain, files and sessions under
-  your workspace (`.nexa/`), no telemetry. Works fully offline with Ollama.
+![VTNexa window](docs/screenshot.png)
 
-## Skills
+Run it fully offline against Ollama, or point it at any OpenAI-compatible
+endpoint, Anthropic, or Gemini. Your API keys live in the OS keychain. Your
+files stay yours. No telemetry, no accounts, no cloud round-trip you didn't
+choose.
 
-Bundled ready-mades live in `.vtnexa/skills/` (also shipped as Tauri resources, so they work before any workspace is opened). Add your own: create `.vtnexa/skills/<name>.md` — first `#` title is the name, first content line is the description, the rest is the instruction body.
+## Why this exists
 
-| Skill | What it does |
-|---|---|
-| `/commit` | Conventional commit message for staged changes |
-| `/review` | Review staged diff for bugs then style |
-| `/explain` | Bottom-up file/function explainer |
-| `/map` | Trace a feature across files |
-| `/fix` | Fix an error from root cause + verify |
-| `/refactor` | Clean up a file without changing behavior |
-| `/test` | Write or run tests for the last change |
-| `/docs` | Docstrings for changed functions |
+Most coding agents either (a) ask for permission on every keystroke or
+(b) quietly edit your repo and hope for the best. VTNexa takes a third path:
 
-Project convention: put team rules in `AGENTS.md` (or `CLAUDE.md` fallback) at the workspace root — Commander includes it every turn.
+- **The agent proposes, you dispose.** File edits land in a side-by-side Diff
+  view. You approve each one (optionally with an instant commit). Shell
+  commands, browser actions, renames, deletes and commits pop an approval
+  dialog — with a warning when a command looks like it escapes the workspace.
+- **Local by default.** `ollama pull qwen2.5-coder:7b` and you have a private
+  coding agent. Switch models per window — grind with a cheap local model in
+  one window, think with a frontier model in another.
+- **Every window is its own app instance.** Independent workspace folder,
+  provider, terminal, chat history, and audit trail. `⧉ New Window` (or just
+  launch the app again) opens a sibling.
+- **Full transparency.** Per-window token counts, estimated cost, tool
+  timing, and a persisted audit log of every tool call and your decision on
+  it.
 
-`vtnexa --help` lists skills and options; `vtnexa --version` and `vtnexa --uninstall` work without opening a window.
+## Features
 
-## Run
+- **Commander** — tool-calling agent: list/read/search files, propose diffs,
+  run shell commands, drive a real Chromium browser (navigate, click, type,
+  screenshot with vision), and commit to git — all behind the review gate.
+- **Editor** — Monaco with tabs, live markdown/HTML preview, and a Diff view
+  that is also the approval surface.
+- **Terminal** — a genuine interactive PTY per window (xterm.js): run dev
+  servers, `vim`, `ssh`, whatever you'd do in a terminal.
+- **Git tab** — status, per-file diffs, log, commit; approve-&-commit from
+  the gate.
+- **Nexa Pad / Plan / Memory** — shared notes and durable cross-session
+  context the agent reads and writes (`<workspace>/.nexa/`).
+- **Skills** — 8 ready-made slash commands (`/commit`, `/review`, `/explain`,
+  `/map`, `/fix`, `/refactor`, `/test`, `/docs`); add your own as markdown
+  files. Project `AGENTS.md`/`CLAUDE.md` is loaded every turn.
+- **Routines** — scheduled agent runs with a 15-minute minimum interval.
+- **Browser Use** — persistent Chromium profile (signed in as you) the agent
+  can operate with your approval; screenshots come back as vision input.
 
-Prereqs: Node/pnpm, Rust, Ollama (or any OpenAI-compatible endpoint,
-Anthropic/Gemini key).
+## Install
+
+**Linux (deb):** grab the latest release `.deb` and `sudo dpkg -i`.
+
+**From source:**
 
 ```sh
+# prereqs: Node 20+/pnpm, Rust, and Tauri's system deps
+# (Debian/Ubuntu: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev)
 pnpm install
-pnpm tauri dev        # frontend + Rust desktop shell
+pnpm tauri dev        # run from source
+pnpm tauri build      # produce .deb / AppImage
 ```
 
-First run: if Ollama isn't listening at `http://localhost:11434/v1`, the chat
-will say so — start it (`ollama serve`, `ollama pull qwen2.5-coder:7b`) or
-point baseUrl at your provider.
+**Model:** start Ollama (`ollama serve`, `ollama pull qwen2.5-coder:7b`) or
+paste any provider's baseUrl + key into the provider bar. Tip: pick a model
+that handles tool calling well (`qwen2.5:7b-instruct`, `llama3.1:8b`,
+`qwen2.5-coder:32b`); VTNexa also recovers tool calls printed as plain text.
 
-## Build
+## Security model (honest version)
+
+- **Approval is the gate.** Side-effecting tools (shell, browser actions,
+  rename/delete, commit) require your click. Read-only tools run free.
+- **Defense in depth.** The backend additionally *refuses* obviously
+  destructive shell patterns (`rm -rf /`, `mkfs`, `dd` to devices, fork
+  bombs) and direct reads of credential material (`~/.ssh`, AWS creds,
+  `/etc/shadow`). This is a backstop against blind clicking — **not a
+  sandbox**. Approved commands run as you, with your permissions. The
+  interactive terminal is deliberately unscreened: it's your shell.
+- **Workspace confinement.** File tools are confined server-side to the
+  workspace root you pick (per window), with symlink-safe checks and a
+  sensitive-path deny list.
+- **Secrets.** API keys go to the OS keychain (per endpoint+model), never to
+  session files or the workspace. Without a keychain daemon they fall back to
+  app-local storage and the UI says so.
+- **Prompt injection.** Browser/page content and file contents enter the
+  model's context. Treat agent-suggested commands accordingly — read the
+  approval dialog.
+
+Found a vulnerability? See [SECURITY.md](SECURITY.md).
+
+## CLI
+
+```
+vtnexa --version     show version
+vtnexa --help        options + skill list
+vtnexa --uninstall   remove a per-user install
+```
+
+## Development
 
 ```sh
-pnpm build            # typecheck + vite bundle
-pnpm tauri build      # distributable bundle (needs system webkit/rust targets)
-cargo test --manifest-path src-tauri/Cargo.toml --lib
+pnpm test            # 139 vitest tests (jsdom)
+pnpm build           # tsc + vite
+cargo test --manifest-path src-tauri/Cargo.toml --lib   # Rust
+pnpm install-local   # build .deb + install per-user (no sudo)
 ```
+
+Architecture in one line: thin React components → domain hooks (lanes are
+gone — one window = one workspace) → Tauri commands in `src-tauri/src/lib.rs`
+(sandbox, git, shell, PTY, keychain) → a Playwright sidecar for Browser Use.
+
+## Contributing
+
+Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Early
+project: expect rough edges, label experiments accordingly.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).

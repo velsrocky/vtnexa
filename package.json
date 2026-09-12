@@ -39,5 +39,23 @@
     "typescript": "~6.0.3",
     "vite": "^8.0.16",
     "vitest": "^5.0.0"
-  }
+  },
+  "license": "Apache-2.0",
+  "author": "VTNexa contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/velsrocky/vtnexa.git"
+  },
+  "bugs": {
+    "url": "https://github.com/velsrocky/vtnexa/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "tauri",
+    "local-first",
+    "ollama",
+    "code-editor",
+    "review-gated"
+  ]
 }

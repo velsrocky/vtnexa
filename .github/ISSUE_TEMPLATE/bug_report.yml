@@ -1,0 +1,46 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! The audit tab (per window) has a "Copy JSON"
+        button — pasting the relevant tool-call entry speeds up repro a lot.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      placeholder: Describe the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open workspace ...
+        2. Ask Commander ...
+        3. See error
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options: [Linux, macOS, Windows]
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model + endpoint
+      description: e.g. qwen2.5-coder:7b @ Ollama, claude-sonnet @ api.anthropic.com
+    validations:
+      required: true
+  - type: textarea
+    id: audit
+    attributes:
+      label: Audit trail (optional)
+      description: Paste the relevant entry from the Audit tab → Copy JSON.
+      render: json
