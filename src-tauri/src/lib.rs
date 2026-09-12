@@ -34,10 +34,7 @@ const MAX_LIST_ENTRIES: usize = 5000;
 /// Atomic write: temp file in the same dir, fsync, then rename. A crash can
 /// never leave a half-written session.json / config file behind.
 fn write_atomic(path: &std::path::Path, content: &[u8]) -> Result<(), String> {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -215,13 +212,19 @@ fn checked_path(
 }
 
 #[tauri::command]
-fn workspace_root(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>) -> Result<String, String> {
-    Ok(root_snapshot(&state, window.label()).to_string_lossy().to_string())
+fn workspace_root(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+) -> Result<String, String> {
+    Ok(root_snapshot(&state, window.label())
+        .to_string_lossy()
+        .to_string())
 }
 
 #[tauri::command]
 fn set_workspace_root(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     path: String,
 ) -> Result<String, String> {
     let norm = safe_absolute(path, "workspace")?;
@@ -258,7 +261,11 @@ fn nexa_path_for(root: &std::path::Path, kind: &str) -> Result<std::path::PathBu
 }
 
 #[tauri::command]
-fn nexa_read(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, kind: String) -> Result<String, String> {
+fn nexa_read(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+    kind: String,
+) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
     let path = nexa_path_for(&root, &kind)?;
     match std::fs::read_to_string(&path) {
@@ -270,7 +277,8 @@ fn nexa_read(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoot
 
 #[tauri::command]
 fn nexa_write(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     kind: String,
     content: String,
 ) -> Result<(), String> {
@@ -302,7 +310,10 @@ fn session_path_for(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tauri::command]
-fn session_load(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>) -> Result<String, String> {
+fn session_load(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
     let path = session_path_for(&root);
     match std::fs::read_to_string(&path) {
@@ -313,7 +324,11 @@ fn session_load(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceR
 }
 
 #[tauri::command]
-fn session_save(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, content: String) -> Result<(), String> {
+fn session_save(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+    content: String,
+) -> Result<(), String> {
     if content.contains('\0') {
         return Err("session: invalid content".to_string());
     }
@@ -340,7 +355,10 @@ fn routines_path_for(root: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tauri::command]
-fn routines_load(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>) -> Result<String, String> {
+fn routines_load(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
     let path = routines_path_for(&root);
     match std::fs::read_to_string(&path) {
@@ -351,7 +369,11 @@ fn routines_load(window: tauri::WebviewWindow, state: tauri::State<'_, Workspace
 }
 
 #[tauri::command]
-fn routines_save(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, content: String) -> Result<(), String> {
+fn routines_save(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+    content: String,
+) -> Result<(), String> {
     if content.contains('\0') {
         return Err("routines: invalid content".to_string());
     }
@@ -432,7 +454,8 @@ fn key_set(base_url: String, model: String, secret: String) -> Result<(), String
 
 #[tauri::command]
 fn fs_list(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     path: String,
 ) -> Result<Vec<FileEntry>, String> {
     let safe = checked_path(&state, window.label(), path, "fs_list")?;
@@ -460,7 +483,11 @@ fn fs_list(
 }
 
 #[tauri::command]
-fn fs_read(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, path: String) -> Result<String, String> {
+fn fs_read(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+    path: String,
+) -> Result<String, String> {
     let safe = checked_path(&state, window.label(), path, "fs_read")?;
     let meta = std::fs::metadata(&safe).map_err(|e| e.to_string())?;
     if meta.len() > MAX_READ_BYTES {
@@ -475,7 +502,8 @@ fn fs_read(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>
 
 #[tauri::command]
 fn fs_write(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     path: String,
     content: String,
 ) -> Result<(), String> {
@@ -504,10 +532,33 @@ const MAX_SEARCH_RESULTS: usize = 500;
 const MAX_SEARCH_FILE_BYTES: u64 = 1024 * 1024;
 
 const NOISE_DIRS: &[&str] = &[
-    ".git", ".hg", ".svn", ".nexa", "node_modules", "target", "dist", "build", "out",
-    ".next", ".nuxt", ".cache", ".turbo", "__pycache__", ".venv", "venv", ".tox",
-    ".idea", ".vscode", "vendor", ".mypy_cache", ".pytest_cache", ".ruff_cache",
-    "coverage", "DerivedData", "Pods", "vtai-browser-profile",
+    ".git",
+    ".hg",
+    ".svn",
+    ".nexa",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".cache",
+    ".turbo",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".idea",
+    ".vscode",
+    "vendor",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "coverage",
+    "DerivedData",
+    "Pods",
+    "vtai-browser-profile",
 ];
 
 #[derive(Debug, Serialize)]
@@ -534,7 +585,9 @@ fn walk_files(
     if *visited >= MAX_SEARCH_FILES {
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut items: Vec<_> = entries.flatten().collect();
     items.sort_by_key(|e| e.file_name());
     for e in items {
@@ -591,7 +644,8 @@ fn glob_matches(pat: &str, name: &str) -> bool {
 
 #[tauri::command]
 fn fs_search(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     query: String,
     path: Option<String>,
     glob: Option<String>,
@@ -607,7 +661,9 @@ fn fs_search(
     }
     let root = root_snapshot(&state, window.label());
     let start = match path {
-        Some(p) if !p.trim().is_empty() => checked_path(&state, window.label(), p, "fs_search.path")?,
+        Some(p) if !p.trim().is_empty() => {
+            checked_path(&state, window.label(), p, "fs_search.path")?
+        }
         _ => root.clone(),
     };
     if !start.is_dir() {
@@ -628,7 +684,11 @@ fn fs_search(
     } else {
         None
     };
-    let needle = if case_sensitive { query.clone() } else { query.to_lowercase() };
+    let needle = if case_sensitive {
+        query.clone()
+    } else {
+        query.to_lowercase()
+    };
 
     let mut results: Vec<SearchMatch> = Vec::new();
     let mut remaining = MAX_SEARCH_RESULTS;
@@ -645,11 +705,15 @@ fn fs_search(
                 }
             }
         }
-        let Ok(meta) = std::fs::metadata(file) else { return true };
+        let Ok(meta) = std::fs::metadata(file) else {
+            return true;
+        };
         if meta.len() > MAX_SEARCH_FILE_BYTES {
             return true;
         }
-        let Ok(bytes) = std::fs::read(file) else { return true };
+        let Ok(bytes) = std::fs::read(file) else {
+            return true;
+        };
         if bytes.contains(&0) {
             return true; // binary
         }
@@ -689,7 +753,8 @@ fn fs_search(
 
 #[tauri::command]
 fn fs_glob(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     pattern: String,
     path: Option<String>,
 ) -> Result<Vec<String>, String> {
@@ -737,7 +802,12 @@ fn git_cmd(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
         .env("GIT_EDITOR", "true")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
-        .map_err(|e| format!("git not available ({}). Install git to use version control.", e))?;
+        .map_err(|e| {
+            format!(
+                "git not available ({}). Install git to use version control.",
+                e
+            )
+        })?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         return Err(if err.is_empty() {
@@ -779,7 +849,11 @@ pub struct GitStatus {
 }
 
 #[tauri::command]
-fn git_status(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, cwd: String) -> Result<GitStatus, String> {
+fn git_status(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+    cwd: String,
+) -> Result<GitStatus, String> {
     let dir = git_cwd(&state, window.label(), cwd)?;
     let root = git_cmd(&dir, &["rev-parse", "--show-toplevel"])
         .map(|s| s.trim().to_string())
@@ -809,15 +883,24 @@ fn git_status(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoo
         path = path.trim_matches('"').to_string();
         files.push(GitFile {
             path,
-            status: if status.is_empty() { "?".to_string() } else { status },
+            status: if status.is_empty() {
+                "?".to_string()
+            } else {
+                status
+            },
         });
     }
-    Ok(GitStatus { branch, root, files })
+    Ok(GitStatus {
+        branch,
+        root,
+        files,
+    })
 }
 
 #[tauri::command]
 fn git_diff(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     path: Option<String>,
     staged: Option<bool>,
@@ -846,7 +929,8 @@ pub struct GitCommitOut {
 
 #[tauri::command]
 fn git_commit(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     message: String,
     files: Option<Vec<String>>,
@@ -891,7 +975,8 @@ pub struct GitLogEntry {
 
 #[tauri::command]
 fn git_log(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     limit: Option<u32>,
 ) -> Result<Vec<GitLogEntry>, String> {
@@ -923,7 +1008,11 @@ fn git_log(
 }
 
 #[tauri::command]
-fn git_init(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, cwd: String) -> Result<String, String> {
+fn git_init(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+    cwd: String,
+) -> Result<String, String> {
     let dir = git_cwd(&state, window.label(), cwd)?;
     git_cmd(&dir, &["init"])?;
     Ok(dir.to_string_lossy().to_string())
@@ -934,7 +1023,12 @@ fn git_init(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots
 // (parents included) or dirs and refuses to overwrite; rename refuses to
 // overwrite; delete refuses the workspace root itself.
 #[tauri::command]
-fn fs_create(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, path: String, is_dir: Option<bool>) -> Result<String, String> {
+fn fs_create(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+    path: String,
+    is_dir: Option<bool>,
+) -> Result<String, String> {
     let safe = checked_path(&state, window.label(), path, "fs_create")?;
     if safe.exists() {
         return Err("fs_create: already exists".to_string());
@@ -954,7 +1048,8 @@ fn fs_create(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoot
 
 #[tauri::command]
 fn fs_rename(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     old_path: String,
     new_path: String,
 ) -> Result<String, String> {
@@ -977,7 +1072,8 @@ fn fs_rename(
 
 #[tauri::command]
 fn fs_delete(
-    window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
     path: String,
     recursive: Option<bool>,
 ) -> Result<(), String> {
@@ -1022,20 +1118,44 @@ fn valid_skill_name(name: &str) -> bool {
 }
 
 fn skill_entries(dir: &std::path::Path, out: &mut std::collections::HashMap<String, SkillInfo>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten().take(100) {
         let path = e.path();
-        if !e.file_type().map(|t| t.is_file()).unwrap_or(false) { continue; }
-        if path.extension().and_then(|x| x.to_str()) != Some("md") { continue; }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-        if !valid_skill_name(stem) { continue; }
-        if out.contains_key(stem) { continue; }
+        if !e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if path.extension().and_then(|x| x.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !valid_skill_name(stem) {
+            continue;
+        }
+        if out.contains_key(stem) {
+            continue;
+        }
         let desc = std::fs::read_to_string(&path)
             .map(|text| {
-                text.lines().map(|l| l.trim()).find(|l| !l.is_empty() && !l.starts_with('#')).unwrap_or("")
-                    .chars().take(160).collect::<String>()
-            }).unwrap_or_default();
-        out.insert(stem.to_string(), SkillInfo { name: stem.to_string(), description: desc });
+                text.lines()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty() && !l.starts_with('#'))
+                    .unwrap_or("")
+                    .chars()
+                    .take(160)
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        out.insert(
+            stem.to_string(),
+            SkillInfo {
+                name: stem.to_string(),
+                description: desc,
+            },
+        );
     }
 }
 
@@ -1044,8 +1164,13 @@ fn bundled_skills_dir() -> Option<std::path::PathBuf> {
     // puts resources beside the binary.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for c in [dir.join("../.vtnexa/skills"), dir.join("../../.vtnexa/skills")] {
-                if c.is_dir() { return Some(c); }
+            for c in [
+                dir.join("../.vtnexa/skills"),
+                dir.join("../../.vtnexa/skills"),
+            ] {
+                if c.is_dir() {
+                    return Some(c);
+                }
             }
         }
     }
@@ -1064,16 +1189,26 @@ fn bundled_skills_dir() -> Option<std::path::PathBuf> {
 }
 
 #[tauri::command]
-fn skill_list(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, app: tauri::AppHandle) -> Result<Vec<SkillInfo>, String> {
+fn skill_list(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+    app: tauri::AppHandle,
+) -> Result<Vec<SkillInfo>, String> {
     let root = root_snapshot(&state, window.label());
     let mut map = std::collections::HashMap::new();
     // Project skills first (win on collision).
     skill_entries(&root.join(".vtnexa").join("skills"), &mut map);
     // Bundled ready-made skills (taught-in defaults).
     for dir in [
-        app.path().resource_dir().ok().map(|r| r.join(".vtnexa").join("skills")),
+        app.path()
+            .resource_dir()
+            .ok()
+            .map(|r| r.join(".vtnexa").join("skills")),
         bundled_skills_dir(),
-    ].into_iter().flatten() {
+    ]
+    .into_iter()
+    .flatten()
+    {
         skill_entries(&dir, &mut map);
     }
     let mut out: Vec<SkillInfo> = map.into_values().collect();
@@ -1082,18 +1217,37 @@ fn skill_list(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoo
 }
 
 #[tauri::command]
-fn skill_read(window: tauri::WebviewWindow, state: tauri::State<'_, WorkspaceRoots>, app: tauri::AppHandle, name: String) -> Result<String, String> {
+fn skill_read(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, WorkspaceRoots>,
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<String, String> {
     if !valid_skill_name(&name) {
         return Err("skill_read: invalid skill name".to_string());
     }
     let root = root_snapshot(&state, window.label());
     let candidates = [
-        root.join(".vtnexa").join("skills").join(format!("{}.md", name)),
-        app.path().resource_dir().ok().map(|r| r.join(".vtnexa").join("skills").join(format!("{}.md", name))).unwrap_or_default(),
-        bundled_skills_dir().map(|d| d.join(format!("{}.md", name))).unwrap_or_default(),
+        root.join(".vtnexa")
+            .join("skills")
+            .join(format!("{}.md", name)),
+        app.path()
+            .resource_dir()
+            .ok()
+            .map(|r| {
+                r.join(".vtnexa")
+                    .join("skills")
+                    .join(format!("{}.md", name))
+            })
+            .unwrap_or_default(),
+        bundled_skills_dir()
+            .map(|d| d.join(format!("{}.md", name)))
+            .unwrap_or_default(),
     ];
     for path in candidates {
-        if path.as_os_str().is_empty() { continue; }
+        if path.as_os_str().is_empty() {
+            continue;
+        }
         match std::fs::read_to_string(&path) {
             Ok(s) => return Ok(truncate_chars(s, 16 * 1024)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -1201,7 +1355,16 @@ const READ_VERBS: &[&str] = &[
 
 // rm targets that destroy the system or the home directory itself.
 const ROOT_TARGETS: &[&str] = &[
-    "/", "/*", "~", "~/", "~/*", "$HOME", "$HOME/", "$HOME/*", "${HOME}", "${HOME}/",
+    "/",
+    "/*",
+    "~",
+    "~/",
+    "~/*",
+    "$HOME",
+    "$HOME/",
+    "$HOME/*",
+    "${HOME}",
+    "${HOME}/",
     "${HOME}/*",
 ];
 
@@ -1238,8 +1401,10 @@ fn shell_tokens(cmd: &str) -> Vec<String> {
             '&' | '|' | '>' | '<' => {
                 flush(&mut cur, &mut out);
                 let mut op = c.to_string();
-                if matches!((c, chars.peek()), ('&', Some('&')) | ('|', Some('|')) | ('>', Some('>')) | ('<', Some('<')))
-                {
+                if matches!(
+                    (c, chars.peek()),
+                    ('&', Some('&')) | ('|', Some('|')) | ('>', Some('>')) | ('<', Some('<'))
+                ) {
                     op.push(chars.next().unwrap_or(c));
                 }
                 out.push(op);
@@ -1325,7 +1490,11 @@ fn shell_deny_reason(cmd: &str) -> Option<String> {
     for inv in invos {
         // Command position of each token: 0, or right after sudo/doas.
         let is_cmd = |i: usize| {
-            i == 0 || matches!(inv.get(i.wrapping_sub(1)).map(String::as_str), Some("sudo") | Some("doas"))
+            i == 0
+                || matches!(
+                    inv.get(i.wrapping_sub(1)).map(String::as_str),
+                    Some("sudo") | Some("doas")
+                )
         };
         for (i, t) in inv.iter().enumerate() {
             // Redirections attach to their command regardless of position.
@@ -1340,7 +1509,10 @@ fn shell_deny_reason(cmd: &str) -> Option<String> {
             }
             let base = t.rsplit('/').next().unwrap_or(t);
             if base == "mkfs" || base.starts_with("mkfs.") || base == "mkswap" {
-                return Some(format!("shell_run: refused ({} formats storage devices)", base));
+                return Some(format!(
+                    "shell_run: refused ({} formats storage devices)",
+                    base
+                ));
             }
             // dd writing straight to a block device.
             if base == "dd"
@@ -1353,9 +1525,7 @@ fn shell_deny_reason(cmd: &str) -> Option<String> {
                 return Some("shell_run: refused (dd to a block device)".to_string());
             }
             // tee onto a block device.
-            if base == "tee"
-                && inv.get(i + 1).map(|n| is_block_device(n)).unwrap_or(false)
-            {
+            if base == "tee" && inv.get(i + 1).map(|n| is_block_device(n)).unwrap_or(false) {
                 return Some("shell_run: refused (write to a block device)".to_string());
             }
             // chmod/chown of the filesystem root.
@@ -1371,11 +1541,15 @@ fn shell_deny_reason(cmd: &str) -> Option<String> {
             // rm -rf of filesystem or home roots (sudo/doas prefixes need no
             // special-casing: the rm token is found wherever it sits).
             if base == "rm" && rm_hits_root(&inv[i + 1..]) {
-                return Some("shell_run: refused (recursive forced removal of / or $HOME)".to_string());
+                return Some(
+                    "shell_run: refused (recursive forced removal of / or $HOME)".to_string(),
+                );
             }
             // Credential reads / exfil staging.
             if READ_VERBS.contains(&t.as_str())
-                && SENSITIVE_FRAGMENTS.iter().any(|f| inv.join(" ").contains(*f))
+                && SENSITIVE_FRAGMENTS
+                    .iter()
+                    .any(|f| inv.join(" ").contains(*f))
             {
                 return Some(
                     "shell_run: refused (credential read - use scoped access instead of the agent shell)"
@@ -1389,7 +1563,8 @@ fn shell_deny_reason(cmd: &str) -> Option<String> {
 
 #[tauri::command]
 fn shell_run(
-    window: tauri::WebviewWindow, ws: tauri::State<'_, WorkspaceRoots>,
+    window: tauri::WebviewWindow,
+    ws: tauri::State<'_, WorkspaceRoots>,
     cwd: String,
     cmd: String,
 ) -> Result<ShellResult, String> {
@@ -1588,17 +1763,29 @@ fn pty_write(store: tauri::State<'_, PtyStore>, id: String, data: String) -> Res
     }
     let mut map = store.0.lock().map_err(|e| e.to_string())?;
     let sess = map.get_mut(&id).ok_or_else(|| format!("no pty: {}", id))?;
-    sess.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    sess.writer
+        .write_all(data.as_bytes())
+        .map_err(|e| e.to_string())?;
     sess.writer.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn pty_resize(store: tauri::State<'_, PtyStore>, id: String, cols: u16, rows: u16) -> Result<(), String> {
+fn pty_resize(
+    store: tauri::State<'_, PtyStore>,
+    id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
     let mut map = store.0.lock().map_err(|e| e.to_string())?;
     let sess = map.get_mut(&id).ok_or_else(|| format!("no pty: {}", id))?;
     sess.master
-        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -1770,8 +1957,19 @@ mod tests {
         assert!(nexa_path_for(&root, "pad").unwrap().starts_with(&root));
         assert!(nexa_path_for(&root, "plan").unwrap().starts_with(&root));
         // kind is an enum: traversal / typos rejected, never touch fs
-        for bad in ["", "PAD", "../evil", "pad.md", ".nexa/pad.md", "/etc/passwd"] {
-            assert!(nexa_path_for(&root, bad).is_err(), "kind {:?} must be rejected", bad);
+        for bad in [
+            "",
+            "PAD",
+            "../evil",
+            "pad.md",
+            ".nexa/pad.md",
+            "/etc/passwd",
+        ] {
+            assert!(
+                nexa_path_for(&root, bad).is_err(),
+                "kind {:?} must be rejected",
+                bad
+            );
         }
     }
 

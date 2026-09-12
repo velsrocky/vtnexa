@@ -105,11 +105,7 @@ fn resolve_server_js(app: &tauri::AppHandle) -> Option<String> {
     //    node_modules symlinks - Tauri's resource copier drops symlinks,
     //    which would leave the sidecar unable to require playwright-core).
     if let Ok(res) = app.path().resource_dir() {
-        candidates.push(
-            res.join("sidecar-stage")
-                .join("browser")
-                .join("server.js"),
-        );
+        candidates.push(res.join("sidecar-stage").join("browser").join("server.js"));
         // Legacy layouts from before staging, kept as fallbacks.
         candidates.push(
             res.join("_up_")
@@ -170,8 +166,9 @@ pub async fn browser_start(
         );
     }
 
-    let script = resolve_server_js(&app)
-        .ok_or_else(|| "browser sidecar server.js not found (looked in resources + sidecar/)".to_string())?;
+    let script = resolve_server_js(&app).ok_or_else(|| {
+        "browser sidecar server.js not found (looked in resources + sidecar/)".to_string()
+    })?;
 
     let mut cmd = Command::new("node");
     // No orphaned sidecars: on Unix the kernel kills the child if WE die for
@@ -180,7 +177,14 @@ pub async fn browser_start(
     #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong, 0, 0, 0) != 0 {
+            if libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                libc::SIGTERM as libc::c_ulong,
+                0,
+                0,
+                0,
+            ) != 0
+            {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -203,7 +207,9 @@ pub async fn browser_start(
         }
     }
 
-    let child: Child = cmd.spawn().map_err(|e| format!("spawn node sidecar failed: {}", e))?;
+    let child: Child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn node sidecar failed: {}", e))?;
 
     {
         let mut inner = state.0.lock().map_err(|e| e.to_string())?;
