@@ -1,0 +1,9 @@
+{
+  "name": "vtai-browser-sidecar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "commonjs",
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  }
+}

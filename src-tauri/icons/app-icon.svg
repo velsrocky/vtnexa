@@ -1,0 +1,44 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#151b36"/>
+      <stop offset="1" stop-color="#060912"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.65">
+      <stop offset="0" stop-color="#3b82f6" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#3b82f6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="0.55" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app tile -->
+  <rect x="32" y="32" width="960" height="960" rx="220" fill="url(#tile)"/>
+  <rect x="32" y="32" width="960" height="960" rx="220" fill="url(#glow)"/>
+  <rect x="44" y="44" width="936" height="936" rx="210" fill="none" stroke="#38bdf8" stroke-opacity="0.22" stroke-width="4"/>
+
+  <g transform="rotate(-28 512 512)">
+    <!-- orbit: back half (passes behind the core) -->
+    <path d="M 212 512 A 300 116 0 0 1 812 512" fill="none" stroke="url(#ring)" stroke-width="34" stroke-linecap="round" opacity="0.5"/>
+    <!-- small node riding the back arc -->
+    <circle cx="266" cy="445" r="24" fill="#a5b4fc" opacity="0.65"/>
+
+    <!-- commander core -->
+    <circle cx="512" cy="512" r="168" fill="none" stroke="#38bdf8" stroke-opacity="0.22" stroke-width="6"/>
+    <circle cx="512" cy="512" r="148" fill="url(#core)"/>
+    <circle cx="466" cy="466" r="52" fill="#ffffff" opacity="0.28"/>
+
+    <!-- orbit: front half (passes in front of the core) -->
+    <path d="M 212 512 A 300 116 0 0 0 812 512" fill="none" stroke="url(#ring)" stroke-width="34" stroke-linecap="round"/>
+    <!-- satellite lane riding the front arc -->
+    <circle cx="742" cy="587" r="44" fill="#e0f2fe"/>
+    <circle cx="742" cy="587" r="44" fill="none" stroke="#38bdf8" stroke-opacity="0.5" stroke-width="6"/>
+  </g>
+</svg>

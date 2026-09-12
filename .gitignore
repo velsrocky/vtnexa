@@ -1,0 +1,33 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+# Per-workspace agent state (sessions, worktrees, notes) - user data, never commit
+.nexa/
+# Local env overrides
+.env
+.env.local
+# Staged sidecar for Tauri resources (built by pnpm stage-sidecar)
+src-tauri/sidecar-stage
+# Derived Monaco static assets (copied from node_modules by sync-monaco)
+public/vs
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
