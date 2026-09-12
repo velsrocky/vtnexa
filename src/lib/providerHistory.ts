@@ -6,6 +6,9 @@ import { DEFAULT_PROVIDER, type ProviderConfig, type ProviderKind } from "../typ
 // plaintext in the app data dir - same trust level as the workspace itself,
 // not a vault.
 export const HIST_KEY = "vtai.providerHistory";
+// Per-window draft: keeps the CURRENT endpoint/model (and the key when no
+// keychain exists) so a restart never loses freshly typed config.
+export const DRAFT_KEY = "vtai.providerDraft";
 const HIST_MAX = 12;
 
 export interface ProviderEntry {

@@ -133,3 +133,52 @@ describe("useProvider.refreshModels", () => {
     expect(result.current.modelsNote).toMatch(/2 models/);
   });
 });
+
+describe("useProvider draft persistence", () => {
+  it("keeps the key in the local draft when no keychain exists, and refills it on reload", async () => {
+    vi.useFakeTimers();
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "key_get") throw new Error("no daemon");
+      return {};
+    });
+    const h1 = setup();
+    act(() => {
+      h1.result.current.setEditCfg({ apiKey: "sk-local" });
+      h1.rerender();
+    });
+    const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}");
+    expect(Object.values(draft)[0]).toMatchObject({ apiKey: "sk-local" });
+
+    // Simulate restart: fresh window, session-stripped key, no keychain.
+    let ws2: Workspace = newWorkspace("main:ws", "/w", {
+      baseUrl: "http://localhost:11434/v1",
+      apiKey: "",
+      model: "qwen2.5-coder:7b",
+      kind: "auto",
+    });
+    renderHook(() => useProvider({ ws: ws2, updateWs: (fn) => { ws2 = fn(ws2); } }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(ws2.provider.apiKey).toBe("sk-local");
+  });
+
+  it("does not duplicate the key into the draft when the keychain works", async () => {
+    vi.useFakeTimers();
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "key_get") return "K";
+      return {};
+    });
+    const { result, wsOf } = setup();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(result.current.keychainOk).toBe(true);
+    act(() => {
+      result.current.setEditCfg({ apiKey: "typed" });
+    });
+    const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}");
+    expect(Object.values(draft)[0]).toMatchObject({ apiKey: "" });
+    void wsOf;
+  });
+});

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { windowLabel } from "./useWorkspaceState";
 import type { ProviderConfig, Workspace } from "../types";
 import { keyGet, keySet } from "../lib/tauri";
 import { listModels } from "../lib/providers";
-import { loadHist, saveHist, type ProviderEntry } from "../lib/providerHistory";
+import { DRAFT_KEY, loadHist, saveHist, type ProviderEntry } from "../lib/providerHistory";
 
 export type { ProviderEntry };
 
@@ -27,6 +28,27 @@ export function useProvider(opts: {
   function setEditCfg(patch: Partial<ProviderConfig>) {
     opts.updateWs((w) => ({ ...w, provider: { ...w.provider, ...patch } }));
   }
+
+  // Persist this window's draft on every keystroke so reloads never lose it.
+  // The apiKey is kept locally only while no keychain is available.
+  const draftProvider = ws.provider;
+  useEffect(() => {
+    try {
+      const all = JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}");
+      const prev = all[windowLabel];
+      all[windowLabel] = {
+        ...draftProvider,
+        // Keychain confirmed: never store the key locally. Keychain unknown
+        // and field empty: keep the previously drafted key until we know.
+        apiKey: keychainOk
+          ? ""
+          : draftProvider.apiKey || (keychainOk === null && typeof prev?.apiKey === "string" ? prev.apiKey : ""),
+      };
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(all));
+    } catch {
+      /* ignore */
+    }
+  }, [draftProvider, keychainOk]);
 
   // Resolve the apiKey from the OS keychain whenever this window's
   // endpoint+model change (debounced). First success also migrates any
@@ -62,6 +84,20 @@ export function useProvider(opts: {
         }
       } catch {
         setKeychainOk(false);
+        // No keychain: restore this window's locally-drafted key, if any.
+        try {
+          const all = JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}");
+          const d = all[windowLabel];
+          if (d && typeof d.apiKey === "string" && d.apiKey) {
+            opts.updateWs((w) =>
+              w.provider.baseUrl === d.baseUrl && w.provider.model === d.model && !w.provider.apiKey
+                ? { ...w, provider: { ...w.provider, apiKey: d.apiKey } }
+                : w,
+            );
+          }
+        } catch {
+          /* ignore */
+        }
       }
     }, 500);
     return () => clearTimeout(t);
