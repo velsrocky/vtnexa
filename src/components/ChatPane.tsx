@@ -1,13 +1,15 @@
 import type { MutableRefObject } from "react";
-import type { SideTab, Workspace } from "../types";
+import type { SkillInfo, SideTab, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
+import { useInputHistory } from "../hooks/useInputHistory";
 
-export default function ChatPane({ ws, busy, sideTab, setSideTab, width, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote }: {
+export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote }: {
   ws: Workspace;
   busy: boolean;
   sideTab: SideTab;
   setSideTab: (t: SideTab) => void;
   width: number;
+  skills: SkillInfo[];
   msgsRef: MutableRefObject<HTMLDivElement | null>;
   stickBottom: MutableRefObject<boolean>;
   showJump: boolean;
@@ -27,6 +29,32 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, msgsRef
   auditNote: string;
   setAuditNote: (v: string) => void;
 }) {
+  const hist = useInputHistory();
+  function onInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") {
+      hist.push(input);
+      sendChat();
+      return;
+    }
+    // Tab completes /skill names (longest common prefix; spaces on unique).
+    if (e.key === "Tab" && input.startsWith("/")) {
+      const m = input.match(/^\/([A-Za-z0-9_-]*)$/);
+      if (m) {
+        const names = skills.map((s) => s.name).filter((n) => n.startsWith(m[1]));
+        if (names.length) {
+          const common = names.reduce((a, b) => {
+            let i = 0;
+            while (i < a.length && i < b.length && a[i] === b[i]) i++;
+            return a.slice(0, i);
+          });
+          setInput("/" + common + (names.length === 1 ? " " : ""));
+          e.preventDefault();
+        }
+      }
+      return;
+    }
+    if (hist.applyKey(e, () => input, setInput)) e.preventDefault();
+  }
   const nexaStatus =
     nexaState === "saving" ? "saving…" : nexaState === "saved" ? "✓ saved, agent sees it" : nexaState === "error" ? "⚠ save failed" : "…";
   return (
@@ -84,7 +112,7 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, msgsRef
             </div>
           )}
           <div className="row">
-            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendChat()} placeholder="Talk. It drives the workspace. /skill for skills." className="grow" />
+            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onInputKeyDown} placeholder="Talk. It drives the workspace. /skill for skills, Tab completes, ↑/↓ history." className="grow" />
             <button onClick={sendChat} disabled={busy}>
               Send
             </button>

@@ -460,6 +460,7 @@ export default function App() {
           sideTab={sideTab}
           setSideTab={setSideTab}
           width={rightW}
+          skills={skills}
           msgsRef={msgsRef}
           stickBottom={stickBottom}
           showJump={showJump}

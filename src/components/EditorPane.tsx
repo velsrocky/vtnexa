@@ -5,6 +5,7 @@ import BrowserPane from "./BrowserPane";
 import TerminalPane from "./TerminalPane";
 import { languageFromPath } from "../lib/preview";
 import { baseName } from "../lib/utils";
+import { useInputHistory } from "../hooks/useInputHistory";
 
 // Center column: tabbed edit/diff/preview/browser/git panes + review-gate
 // row + one-shot shell + this window's PTY.
@@ -43,6 +44,7 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
   themeId: string;
   onHResizerDown: (which: "shell" | "pty") => (e: React.MouseEvent) => void;
 }) {
+  const hist = useInputHistory();
   return (
     <section className="editor">
       <div className="pane-title row-between">
@@ -171,8 +173,15 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
         <input
           value={shellCmd}
           onChange={(e) => onShellCmdChange(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && runShell()}
-          placeholder="one-shot shell"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              hist.push(shellCmd);
+              runShell();
+              return;
+            }
+            if (hist.applyKey(e, () => shellCmd, onShellCmdChange)) e.preventDefault();
+          }}
+          placeholder="one-shot shell (↑/↓ history)"
           className="grow"
         />
         <button onClick={runShell} disabled={busy}>
