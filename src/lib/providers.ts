@@ -337,6 +337,55 @@ interface ToolCall {
   function: { name: string; arguments: string };
 }
 
+const TOOL_NAMES = new Set(TOOL_DEFS.map((t) => t.function.name));
+
+/**
+ * Recover tool calls that weak models emit as plain text instead of
+ * structured tool_calls. Strict on purpose: the ENTIRE reply must be a JSON
+ * object (optionally in a ``` fence) or array of objects, `name` must be a
+ * known tool, and `arguments`/`args` must be an object or JSON string.
+ * Anything else returns [] and is treated as normal prose.
+ */
+export function parseTextToolCalls(text: string): ToolCall[] {
+  let t = text.trim();
+  if (!t.startsWith("{") && !t.startsWith("[")) {
+    const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (!fence) return [];
+    t = fence[1].trim();
+  }
+  if (!t.startsWith("{") && !t.startsWith("[")) return [];
+  let data: unknown;
+  try {
+    data = JSON.parse(t);
+  } catch {
+    return [];
+  }
+  const items = Array.isArray(data) ? data : [data];
+  const out: ToolCall[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    const fn = (o.function && typeof o.function === "object" ? o.function : o) as Record<string, unknown>;
+    const name = typeof fn.name === "string" ? fn.name : "";
+    if (!TOOL_NAMES.has(name)) continue;
+    let args = "{}";
+    if (typeof fn.arguments === "string") {
+      try {
+        JSON.parse(fn.arguments);
+        args = fn.arguments;
+      } catch {
+        continue;
+      }
+    } else if (fn.arguments && typeof fn.arguments === "object") {
+      args = JSON.stringify(fn.arguments);
+    } else if (fn.args && typeof fn.args === "object") {
+      args = JSON.stringify(fn.args);
+    }
+    out.push({ id: `txt_${Math.random().toString(36).slice(2, 10)}`, function: { name, arguments: args } });
+  }
+  return out;
+}
+
 /** List models the endpoint actually serves. Tries OpenAI-style /models,
  *  then Ollama-native /api/tags (covers baseUrls with or without /v1).
  *  Returns [] when unreachable - never throws. */
@@ -1279,6 +1328,19 @@ export async function chatWithTools(
         continue;
       }
       throw e;
+    }
+
+    // Fallback for weak tool-callers (e.g. qwen2.5-coder via Ollama): the
+    // model sometimes prints the call as plain text instead of structured
+    // tool_calls. If the whole reply IS a tool-call JSON object (or array),
+    // and the name is a real tool, run it like a normal call.
+    if (toolCalls.length === 0 && useTools) {
+      const parsed = parseTextToolCalls(content);
+      if (parsed.length > 0) {
+        toolCalls = parsed;
+        content = "";
+        onEvent(`\n[note: parsed tool call from plain text - ${parsed.map((p) => p.function.name).join(", ")}]\n`);
+      }
     }
 
     if (toolCalls.length === 0) {

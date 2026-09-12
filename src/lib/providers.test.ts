@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chatWithTools, estimateCost, listModels, runTool } from "./providers";
+import { chatWithTools, estimateCost, listModels, parseTextToolCalls, runTool } from "./providers";
 
 // ---- Backend seam: Tauri invoke is stubbed per test ----
 vi.mock("@tauri-apps/api/core", () => ({
@@ -326,5 +326,48 @@ describe("chatWithTools", () => {
     );
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({ tool: "shell_run", decision: "rejected", ok: false });
+  });
+});
+
+describe("parseTextToolCalls", () => {
+  it("recovers a plain-text tool call", () => {
+    const [tc] = parseTextToolCalls('{"name":"skill_list","arguments":{}}');
+    expect(tc.function.name).toBe("skill_list");
+    expect(tc.function.arguments).toBe("{}");
+  });
+  it("accepts fenced and array forms and nested function shape", () => {
+    expect(parseTextToolCalls('```json\n{"name":"fs_list","arguments":{"path":"/w"}}\n```')[0].function.name).toBe("fs_list");
+    expect(parseTextToolCalls('[{"name":"fs_list","args":{"path":"/w"}}]')).toHaveLength(1);
+    expect(parseTextToolCalls(`{"function":{"name":"git_status","arguments":"{\\"cwd\\":\\"/w\\"}"}}`)[0].function.arguments).toBe(`{"cwd":"/w"}`);
+  });
+  it("rejects prose, unknown tools, and broken JSON", () => {
+    expect(parseTextToolCalls("Sure! I will run skill_list now.")).toEqual([]);
+    expect(parseTextToolCalls('{"name":"delete_everything","arguments":{}}')).toEqual([]);
+    expect(parseTextToolCalls('{"name":"fs_list", broken')).toEqual([]);
+    expect(parseTextToolCalls("")).toEqual([]);
+  });
+});
+
+describe("chatWithTools text-call fallback", () => {
+  it("executes a tool call the model printed as plain text", async () => {
+    setInvokeImpl(async (cmd) => {
+      expect(cmd).toBe("skill_list");
+      return [{ name: "fix", description: "d" }];
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAIText('{"name":"skill_list","arguments":{}}');
+      }
+      return openAIText("there is one skill: fix");
+    });
+    const events: string[] = [];
+    const res = await chatWithTools(CFG, [{ role: "user", content: "skills?" }], (d) => events.push(d));
+    expect(res).toBe("there is one skill: fix");
+    expect(events.join("")).toMatch(/parsed tool call from plain text/);
+    expect(events.join("")).toMatch(/\[tool skill_list/);
+    expect(calls).toHaveLength(2);
+    // Second request carries the tool result.
+    const body = JSON.parse(calls[1].init.body);
+    expect(body.messages.some((m: any) => m.role === "tool")).toBe(true);
   });
 });
