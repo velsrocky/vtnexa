@@ -53,12 +53,30 @@ describe("useWorkspaceState turn control", () => {
     const ac = new AbortController();
     act(() => {
       result.current.turnAbort.current = ac;
+      result.current.stopTurnIdRef.current = "test:ws";
     });
     act(() => {
-      result.current.stopTurn();
+      const stopped = result.current.stopTurn("test:ws");
+      expect(stopped).toBe(true);
     });
     expect(ac.signal.aborted).toBe(true);
     expect(result.current.turnAbort.current).toBeNull();
+    expect(result.current.stopTurnIdRef.current).toBe("");
+  });
+
+  it("stopTurn ignores a turn id that doesn't match", () => {
+    const { result } = renderHook(() => useWorkspaceState());
+    const ac = new AbortController();
+    act(() => {
+      result.current.turnAbort.current = ac;
+      result.current.stopTurnIdRef.current = "this:ws";
+    });
+    act(() => {
+      const stopped = result.current.stopTurn("other:ws");
+      expect(stopped).toBe(false);
+    });
+    expect(ac.signal.aborted).toBe(false);
+    expect(result.current.turnAbort.current).toBe(ac);
   });
 
   it("flushStreamFrame releases the coalescing frame", () => {
@@ -98,7 +116,7 @@ describe("useWorkspaceState approval queue", () => {
       ]);
     });
     act(() => {
-      result.current.stopTurn();
+      result.current.stopTurn("test:ws");
     });
     expect(r1).toHaveBeenCalledWith(false);
     expect(r2).toHaveBeenCalledWith(false);

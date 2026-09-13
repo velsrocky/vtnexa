@@ -29,6 +29,7 @@ export function useWorkspaceState() {
   const turnAbort = useRef<AbortController | null>(null);
   const streamRaf = useRef<number | null>(null);
   const [pendingTools, setPendingTools] = useState<PendingTool[]>([]);
+  const stopTurnIdRef = useRef<string>("");
 
   function updateWs(fn: (w: Workspace) => Workspace) {
     setWs((w) => fn(w));
@@ -43,13 +44,17 @@ export function useWorkspaceState() {
 
   // Stop the running turn: abort the provider request and release any
   // approval popup waiting. Side effects already applied are not undone.
-  function stopTurn() {
+  // Returns true if a turn was stopped, false otherwise.
+  function stopTurn(id: string) {
+    if (stopTurnIdRef.current && stopTurnIdRef.current !== id) return false;
     turnAbort.current?.abort();
     turnAbort.current = null;
+    stopTurnIdRef.current = "";
     setPendingTools((q) => {
       for (const p of q) p.resolve(false);
       return [];
     });
+    return true;
   }
 
   function flushStreamFrame() {
@@ -72,6 +77,7 @@ export function useWorkspaceState() {
     busy,
     setBusy,
     turnAbort,
+    stopTurnIdRef,
     streamRaf,
     pendingTools,
     setPendingTools,

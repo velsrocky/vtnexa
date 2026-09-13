@@ -114,6 +114,107 @@ describe("useProvider keychain", () => {
   });
 });
 
+describe("useProvider key loss", () => {
+  it("stale empty turn-end mirrors never delete the saved key", () => {
+    const keySets: any[] = [];
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "key_set") {
+        keySets.push(args);
+        return {};
+      }
+      if (cmd === "key_get") return "";
+      return "";
+    });
+    localStorage.setItem(
+      "vtai.providerHistory",
+      JSON.stringify([{ baseUrl: "https://a.test", model: "m", apiKey: "K", kind: "auto" }]),
+    );
+    const { result } = setup();
+    act(() => {
+      // Stale copy from before an endpoint switch: empty key, no clear intent.
+      result.current.rememberProvider({ baseUrl: "https://a.test", model: "m", apiKey: "", kind: "auto" });
+    });
+    expect(keySets).toEqual([]);
+    expect(result.current.provHist).toEqual([
+      { baseUrl: "https://a.test", model: "m", apiKey: "K", kind: "auto" },
+    ]);
+  });
+
+  it("explicit clears propagate the deletion on the next turn", () => {
+    const keySets: any[] = [];
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "key_set") {
+        keySets.push(args);
+        return {};
+      }
+      if (cmd === "key_get") return "";
+      return "";
+    });
+    localStorage.setItem(
+      "vtai.providerHistory",
+      JSON.stringify([
+        { baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder:7b", apiKey: "K", kind: "auto" },
+      ]),
+    );
+    const { result } = setup();
+    act(() => {
+      result.current.setEditCfg({ apiKey: "K2" });
+    });
+    act(() => {
+      result.current.setEditCfg({ apiKey: "" });
+    });
+    act(() => {
+      result.current.rememberProvider({
+        baseUrl: "http://localhost:11434/v1",
+        model: "qwen2.5-coder:7b",
+        apiKey: "",
+        kind: "auto",
+      });
+    });
+    expect(keySets).toContainEqual({
+      baseUrl: "http://localhost:11434/v1",
+      model: "qwen2.5-coder:7b",
+      secret: "",
+    });
+    expect(result.current.provHist[0]).toMatchObject({ apiKey: "" });
+  });
+
+  it("survives endpoint flips without a keychain via per-pair backups", async () => {
+    vi.useFakeTimers();
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "key_get") throw new Error("no daemon");
+      if (cmd === "key_set") throw new Error("no daemon");
+      return {};
+    });
+    const h = setup();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    act(() => {
+      h.result.current.setEditCfg({ apiKey: "K-LOCAL" });
+      h.rerender();
+    });
+    expect(h.wsOf().provider.apiKey).toBe("K-LOCAL");
+    act(() => {
+      h.result.current.setEditCfg({ model: "other" });
+      h.rerender();
+    });
+    expect(h.wsOf().provider.apiKey).toBe("");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(h.wsOf().provider.apiKey).toBe("");
+    act(() => {
+      h.result.current.setEditCfg({ model: "qwen2.5-coder:7b" });
+      h.rerender();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(h.wsOf().provider.apiKey).toBe("K-LOCAL");
+  });
+});
+
 describe("useProvider.refreshModels", () => {
   it("lists what the endpoint actually serves", async () => {
     vi.stubGlobal(

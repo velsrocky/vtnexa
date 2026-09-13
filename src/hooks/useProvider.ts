@@ -3,7 +3,19 @@ import { windowLabel } from "./useWorkspaceState";
 import type { ProviderConfig, Workspace } from "../types";
 import { keyGet, keySet } from "../lib/tauri";
 import { listModels } from "../lib/providers";
-import { DRAFT_KEY, loadHist, saveHist, type ProviderEntry } from "../lib/providerHistory";
+import {
+  draftPairKey,
+  isPairCleared,
+  loadDrafts,
+  loadHist,
+  lookupDraftKey,
+  markPairCleared,
+  saveDrafts,
+  saveHist,
+  stripHistoryKey,
+  unmarkPairCleared,
+  type ProviderEntry,
+} from "../lib/providerHistory";
 
 export type { ProviderEntry };
 
@@ -25,6 +37,9 @@ export function useProvider(opts: {
 
   const ws = opts.ws;
   const editCfg: ProviderConfig = ws.provider;
+  // Track latest request to prevent race conditions from rapid switches
+  const latestRequest = useRef<string>("");
+  
   function setEditCfg(patch: Partial<ProviderConfig>) {
     opts.updateWs((w) => {
       const next = { ...w.provider, ...patch };
@@ -36,10 +51,21 @@ export function useProvider(opts: {
       return { ...w, provider: next };
     });
     // Mirror to the keychain the moment the key is edited - not only after a
-    // successful turn - so a restart never loses it. Empty key = delete.
+    // successful turn - so a restart never loses it.
     if (typeof patch.apiKey === "string") {
       const url = patch.baseUrl ?? ws.provider.baseUrl;
       const model = patch.model ?? ws.provider.model;
+      const pair = draftPairKey(url, model);
+      if (patch.apiKey === "") {
+        // Explicit clear by the user: record intent (so the turn-end mirror
+        // propagates the deletion) and strip the pair's key from history so
+        // the removal sticks for reuse too.
+        markPairCleared(pair);
+        const kind = patch.kind ?? ws.provider.kind;
+        setProvHist((h) => saveHist(stripHistoryKey(h, url, model, kind)));
+      } else {
+        unmarkPairCleared(pair);
+      }
       if (url.trim() && model.trim()) {
         keySet(url, model, patch.apiKey)
           .then(() => setKeychainOk(true))
@@ -49,34 +75,53 @@ export function useProvider(opts: {
   }
 
   // Persist this window's draft on every keystroke so reloads never lose it.
-  // The apiKey is kept locally only while no keychain is available.
+  // Key backups are kept PER PAIR (not one slot): flipping between endpoints
+  // must not wipe the key you typed five minutes ago. The live field is kept
+  // locally only while no keychain is confirmed.
   const draftProvider = ws.provider;
   useEffect(() => {
     try {
-      const all = JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}");
+      const all = loadDrafts();
       const prev = all[windowLabel];
+      const keys: Record<string, string> = { ...(prev?.keys ?? {}) };
+      const pair = draftPairKey(draftProvider.baseUrl, draftProvider.model);
+      if (draftProvider.apiKey) {
+        keys[pair] = draftProvider.apiKey;
+      } else if (isPairCleared(pair)) {
+        delete keys[pair];
+      }
       all[windowLabel] = {
-        ...draftProvider,
-        // Keychain confirmed: never store the key locally. Keychain unknown
-        // and field empty: keep the previously drafted key until we know.
+        baseUrl: draftProvider.baseUrl,
+        model: draftProvider.model,
+        kind: draftProvider.kind ?? "auto",
+        // Keychain confirmed: never store the live key locally. Otherwise
+        // keep the field, falling back to this pair's backup (unless the
+        // user explicitly cleared it).
         apiKey: keychainOk
           ? ""
-          : draftProvider.apiKey || (keychainOk === null && typeof prev?.apiKey === "string" ? prev.apiKey : ""),
+          : draftProvider.apiKey || (!isPairCleared(pair) ? (keys[pair] ?? "") : ""),
+        keys,
       };
-      localStorage.setItem(DRAFT_KEY, JSON.stringify(all));
+      saveDrafts(all);
     } catch {
       /* ignore */
     }
   }, [draftProvider, keychainOk]);
 
-  // Resolve the apiKey from the OS keychain whenever this window's
+// Resolve the apiKey from the OS keychain whenever this window's
   // endpoint+model change (debounced). First success also migrates any
   // plaintext history keys.
   const baseUrl = ws.provider.baseUrl;
   const model = ws.provider.model;
   useEffect(() => {
     if (!baseUrl.trim() || !model.trim()) return;
+    // Record this request to prevent race conditions from rapid switches
+    latestRequest.current = `${baseUrl}|${model}`;
+
     const t = setTimeout(async () => {
+      // Only proceed if this request is still the latest
+      if (latestRequest.current !== `${baseUrl}|${model}`) return;
+
       try {
         const k = await keyGet(baseUrl, model);
         setKeychainOk(true);
@@ -103,19 +148,21 @@ export function useProvider(opts: {
         }
       } catch {
         setKeychainOk(false);
-        // No keychain: restore this window's locally-drafted key, if any.
-        try {
-          const all = JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}");
-          const d = all[windowLabel];
-          if (d && typeof d.apiKey === "string" && d.apiKey) {
-            opts.updateWs((w) =>
-              w.provider.baseUrl === d.baseUrl && w.provider.model === d.model && !w.provider.apiKey
-                ? { ...w, provider: { ...w.provider, apiKey: d.apiKey } }
-                : w,
-            );
+        // No keychain: restore this pair's locally-drafted key, if any.
+        // Only restore if this is still the latest request
+        if (latestRequest.current === `${baseUrl}|${model}`) {
+          try {
+            const k = lookupDraftKey(loadDrafts(), windowLabel, baseUrl, model);
+            if (k) {
+              opts.updateWs((w) =>
+                w.provider.baseUrl === baseUrl && w.provider.model === model && !w.provider.apiKey
+                  ? { ...w, provider: { ...w.provider, apiKey: k } }
+                  : w,
+              );
+            }
+          } catch {
+            /* ignore */
           }
-        } catch {
-          /* ignore */
         }
       }
     }, 500);
@@ -128,9 +175,23 @@ export function useProvider(opts: {
   // only while no keychain is available.
   function rememberProvider(used: ProviderConfig) {
     if (!used.baseUrl.trim() || !used.model.trim()) return;
-    // Always mirror to the keychain - an empty key now DELETES the stored
-    // entry (backend treats "" as clear), so removing a key from the field
-    // and chatting sticks the removal.
+    const pair = draftPairKey(used.baseUrl, used.model);
+    if (!used.apiKey) {
+      // Empty key at turn end is ambiguous: user-cleared (propagate the
+      // deletion, recorded as intent by setEditCfg) vs a stale copy from an
+      // endpoint switch whose refill is still pending (touch NOTHING - a
+      // blind mirror would delete the good key still in the keychain and
+      // wipe the keyed history entry with it).
+      if (isPairCleared(pair)) {
+        unmarkPairCleared(pair);
+        keySet(used.baseUrl, used.model, "")
+          .then(() => setKeychainOk(true))
+          .catch(() => setKeychainOk(false));
+        setProvHist((h) => saveHist(stripHistoryKey(h, used.baseUrl, used.model, used.kind)));
+      }
+      return;
+    }
+    unmarkPairCleared(pair);
     keySet(used.baseUrl, used.model, used.apiKey)
       .then(() => setKeychainOk(true))
       .catch(() => setKeychainOk(false));

@@ -3,7 +3,7 @@ import type { SkillInfo, SideTab, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
 import { useInputHistory } from "../hooks/useInputHistory";
 
-export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote }: {
+export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, pendingToolsCount, ratings, onRateMessage }: {
   ws: Workspace;
   busy: boolean;
   sideTab: SideTab;
@@ -28,6 +28,9 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
   nexaState: NexaState;
   auditNote: string;
   setAuditNote: (v: string) => void;
+  pendingToolsCount?: number;
+  ratings?: Record<string, 1 | -1>;
+  onRateMessage?: (messageId: string, rating: 1 | -1) => void;
 }) {
   const hist = useInputHistory();
   function onInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -94,6 +97,24 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
             {ws.messages.map((m) => (
               <div key={m.id} className={`msg ${m.role}`}>
                 <b>{m.role}</b>
+                {m.role === "assistant" && m.id !== "stream" && onRateMessage && (
+                  <span className="rate" title="Rate this answer - helps improve Commander">
+                    <button
+                      className={ratings?.[m.id] === 1 ? "active" : ""}
+                      onClick={() => onRateMessage(m.id, 1)}
+                      title="Good answer"
+                    >
+                      👍
+                    </button>
+                    <button
+                      className={ratings?.[m.id] === -1 ? "active" : ""}
+                      onClick={() => onRateMessage(m.id, -1)}
+                      title="Bad answer"
+                    >
+                      👎
+                    </button>
+                  </span>
+                )}
                 <pre>{m.content}</pre>
               </div>
             ))}
@@ -123,6 +144,19 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
               >
                 ■ Stop
               </button>
+            )}
+            {busy && (
+              <span
+                className="agent-status"
+                title={
+                  (pendingToolsCount ?? 0) > 0
+                    ? "Waiting for approval"
+                    : "Agent is thinking..."
+                }
+              >
+                <span className="spinner" />
+                {(pendingToolsCount ?? 0) > 0 ? "approval" : "thinking"}
+              </span>
             )}
           </div>
           <div

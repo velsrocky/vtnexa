@@ -49,7 +49,7 @@ export function useFiles(opts: {
 
   async function doRename() {
     if (!renaming) return;
-    const name = renaming.name.trim().split("/").pop() ?? "";
+    const name = renaming.name.trim().replace(/^\/+/, "").split("/").pop() ?? "";
     if (!name || name === baseName(renaming.path)) {
       setRenaming(null);
       return;

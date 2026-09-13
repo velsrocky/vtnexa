@@ -50,6 +50,23 @@ Most coding agents either (a) ask for permission on every keystroke or
 - **Browser Use** — persistent Chromium profile (signed in as you) the agent
   can operate with your approval; screenshots come back as vision input.
 
+## The 👍 / 👎 buttons (what they do)
+
+Every Commander answer has 👍 and 👎 buttons. Honest explanation:
+
+- Clicking one saves a private note on your machine only: what you asked,
+  what it answered, which model answered, and good/bad. Nothing leaves your
+  computer, the model never sees your rating, and clicking changes nothing
+  by itself.
+- So why do they exist? The notes are evidence. When answers are bad on a
+  particular model, the pattern (missed tool calls, invented file states,
+  false "I can't run commands") tells the developers exactly what guardrail
+  to build next — approval gates, self-correction loops, and simpler
+  instructions for weaker models all came from reading real bad answers.
+- You can safely ignore the buttons and lose nothing. But if Commander gives
+  a wrong answer, a 👎 with that trace is the most useful bug report you can
+  file — it captures the prompt, the answer, and the model in one entry.
+
 ## Install
 
 **Linux (deb):** grab the latest release `.deb` and `sudo dpkg -i`.
@@ -102,7 +119,7 @@ vtnexa --uninstall   remove a per-user install
 ## Development
 
 ```sh
-pnpm test            # 139 vitest tests (jsdom)
+pnpm test            # 188 vitest tests (jsdom)
 pnpm build           # tsc + vite
 cargo test --manifest-path src-tauri/Cargo.toml --lib   # Rust
 pnpm install-local   # build .deb + install per-user (no sudo)

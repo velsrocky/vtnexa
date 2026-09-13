@@ -97,8 +97,11 @@ export function useRoutines(opts: {
   // If a turn is already running, defer instead of piling up.
   async function runRoutine(r: Routine) {
     if (busy) {
+      // Defer using the routine's own interval (or minimum) so a busy window
+      // doesn't lose the job; it'll retry on the next tick.
+      const deferMs = r.everyMs > 0 ? r.everyMs : MIN_EVERY_MS;
       setRoutines((prev) =>
-        saveNow(prev.map((x) => (x.id === r.id ? { ...x, nextRun: Date.now() + 5 * 60 * 1000 } : x))),
+        saveNow(prev.map((x) => (x.id === r.id ? { ...x, nextRun: Date.now() + deferMs } : x))),
       );
       return;
     }

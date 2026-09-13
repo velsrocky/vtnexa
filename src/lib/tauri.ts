@@ -154,6 +154,39 @@ export async function sessionSave(content: string): Promise<void> {
   return invoke<void>("session_save", { content });
 }
 
+// ---- Named sessions (.nexa/sessions/<id>.json) ----
+// OpenCode-style: many sessions per directory, newest-first, explicit resume.
+// The legacy single session.json above is kept as a backup and is no longer
+// part of the new flow.
+export interface SessionMeta {
+  id: string;
+  title: string;
+  directory: string;
+  created: number;
+  updated: number;
+  message_count: number;
+  preview: string;
+}
+
+export async function sessionsList(): Promise<SessionMeta[]> {
+  const raw = await invoke<string>("sessions_list");
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) return [];
+  return (parsed as SessionMeta[]).filter((s) => s && typeof s.id === "string");
+}
+
+export async function sessionGet(id: string): Promise<string> {
+  return invoke<string>("session_get", { id });
+}
+
+export async function sessionPut(id: string, content: string): Promise<void> {
+  await invoke<void>("session_put", { id, content });
+}
+
+export async function sessionDelete(id: string): Promise<void> {
+  await invoke<void>("session_delete", { id });
+}
+
 export async function routinesLoad(): Promise<string> {
   return invoke<string>("routines_load");
 }
