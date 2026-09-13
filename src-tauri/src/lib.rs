@@ -362,14 +362,12 @@ fn sessions_dir_for(root: &std::path::Path) -> std::path::PathBuf {
 fn valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
-        && id.chars()
+        && id
+            .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn session_file_for(
-    root: &std::path::Path,
-    id: &str,
-) -> Result<std::path::PathBuf, String> {
+fn session_file_for(root: &std::path::Path, id: &str) -> Result<std::path::PathBuf, String> {
     if !valid_session_id(id) {
         return Err("session: invalid id (letters, numbers, -, _; 64 max)".to_string());
     }
@@ -488,9 +486,7 @@ fn session_get(
     let path = session_file_for(&root, &id)?;
     match std::fs::read_to_string(&path) {
         Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err("session: not found".to_string())
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("session: not found".to_string()),
         Err(e) => Err(e.to_string()),
     }
 }
