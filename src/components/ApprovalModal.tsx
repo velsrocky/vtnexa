@@ -86,6 +86,7 @@ export default function ApprovalModal({ queue, onResolve }: {
           }}
         >
           {JSON.stringify(head.args, null, 2).slice(0, 4000)}
+          {JSON.stringify(head.args, null, 2).length > 4000 && <span className="muted small">…[truncated]</span>}
         </pre>
         <div className="row" style={{ justifyContent: "flex-end" }}>
           <button onClick={() => onResolve(false)}>Reject</button>

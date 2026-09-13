@@ -61,6 +61,92 @@ function asAudit(v: unknown): AuditEvent[] {
   return out.slice(-AUDIT_MAX);
 }
 
+/** Pure workspace snapshot shared by legacy + named-session flows. */
+export function snapshotWorkspace(ws: Workspace, msgCap: number): Record<string, unknown> {
+  const dirtyBuffers: Record<string, string> = {};
+  const dirtyOriginals: Record<string, string> = {};
+  for (const t of ws.tabs ?? []) {
+    const b = ws.buffers?.[t];
+    const o = ws.originals?.[t];
+    if (b !== undefined && b !== o) {
+      dirtyBuffers[t] = b.slice(0, 50000);
+      dirtyOriginals[t] = (o ?? "").slice(0, 50000);
+    }
+  }
+  return {
+    id: ws.id,
+    cwd: ws.cwd,
+    messages: ws.messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .slice(-msgCap)
+      .map((m) => ({ id: m.id, role: m.role, content: m.content })),
+    usage: ws.usage,
+    audit: ws.audit.slice(-AUDIT_MAX),
+    tabs: (ws.tabs ?? []).slice(0, 20),
+    buffers: dirtyBuffers,
+    originals: dirtyOriginals,
+    openPath: ws.openPath ?? "",
+    shellOut: ws.shellOut?.slice(-1000) ?? "",
+    shellH: ws.shellH ?? 80,
+    ptyH: ws.ptyH ?? 220,
+    provider: {
+      baseUrl: ws.provider.baseUrl,
+      model: ws.provider.model,
+      kind: ws.provider.kind ?? "auto",
+      apiKey: "",
+    },
+    centerTab: ws.centerTab ?? "edit",
+    sideTab: ws.sideTab ?? "chat",
+    chatDraft: ws.chatDraft ?? "",
+    previewUrl: ws.previewUrl ?? "",
+    pendingDiff: ws.pendingDiff,
+  };
+}
+
+/** Pure workspace restore shared by legacy + named-session flows. */
+export function restoreWorkspace(l: any, fallbackId: string): Workspace {
+  const p = l?.pendingDiff;
+  return {
+    id: typeof l?.id === "string" ? l.id : fallbackId,
+    cwd: typeof l?.cwd === "string" ? l.cwd : "",
+    messages: Array.isArray(l?.messages)
+      ? l.messages
+        .filter(
+          (m: any) =>
+            m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string",
+        )
+        .map((m: any) => ({ id: typeof m.id === "string" ? m.id : uid(), role: m.role, content: m.content }))
+      : [],
+    pendingDiff: p && typeof p === "object" && typeof p.path === "string" && typeof p.content === "string"
+      ? { path: p.path, content: String(p.content ?? ""), original: String(p.original ?? "") }
+      : null,
+    shellOut: typeof l?.shellOut === "string" ? l.shellOut : "",
+    usage: asUsage(l?.usage),
+    audit: asAudit(l?.audit),
+    tabs: Array.isArray(l?.tabs) ? l.tabs.filter((t: unknown) => typeof t === "string") : [],
+    buffers: l?.buffers && typeof l.buffers === "object" ? l.buffers : {},
+    originals: l?.originals && typeof l.originals === "object" ? l.originals : {},
+    openPath: typeof l?.openPath === "string" ? l.openPath : "",
+    shellH: typeof l?.shellH === "number" && isFinite(l.shellH) ? l.shellH : 80,
+    ptyH: typeof l?.ptyH === "number" && isFinite(l.ptyH) ? l.ptyH : 220,
+    provider:
+      asProvider(l?.provider) ??
+      asProvider(
+        l?.providerOverride && typeof l.providerOverride === "object"
+          ? {
+              baseUrl: l.providerOverride.baseUrl,
+              model: l.providerOverride.model,
+              kind: l.providerOverride.kind,
+            }
+          : undefined,
+      ) ?? { ...DEFAULT_PROVIDER },
+    centerTab: asCenterTab(l?.centerTab),
+    sideTab: asSideTab(l?.sideTab),
+    chatDraft: typeof l?.chatDraft === "string" ? l.chatDraft.slice(0, 20000) : "",
+    previewUrl: typeof l?.previewUrl === "string" ? l.previewUrl.slice(0, 4096) : "",
+  };
+}
+
 // Session persistence: each window's workspace survives a restart.
 // Serialized to <workspace>/.nexa/session.json (project-local, inspectable).
 // v7 stores a per-window map { windows: { "<label>": workspace } } - a new
@@ -81,43 +167,7 @@ export function useSession(opts: {
   stateRef.current = opts;
 
   function ownWorkspaceSnap(msgCap: number): Record<string, unknown> {
-    const { ws } = stateRef.current;
-    const dirtyBuffers: Record<string, string> = {};
-    const dirtyOriginals: Record<string, string> = {};
-    for (const t of ws.tabs ?? []) {
-      const b = ws.buffers?.[t];
-      const o = ws.originals?.[t];
-      if (b !== undefined && b !== o) {
-        dirtyBuffers[t] = b.slice(0, 50000);
-        dirtyOriginals[t] = (o ?? "").slice(0, 50000);
-      }
-    }
-    return {
-      id: ws.id,
-      cwd: ws.cwd,
-      messages: ws.messages
-        .filter((m) => m.role === "user" || m.role === "assistant")
-        .slice(-msgCap)
-        .map((m) => ({ id: m.id, role: m.role, content: m.content })),
-      usage: ws.usage,
-      audit: ws.audit.slice(-AUDIT_MAX),
-      tabs: (ws.tabs ?? []).slice(0, 20),
-      buffers: dirtyBuffers,
-      originals: dirtyOriginals,
-      openPath: ws.openPath ?? "",
-      shellH: ws.shellH ?? 80,
-      ptyH: ws.ptyH ?? 220,
-      provider: {
-        baseUrl: ws.provider.baseUrl,
-        model: ws.provider.model,
-        kind: ws.provider.kind ?? "auto",
-        apiKey: "",
-      },
-      centerTab: ws.centerTab ?? "edit",
-      sideTab: ws.sideTab ?? "chat",
-      chatDraft: ws.chatDraft ?? "",
-      previewUrl: ws.previewUrl ?? "",
-    };
+    return snapshotWorkspace(stateRef.current.ws, msgCap);
   }
 
   // Merge this window's slot into the existing file so sibling windows'
@@ -168,45 +218,8 @@ export function useSession(opts: {
     }
   }
 
-  function asWorkspace(l: any, fallbackId: string): Workspace {
-    return {
-      id: typeof l?.id === "string" ? l.id : fallbackId,
-      cwd: typeof l?.cwd === "string" ? l.cwd : "",
-      messages: Array.isArray(l?.messages)
-        ? l.messages
-            .filter(
-              (m: any) =>
-                m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string",
-            )
-            .map((m: any) => ({ id: typeof m.id === "string" ? m.id : uid(), role: m.role, content: m.content }))
-        : [],
-      pendingDiff: null,
-      shellOut: "",
-      usage: asUsage(l?.usage),
-      audit: asAudit(l?.audit),
-      tabs: Array.isArray(l?.tabs) ? l.tabs.filter((t: unknown) => typeof t === "string") : [],
-      buffers: l?.buffers && typeof l.buffers === "object" ? l.buffers : {},
-      originals: l?.originals && typeof l.originals === "object" ? l.originals : {},
-      openPath: typeof l?.openPath === "string" ? l.openPath : "",
-      shellH: typeof l?.shellH === "number" && isFinite(l.shellH) ? l.shellH : 80,
-      ptyH: typeof l?.ptyH === "number" && isFinite(l.ptyH) ? l.ptyH : 220,
-      provider:
-        asProvider(l?.provider) ??
-        // v4 stored an optional override - adopt it, else default.
-        asProvider(
-          l?.providerOverride && typeof l.providerOverride === "object"
-            ? {
-                baseUrl: l.providerOverride.baseUrl,
-                model: l.providerOverride.model,
-                kind: l.providerOverride.kind,
-              }
-            : undefined,
-        ) ?? { ...DEFAULT_PROVIDER },
-      centerTab: asCenterTab(l?.centerTab),
-      sideTab: asSideTab(l?.sideTab),
-      chatDraft: typeof l?.chatDraft === "string" ? l.chatDraft.slice(0, 20000) : "",
-      previewUrl: typeof l?.previewUrl === "string" ? l.previewUrl.slice(0, 4096) : "",
-    };
+function asWorkspace(l: any, fallbackId: string): Workspace {
+    return restoreWorkspace(l, fallbackId);
   }
 
   async function loadSession() {

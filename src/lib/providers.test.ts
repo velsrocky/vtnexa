@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chatWithTools, estimateCost, listModels, parseTextToolCalls, runTool } from "./providers";
+import { announcesToolAction, chatWithTools, deniesCapability, estimateCost, extractEmbeddedToolCalls, listModels, narratesBareToolCall, parseTextToolCalls, runTool } from "./providers";
 
 // ---- Backend seam: Tauri invoke is stubbed per test ----
 vi.mock("@tauri-apps/api/core", () => ({
@@ -164,6 +164,26 @@ describe("runTool", () => {
   it("reports unknown tools instead of throwing", async () => {
     await expect(runTool("teleport", {})).resolves.toMatch(/unknown tool/);
   });
+  it("classifies weak vs frontier models", async () => {
+    const { isWeakModel } = await import("./providers");
+    expect(isWeakModel("http://localhost:11434/v1", "qwen2.5-coder:7b")).toBe(true);
+    expect(isWeakModel("https://x.test/v1", "llama3.1:8b")).toBe(true);
+    expect(isWeakModel("https://x.test/v1", "gpt-4o-mini")).toBe(true);
+    expect(isWeakModel("https://api.anthropic.com", "claude-sonnet-4-5")).toBe(false);
+    expect(isWeakModel("https://api.openai.com/v1", "gpt-4o")).toBe(false);
+    expect(isWeakModel("https://x.test/v1", "qwen2.5-coder:32b")).toBe(true);
+  });
+  it("rejects relative fs paths with a self-correcting hint", async () => {
+    let invoked = false;
+    setInvokeImpl(async () => {
+      invoked = true;
+      return {};
+    });
+    await expect(runTool("fs_list", { path: "src" })).resolves.toMatch(/must be absolute/);
+    await expect(runTool("fs_read", { path: "App.tsx" })).resolves.toMatch(/fs_list\/fs_glob/);
+    await expect(runTool("fs_list", {})).resolves.toMatch(/path is required/);
+    expect(invoked).toBe(false);
+  });
 });
 
 describe("chatWithTools", () => {
@@ -222,6 +242,8 @@ describe("chatWithTools", () => {
       const lastUser = [...body.messages].reverse().find((m: any) => m.role === "user");
       expect(lastUser.content).toMatch(/Tool budget exhausted/);
       expect(lastUser.content).toMatch(/repeating `fs_list`/);
+      expect(lastUser.content).toMatch(/Cite the actual tool outputs/);
+      expect(lastUser.content).toMatch(/do NOT invent tool calls/);
       return openAIText("gave up gracefully");
     });
     let toolCount = 0;
@@ -345,6 +367,206 @@ describe("parseTextToolCalls", () => {
     expect(parseTextToolCalls('{"name":"delete_everything","arguments":{}}')).toEqual([]);
     expect(parseTextToolCalls('{"name":"fs_list", broken')).toEqual([]);
     expect(parseTextToolCalls("")).toEqual([]);
+  });
+});
+
+describe("announcesToolAction", () => {
+  it("detects narrated tool calls", () => {
+    expect(announcesToolAction("Please approve the following fs_write to create the file.")).toBe("fs_write");
+    expect(announcesToolAction("Next action: shell_run to check ffmpeg.")).toBe("shell_run");
+    expect(announcesToolAction("I'll now call fs_read on that file.")).toBe("fs_read");
+  });
+  it("ignores plain summaries and tool-free prose", () => {
+    expect(announcesToolAction("I read the file and it looks good.")).toBeNull();
+    expect(announcesToolAction("I ran fs_read on App.tsx and found the bug.")).toBeNull();
+    expect(announcesToolAction("")).toBeNull();
+    expect(announcesToolAction("Please approve the diff in the Diff tab.")).toBeNull();
+  });
+});
+
+describe("narratesBareToolCall", () => {
+  it("detects bare Tool+args narrations", () => {
+    expect(narratesBareToolCall("Fs_read /home/u/check_ffmpeg.py")).toBe("fs_read");
+    expect(narratesBareToolCall("fs_write /w/a.txt")).toBe("fs_write");
+    expect(narratesBareToolCall("  git_status   /w/repo  ")).toBe("git_status");
+    expect(narratesBareToolCall("some explanation here\nFs_read /w/a.txt")).toBe("fs_read");
+  });
+  it("ignores descriptions and normal prose", () => {
+    expect(narratesBareToolCall("fs_write stages to the Diff gate")).toBeNull();
+    expect(narratesBareToolCall("I ran fs_read on App.tsx and found the bug.")).toBeNull();
+    expect(narratesBareToolCall("```python\nprint(1)\n```")).toBeNull();
+    expect(narratesBareToolCall("")).toBeNull();
+  });
+});
+
+describe("extractEmbeddedToolCalls", () => {
+  it("recovers trailing JSON after prose", () => {
+    const out = extractEmbeddedToolCalls('Hi! I am Commander.\n{"name": "nexa_read", "arguments": {"kind":"memory"}}');
+    expect(out).toHaveLength(1);
+    expect(out[0].function.name).toBe("nexa_read");
+    expect(out[0].function.arguments).toBe('{"kind":"memory"}');
+  });
+  it("recovers fenced JSON after explanation, skipping code fences", () => {
+    const out = extractEmbeddedToolCalls(
+      'Here is a script:\n```python\nprint("hi")\n```\nNow reading:\n```json\n{"name":"fs_read","arguments":{"path":"/w/a.txt"}}\n```',
+    );
+    expect(out.map((t) => t.function.name)).toEqual(["fs_read"]);
+  });
+  it("dedupes repeats and caps fan-out", () => {
+    const one = '{"name":"fs_list","arguments":{"path":"/w"}}';
+    const out = extractEmbeddedToolCalls(`${one} then again ${one} ${one} ${one} ${one}`);
+    expect(out.length).toBeLessThanOrEqual(3);
+    expect(out[0].function.name).toBe("fs_list");
+  });
+  it("ignores prose, examples without valid calls, and broken JSON", () => {
+    expect(extractEmbeddedToolCalls("I read the file and it looks good.")).toEqual([]);
+    expect(extractEmbeddedToolCalls('{"name":"delete_everything","arguments":{}}')).toEqual([]);
+    expect(extractEmbeddedToolCalls('{"name":"fs_list", broken')).toEqual([]);
+    expect(extractEmbeddedToolCalls("")).toEqual([]);
+  });
+});
+
+describe("deniesCapability", () => {
+  it("detects false text-only / cannot-run denials", () => {
+    expect(
+      deniesCapability("As a text-based AI, I cannot execute shell commands directly."),
+    ).toBe(true);
+    expect(deniesCapability("I cannot run shell commands in this environment.")).toBe(true);
+    expect(deniesCapability("I am unable to read files here.")).toBe(true);
+  });
+  it("ignores legit refusals and normal prose", () => {
+    expect(deniesCapability("I cannot approve it myself - please click Approve.")).toBe(false);
+    expect(deniesCapability("I don't have access to /etc/shadow.")).toBe(false);
+    expect(deniesCapability("I read the file and it looks good.")).toBe(false);
+    expect(deniesCapability("")).toBe(false);
+  });
+});
+
+describe("chatWithTools narration repair", () => {
+  it("nudges a narrating model into emitting the real call", async () => {
+    const staged: { path: string; content: string }[] = [];
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") throw new Error("not found");
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAIText("Please approve the fs_write to create check_ffmpeg.py.");
+      }
+      if (prev.length === 2) {
+        // The repair nudge is a user message demanding the real call.
+        const body = JSON.parse(_init.body);
+        const last = body.messages[body.messages.length - 1];
+        expect(last.role).toBe("user");
+        expect(last.content).toMatch(/NO tool call/);
+        return openAITools([
+          { id: "w1", name: "fs_write", args: { path: "/w/check_ffmpeg.py", content: "print(1)" } },
+        ]);
+      }
+      return openAIText("staged for review");
+    });
+    const events: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "check ffmpeg" }],
+      (d) => events.push(d),
+      { policy: { onProposeWrite: async (path, content) => { staged.push({ path, content }); } } },
+    );
+    expect(res).toBe("staged for review");
+    expect(events.join("")).toMatch(/announced fs_write but made no tool call/);
+    expect(staged).toEqual([{ path: "/w/check_ffmpeg.py", content: "print(1)" }]);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("gives up after two nudges and returns the prose", async () => {
+    stubFetch(() => openAIText("Please approve the fs_write, I insist."));
+    setInvokeImpl(async () => {
+      throw new Error("must not run tools");
+    });
+    const res = await chatWithTools(CFG, [{ role: "user", content: "write it" }], () => {});
+    expect(res).toBe("Please approve the fs_write, I insist.");
+  });
+
+  it("runs mixed prose+JSON calls while keeping the prose", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "nexa_read") return "memory: use pnpm";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAIText('I am Commander, ready to help.\n{"name": "nexa_read", "arguments": {"kind":"memory"}}');
+      }
+      return openAIText("How can I assist you today?");
+    });
+    const events: string[] = [];
+    const res = await chatWithTools(CFG, [{ role: "user", content: "introduce yourself" }], (d) =>
+      events.push(d),
+    );
+    expect(res).toBe("How can I assist you today?");
+    expect(events.join("")).toMatch(/recovered nexa_read from message text/);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("reminds a denying model of its tools and runs the call", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "shell_run") return { stdout: "FFmpeg is installed.\n", stderr: "", code: 0 };
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAIText("As a text-based AI, I cannot execute shell commands directly.");
+      }
+      if (prev.length === 2) {
+        const body = JSON.parse(_init.body);
+        const last = body.messages[body.messages.length - 1];
+        expect(last.role).toBe("user");
+        expect(last.content).toMatch(/You DO have that capability/);
+        return openAITools([{ id: "s1", name: "shell_run", args: { cwd: "/w", cmd: "python3 check_ffmpeg.py" } }]);
+      }
+      return openAIText("FFmpeg is installed.");
+    });
+    const events: string[] = [];
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "run it" }],
+      (d) => events.push(d),
+      {
+        policy: { requestApproval: async () => true },
+        onRepair: (r) => repairs.push(r.kind),
+      },
+    );
+    expect(res).toBe("FFmpeg is installed.");
+    expect(events.join("")).toMatch(/false capability denial/);
+    expect(repairs).toEqual(["denial"]);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("nudges bare tool narrations into real calls", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") return "print(1)";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAIText("Fs_read /w/check_ffmpeg.py");
+      }
+      if (prev.length === 2) {
+        const body = JSON.parse(_init.body);
+        const last = body.messages[body.messages.length - 1];
+        expect(last.role).toBe("user");
+        expect(last.content).toMatch(/NO tool call/);
+        return openAITools([{ id: "r1", name: "fs_read", args: { path: "/w/check_ffmpeg.py" } }]);
+      }
+      return openAIText("Yes, the file is available - it contains print(1).");
+    });
+    const events: string[] = [];
+    const res = await chatWithTools(CFG, [{ role: "user", content: "is it there?" }], (d) =>
+      events.push(d),
+    );
+    expect(res).toBe("Yes, the file is available - it contains print(1).");
+    expect(events.join("")).toMatch(/announced fs_read but made no tool call/);
+    expect(calls).toHaveLength(3);
   });
 });
 

@@ -112,17 +112,15 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
         {skills.map((s) => (
           <div
             key={s.name}
-            className="filerow"
-            title={s.description || s.name}
+            className="filerow skillrow"
+            title={s.description ? `/${s.name} - ${s.description}` : `/${s.name}`}
             onClick={() => {
               setInput(`/${s.name} `);
               setSideTab("chat");
             }}
           >
-            <span className="ellipsis" style={{ flex: 1 }}>
-              ⚡ /{s.name}
-              {s.description && <span className="muted"> - {s.description}</span>}
-            </span>
+            <span className="ellipsis">⚡ /{s.name}</span>
+            {s.description && <span className="muted small skilldesc">{s.description}</span>}
           </div>
         ))}
         {skills.length === 0 && (

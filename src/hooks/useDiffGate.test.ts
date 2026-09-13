@@ -97,10 +97,12 @@ describe("useDiffGate.saveFile", () => {
 describe("useDiffGate.approveDiff", () => {
   it("applies clean diffs, syncs buffers and refreshes", async () => {
     const writes: any[] = [];
+    let disk = "old";
     setInvokeImpl(async (cmd, args?: any) => {
-      if (cmd === "fs_read") return "old";
+      if (cmd === "fs_read") return disk;
       if (cmd === "fs_write") {
         writes.push(args);
+        disk = args.content;
         return {};
       }
       throw new Error(`unexpected ${cmd}`);
@@ -112,11 +114,28 @@ describe("useDiffGate.approveDiff", () => {
     expect(writes).toEqual([{ path: "/w/a.txt", content: "new" }]);
     expect(h.wsOf().pendingDiff).toBeNull();
     expect(h.wsOf().shellOut).toMatch(/applied \/w\/a\.txt/);
+    expect(h.wsOf().shellOut).not.toMatch(/verify/);
     expect(h.calls.originals[0]({})).toEqual({ "/w/a.txt": "new" });
     expect(h.calls.etext).toEqual(["new"]);
     expect(h.calls.files).toBe(1);
     expect(h.calls.git).toBe(1);
     expect(h.calls.skills).toBe(1);
+  });
+
+  it("warns and audits when the verify re-read differs", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") return "someone rewrote it";
+      if (cmd === "fs_write") return {};
+      throw new Error(`unexpected ${cmd}`);
+    });
+    (window as any).confirm = vi.fn(() => true);
+    const h = setup(staged);
+    await act(async () => {
+      await h.result.current.approveDiff();
+    });
+    expect(h.wsOf().pendingDiff).toBeNull();
+    expect(h.wsOf().shellOut).toMatch(/verify/);
+    expect(h.calls.audits).toMatchObject([{ tool: "fs_write", ok: false }]);
   });
 
   it("asks before clobbering external changes", async () => {
@@ -142,9 +161,13 @@ describe("useDiffGate.approveDiff", () => {
 describe("useDiffGate.approveAndCommit", () => {
   it("writes, commits the file and audits", async () => {
     const commits: any[] = [];
+    let disk = "old";
     setInvokeImpl(async (cmd, args?: any) => {
-      if (cmd === "fs_read") return "old";
-      if (cmd === "fs_write") return {};
+      if (cmd === "fs_read") return disk;
+      if (cmd === "fs_write") {
+        disk = args.content;
+        return {};
+      }
       if (cmd === "git_commit") {
         commits.push(args);
         return { hash: "deadbeef1234" };

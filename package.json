@@ -1,7 +1,7 @@
 {
   "name": "vtnexa",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "sync-monaco": "rm -rf public/vs && mkdir -p public && cp -r node_modules/monaco-editor/min/vs public/vs",

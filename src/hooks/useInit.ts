@@ -9,13 +9,17 @@ import { WS_KEY } from "./useWorkspace";
 
 // Workspace lifecycle: boot init (localStorage → backend $HOME default, no
 // hardcoded user path), folder switching (save old session, reload every
-// per-project domain), and the native picker. The sequencing that used to
-// live inline in App - and that no test could reach - lives here.
+// per-project domain), and the native picker.
+//
+// Sessions are OpenCode-style: the app ALWAYS boots a fresh session per
+// folder. Previous sessions live in `<workspace>/.nexa/sessions/` and are
+// resumed explicitly from the SessionBar dropdown. The legacy single
+// `.nexa/session.json` is left untouched as a backup.
 export function useInit(opts: {
   workspaceRoot: string;
   wsCommitted: React.MutableRefObject<string>;
   nexaReady: React.MutableRefObject<boolean>;
-  sessionReady: React.MutableRefObject<boolean>;
+  sessionsReady: React.MutableRefObject<boolean>;
   routinesReady: React.MutableRefObject<boolean>;
   setWorkspaceRoot: (v: string) => void;
   setCwdState: React.Dispatch<React.SetStateAction<string>>;
@@ -23,7 +27,7 @@ export function useInit(opts: {
   setOpenPath: (v: string) => void;
   updateWs: (fn: (w: Workspace) => Workspace) => void;
   saveSessionNow: () => Promise<void>;
-  loadSession: () => Promise<void>;
+  bootFresh: (root: string, cwd: string) => Promise<void>;
   loadNexa: () => Promise<void>;
   loadRoutines: () => Promise<void>;
   refreshSkills: () => Promise<void>;
@@ -44,8 +48,8 @@ export function useInit(opts: {
       opts.setOpenPath("");
       opts.nexaReady.current = false;
       await opts.loadNexa();
-      opts.sessionReady.current = false;
-      await opts.loadSession();
+      opts.sessionsReady.current = false;
+      await opts.bootFresh(canon, canon);
       opts.routinesReady.current = false;
       await opts.loadRoutines();
       await opts.refreshSkills();
@@ -66,9 +70,8 @@ export function useInit(opts: {
     }
   }
 
-  // Init: localStorage → backend ($HOME default). The PTY must start in the
-  // project, not $HOME: defer the empty-cwd fix until canon is known, and
-  // don't overwrite a restored cwd.
+  // Init: localStorage → backend ($HOME default). Always boots a FRESH
+  // session; previous sessions are resumed explicitly from the dropdown.
   useEffect(() => {
     (async () => {
       try {
@@ -81,7 +84,7 @@ export function useInit(opts: {
         opts.setCwdState((c) => c || canon);
         opts.setWs((w) => (w.cwd ? w : { ...w, cwd: canon }));
         await opts.loadNexa();
-        await opts.loadSession();
+        await opts.bootFresh(canon, canon);
         await opts.loadRoutines();
         await opts.refreshSkills();
         await opts.loadConventions(canon);

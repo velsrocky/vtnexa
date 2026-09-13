@@ -145,6 +145,11 @@ select { background: var(--deep); color: var(--text-dim); border: 1px solid var(
 .filelist { flex: 1; overflow: auto; background: var(--deep); border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
 .filerow { display: flex; align-items: center; gap: 6px; padding: 4px 6px; cursor: pointer; border-radius: 6px; font-size: 13px; }
 .filerow:hover { background: var(--hover); }
+/* Skills read as two lines (name + wrapped description) so long text is
+   never truncated away with no way to scroll sideways and read it. */
+.filerow.skillrow { flex-direction: column; align-items: stretch; gap: 2px; }
+.filerow.skillrow .ellipsis { max-width: none; }
+.skilldesc { white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }
 .editor textarea { flex: 1; min-height: 220px; background: var(--deep); color: var(--text); border: 1px solid var(--border2); border-radius: 8px; padding: 8px; font-family: monospace; }
 .monaco-wrap { flex: 1; min-height: 260px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .preview-col { flex: 1; display: flex; flex-direction: column; min-height: 260px; }
@@ -210,3 +215,51 @@ button:disabled { opacity: 0.5; }
 .tab.active { background: var(--panel); color: var(--text); border-bottom-color: var(--accent); }
 .tab button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 4px; font-size: 13px; }
 .tab button:hover { color: var(--err); }
+.agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+.agent-status .spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--accent);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.msg .rate {
+  float: right;
+  display: inline-flex;
+  gap: 2px;
+}
+.msg .rate button {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 0 3px;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.45;
+}
+.msg .rate button:hover {
+  opacity: 1;
+  border-color: var(--border3);
+}
+.msg .rate button.active {
+  opacity: 1;
+  border-color: var(--accent);
+}

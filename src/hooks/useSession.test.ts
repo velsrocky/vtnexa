@@ -75,6 +75,21 @@ describe("useSession.saveSessionNow", () => {
     expect(w.provider).toMatchObject({ baseUrl: "http://x", model: "m", apiKey: "" });
     expect(w.buffers).toEqual({});
     expect(w).toMatchObject({ centerTab: "edit", sideTab: "chat", chatDraft: "", previewUrl: "" });
+    expect(w.pendingDiff).toBeNull();
+  });
+
+  it("persists pendingDiff and shellOut", async () => {
+    const { result, saves } = setup({
+      ...BASE_WS,
+      shellOut: "$ some shell output",
+      pendingDiff: { path: "/w/a.txt", content: "new", original: "old" },
+    });
+    await act(async () => {
+      await result.current.saveSessionNow();
+    });
+    const w = JSON.parse(saves[0]).windows.main;
+    expect(w.pendingDiff).toEqual({ path: "/w/a.txt", content: "new", original: "old" });
+    expect(w.shellOut).toBe("$ some shell output");
   });
 
   it("merges into the existing file without touching sibling slots", async () => {
@@ -188,6 +203,7 @@ describe("useSession.loadSession", () => {
         id: "main:ws",
         cwd: "/w",
         messages: [{ id: "m1", role: "user", content: "hi" }],
+        pendingDiff: { path: "/w/a.txt", content: "new", original: "old" },
         usage: { input: 1, output: 2, cost: 0, tools: 0, toolMs: 0 },
         audit: [],
         tabs: [],
@@ -205,7 +221,33 @@ describe("useSession.loadSession", () => {
     expect(restored).toHaveLength(1);
     expect(restored[0].messages).toEqual([{ id: "m1", role: "user", content: "hi" }]);
     expect(restored[0].provider).toMatchObject({ apiKey: "REFILLED", kind: "openai" });
+    expect(restored[0].pendingDiff).toEqual({ path: "/w/a.txt", content: "new", original: "old" });
     expect(result.current.sessionReady.current).toBe(true);
+  });
+
+  it("restores pendingDiff from saved session", async () => {
+    const raw = JSON.stringify({
+      version: 7,
+      windows: {
+        main: {
+          id: "main:ws",
+          cwd: "/w",
+          pendingDiff: { path: "/w/test.txt", content: "modified", original: "original" },
+          shellOut: "$ previous output",
+          messages: [], usage: { input: 0, output: 0, cost: 0, tools: 0, toolMs: 0 },
+          audit: [], tabs: [], buffers: {}, originals: {}, openPath: "",
+          shellH: 80, ptyH: 220,
+          provider: { baseUrl: "http://x", model: "m", kind: "auto" },
+          centerTab: "edit", sideTab: "chat", chatDraft: "", previewUrl: "",
+        },
+      },
+    });
+    const { result, restored } = loadSetup(raw);
+    await act(async () => {
+      await result.current.loadSession();
+    });
+    expect(restored[0].pendingDiff).toEqual({ path: "/w/test.txt", content: "modified", original: "original" });
+    expect(restored[0].shellOut).toBe("$ previous output");
   });
 
   it("starts a fresh window empty when only another label has a slot", async () => {

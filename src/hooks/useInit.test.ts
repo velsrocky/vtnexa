@@ -34,7 +34,7 @@ function setup() {
     workspaceRoot: "",
     wsCommitted: { current: "" },
     nexaReady: { current: false },
-    sessionReady: { current: false },
+    sessionsReady: { current: false },
     routinesReady: { current: false },
     setWorkspaceRoot: vi.fn((v: string) => {
       deps.workspaceRoot = v;
@@ -50,7 +50,7 @@ function setup() {
     saveSessionNow: vi.fn(async () => {
       order.push("save");
     }),
-    loadSession: vi.fn(async () => {
+    bootFresh: vi.fn(async () => {
       order.push("session");
     }),
     loadNexa: vi.fn(async () => {

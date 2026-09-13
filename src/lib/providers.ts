@@ -50,7 +50,8 @@ export const TOOL_DEFS: ToolDef[] = [
     type: "function",
     function: {
       name: "fs_list",
-      description: "List directory entries (absolute path, read-only)",
+      description:
+        "List directory entries. Absolute path inside the workspace, read-only. Use this (not fs_read) for directories and to discover file names. Good: {path: \"/ws/src\"}. Bad: {path: \"src\"} (relative - rejected).",
       parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
     },
   },
@@ -58,7 +59,8 @@ export const TOOL_DEFS: ToolDef[] = [
     type: "function",
     function: {
       name: "fs_read",
-      description: "Read a text file (absolute path, read-only, 2MB max)",
+      description:
+        "Read a text file BEFORE editing it. Absolute path inside the workspace, read-only, 2MB max. Files only - for directories use fs_list. Good: {path: \"/ws/src/App.tsx\"}. Bad: {path: \"App.tsx\"} (relative - rejected); {path: \"/ws/src\"} (a directory - use fs_list).",
       parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
     },
   },
@@ -217,7 +219,8 @@ export const TOOL_DEFS: ToolDef[] = [
     type: "function",
     function: {
       name: "fs_write",
-      description: "PROPOSE a file write (staged to Diff review gate, needs user Approve - does NOT write directly)",
+      description:
+        "PROPOSE a file write (staged to Diff review gate, needs user Approve - does NOT write directly). First fs_read the file, then send the COMPLETE new content. Absolute path. Never re-send identical content.",
       parameters: {
         type: "object",
         properties: { path: { type: "string" }, content: { type: "string" } },
@@ -229,7 +232,8 @@ export const TOOL_DEFS: ToolDef[] = [
     type: "function",
     function: {
       name: "shell_run",
-      description: "Run a shell command via sh -c (REQUIRES user approval, cwd must be absolute dir)",
+      description:
+        "Run a shell command via sh -c (REQUIRES user approval - explain what and why first; cwd must be an absolute dir inside the workspace). Prefer read-only commands; never chain destructive ones.",
       parameters: {
         type: "object",
         properties: { cwd: { type: "string" }, cmd: { type: "string" } },
@@ -339,6 +343,63 @@ interface ToolCall {
 
 const TOOL_NAMES = new Set(TOOL_DEFS.map((t) => t.function.name));
 
+// Weak models narrate instead of acting ("please approve the fs_write…",
+// "Next action: shell_run…") and the turn dies as prose. Detect the
+// announcement so the loop can nudge the model into emitting the real call.
+const ANNOUNCE_RE =
+  /please approve|next action|i['’]ll (now )?(call|run|execute)|i will (now )?(call|run|execute)|let me (call|run|execute)|(going|about) to (call|run|execute)/i;
+
+/** Returns the announced tool name, or null when the text announces nothing. */
+export function announcesToolAction(text: string): string | null {
+  if (!text) return null;
+  if (!ANNOUNCE_RE.test(text)) return null;
+  const lower = text.toLowerCase();
+  for (const t of TOOL_DEFS) {
+    if (lower.includes(t.function.name)) return t.function.name;
+  }
+  return null;
+}
+
+// Second narration shape: a bare `ToolName <args>` line with no announcement
+// verb, e.g. an assistant message that is just "Fs_read /home/u/f.py".
+// The remainder must LOOK like arguments (path / JSON / ref / quoted) so
+// descriptions ("fs_write stages to the Diff gate") never match.
+const BARE_CALL_RE = /^([A-Za-z][A-Za-z0-9_]*)\s*:?\s+(\S[\s\S]*)$/;
+const ARGS_LOOK_RE = /^(\/|{|"|'|https?:|[\d\-])/;
+
+/**
+ * Detects false capability denials ("I cannot run commands", "text-only
+ * AI ... cannot ..."). Tight on purpose: the verb must be a tool-grade
+ * action (run/execute/access/read/write), so legit refusals like "I cannot
+ * approve it myself" or "I don't have access to /etc/shadow" never match.
+ */
+export function deniesCapability(text: string): boolean {
+  if (!text || text.length > 4000) return false;
+  const t = text.toLowerCase();
+  if (/i (cannot|can ?not|am unable to|don't have the ability to) (run|execute|access|read|write|open|see|view)\b/.test(t)) return true;
+  if (t.includes("text-based ai") && /(cannot|can ?not|unable|only read)/.test(t)) return true;
+  if (t.includes("as an ai") && /(cannot|can ?not|unable)/.test(t)) return true;
+  return false;
+}
+
+/** Returns the narrated tool name for bare `Tool args` lines, else null. */
+export function narratesBareToolCall(text: string): string | null {
+  if (!text) return null;
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const candidates = [text.trim()];
+  if (lines.length > 1) candidates.push(lines[lines.length - 1]);
+  for (const c of candidates) {
+    if (c.length > 400) continue;
+    const m = c.match(BARE_CALL_RE);
+    if (!m) continue;
+    const name = m[1].toLowerCase();
+    if (!TOOL_NAMES.has(name)) continue;
+    if (!ARGS_LOOK_RE.test(m[2].trim())) continue;
+    return name;
+  }
+  return null;
+}
+
 /**
  * Recover tool calls that weak models emit as plain text instead of
  * structured tool_calls. Strict on purpose: the ENTIRE reply must be a JSON
@@ -363,25 +424,96 @@ export function parseTextToolCalls(text: string): ToolCall[] {
   const items = Array.isArray(data) ? data : [data];
   const out: ToolCall[] = [];
   for (const item of items) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-    const o = item as Record<string, unknown>;
-    const fn = (o.function && typeof o.function === "object" ? o.function : o) as Record<string, unknown>;
-    const name = typeof fn.name === "string" ? fn.name : "";
-    if (!TOOL_NAMES.has(name)) continue;
-    let args = "{}";
-    if (typeof fn.arguments === "string") {
-      try {
-        JSON.parse(fn.arguments);
-        args = fn.arguments;
-      } catch {
-        continue;
-      }
-    } else if (fn.arguments && typeof fn.arguments === "object") {
-      args = JSON.stringify(fn.arguments);
-    } else if (fn.args && typeof fn.args === "object") {
-      args = JSON.stringify(fn.args);
+    const tc = toTextToolCall(item);
+    if (tc) out.push(tc);
+  }
+  return out;
+}
+
+function toTextToolCall(item: unknown): ToolCall | null {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const o = item as Record<string, unknown>;
+  const fn = (o.function && typeof o.function === "object" ? o.function : o) as Record<string, unknown>;
+  const name = typeof fn.name === "string" ? fn.name : "";
+  if (!TOOL_NAMES.has(name)) return null;
+  let args = "{}";
+  if (typeof fn.arguments === "string") {
+    try {
+      JSON.parse(fn.arguments);
+      args = fn.arguments;
+    } catch {
+      return null;
     }
-    out.push({ id: `txt_${Math.random().toString(36).slice(2, 10)}`, function: { name, arguments: args } });
+  } else if (fn.arguments && typeof fn.arguments === "object") {
+    args = JSON.stringify(fn.arguments);
+  } else if (fn.args && typeof fn.args === "object") {
+    args = JSON.stringify(fn.args);
+  }
+  return { id: `txt_${Math.random().toString(36).slice(2, 10)}`, function: { name, arguments: args } };
+}
+
+/**
+ * Recover tool calls embedded in a prose reply: trailing JSON
+ * ("...thanks!\n{\"name\":\"nexa_read\",...}") or fenced JSON after
+ * explanation. Stricter than it looks: every candidate must be balanced,
+ * valid JSON whose `name` is a real tool. Destructive tools stay safe -
+ * they still go through the approval popup, writes still stage to the
+ * Diff gate. Capped so a pasted doc can't fan out into many calls.
+ */
+const MAX_EMBEDDED_CALLS = 3;
+
+export function extractEmbeddedToolCalls(text: string): ToolCall[] {
+  if (!text) return [];
+  const out: ToolCall[] = [];
+  const seenSigs = new Set<string>();
+  let i = 0;
+  while (i < text.length && out.length < MAX_EMBEDDED_CALLS) {
+    const start = text.indexOf("{", i);
+    if (start === -1) break;
+    // Balanced-brace scan, string-aware, so code/python around it can't
+    // corrupt the span.
+    let depth = 0;
+    let inStr: string | null = null;
+    let esc = false;
+    let end = -1;
+    for (let j = start; j < text.length; j++) {
+      const c = text[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === inStr) inStr = null;
+      } else if (c === '"' || c === "'") {
+        inStr = c;
+      } else if (c === "{") {
+        depth++;
+      } else if (c === "}") {
+        depth--;
+        if (depth === 0) {
+          end = j;
+          break;
+        }
+      }
+    }
+    if (end === -1) break;
+    const slice = text.slice(start, end + 1);
+    i = end + 1;
+    if (slice.length > 8000) continue;
+    let data: unknown;
+    try {
+      data = JSON.parse(slice);
+    } catch {
+      continue;
+    }
+    const items = Array.isArray(data) ? data : [data];
+    for (const item of items) {
+      const tc = toTextToolCall(item);
+      if (!tc) continue;
+      const sig = `${tc.function.name}:${tc.function.arguments}`;
+      if (seenSigs.has(sig)) continue;
+      seenSigs.add(sig);
+      out.push(tc);
+      if (out.length >= MAX_EMBEDDED_CALLS) break;
+    }
   }
   return out;
 }
@@ -484,6 +616,19 @@ const PRICE_PER_MTOK: [RegExp, { in: number; out: number }][] = [
 const LOCAL_MODEL_RE =
   /localhost|127\.0\.0\.1|ollama|llama|qwen|mistral|mixtral|phi-|gemma|gguf/i;
 
+// Small/weak models need a simpler prompt: fewer simultaneous tools, explicit
+// tool-call format, shorter replies. Heuristic on purpose: local endpoints,
+// small-model families and small size tags. Frontier cloud models get the
+// full prompt.
+const WEAK_MODEL_RE =
+  /localhost|127\.0\.0\.1|ollama|gpt-oss|deepseek.*distill|llama|qwen|mistral|mixtral|phi[-_]|gemma|gguf|\bmini\b|\bnano\b/i;
+const SMALL_SIZE_RE = /[:\-_](0\.5|1|1\.5|3|7|8|9)b\b/i;
+
+export function isWeakModel(baseUrl: string, model: string): boolean {
+  if (WEAK_MODEL_RE.test(baseUrl) || WEAK_MODEL_RE.test(model)) return true;
+  return SMALL_SIZE_RE.test(model);
+}
+
 export function estimateCost(
   baseUrl: string,
   model: string,
@@ -538,10 +683,20 @@ export async function runTool(
       if (!ok) return `user rejected ${name} - do not retry without changing the plan`;
     }
     switch (name) {
-      case "fs_list":
-        return JSON.stringify(await fsList(args.path));
-      case "fs_read":
-        return (await fsRead(args.path)).slice(0, 60000);
+      case "fs_list": {
+        const p = String(args.path ?? "");
+        if (!p) return "error: fs_list path is required - use the workspace root or cwd, e.g. {path: \"/ws\"}";
+        if (!p.startsWith("/"))
+          return `error: fs_list path must be absolute inside the workspace (got ${JSON.stringify(p)}). Prefix the workspace root, e.g. list the cwd first.`;
+        return JSON.stringify(await fsList(p));
+      }
+      case "fs_read": {
+        const p = String(args.path ?? "");
+        if (!p) return "error: fs_read path is required - e.g. {path: \"/ws/src/App.tsx\"}";
+        if (!p.startsWith("/"))
+          return `error: fs_read path must be absolute inside the workspace (got ${JSON.stringify(p)}). Use fs_list/fs_glob to resolve the full path first.`;
+        return (await fsRead(p)).slice(0, 60000);
+      }
       case "skill_list":
         return JSON.stringify(await skillList());
       case "skill_read":
@@ -666,6 +821,8 @@ export async function chatWithTools(
     signal?: AbortSignal;
     onUsage?: (u: { input: number; output: number; model: string; cost?: number }) => void;
     onToolActivity?: (a: { name: string; ms: number; ok: boolean }) => void;
+    /** Fires on every repair nudge (narration or denial) - powers auto-banding. */
+    onRepair?: (r: { kind: "narration" | "denial" }) => void;
     onAudit?: (e: {
       tool: string;
       args: string;
@@ -770,6 +927,8 @@ export async function chatWithTools(
   // stream_options outright with a 400. One retry without it, not always.
   let preferStreamOptions = true;
   // Loop guard: weak models re-issue the same calls forever. 3x identical = stuck.
+  // Shared bound for repair nudges (narration + capability denial).
+  let repairNudges = 0;
   const seen = new Map<string, number>();
   const usedTools: string[] = [];
   let loopNote = "";
@@ -1340,10 +1499,57 @@ export async function chatWithTools(
         toolCalls = parsed;
         content = "";
         onEvent(`\n[note: parsed tool call from plain text - ${parsed.map((p) => p.function.name).join(", ")}]\n`);
+      } else {
+        // Mixed prose+JSON ("thanks!\n{...nexa_read...}"): keep the prose
+        // visible AND run the calls, instead of dropping them on the floor.
+        const embedded = extractEmbeddedToolCalls(content);
+        if (embedded.length > 0) {
+          toolCalls = embedded;
+          onEvent(`\n[note: recovered ${embedded.map((p) => p.function.name).join(", ")} from message text - running it]\n`);
+        }
       }
     }
 
     if (toolCalls.length === 0) {
+      // Repair nudges (bounded, shared budget): narration and false
+      // capability denials instead of ending the turn and forcing the user
+      // to re-prompt.
+      if (useTools && repairNudges < 2) {
+        // Narration repair: the model announced or narrated a tool action in
+        // prose but emitted no call (classic weak-model failure).
+        const announced = announcesToolAction(content) ?? narratesBareToolCall(content);
+        if (announced) {
+          repairNudges++;
+          opts?.onRepair?.({ kind: "narration" });
+          onEvent(`\n[note: announced ${announced} but made no tool call - asking for the real call]\n`);
+          convo.push({ role: "assistant", content });
+          convo.push({
+            role: "user",
+            content:
+              `You announced a ${announced} action but made NO tool call. ` +
+              `Talking about a tool does nothing. Emit the actual ${announced} ` +
+              `tool call NOW via tool_calls - no prose, no asking for permission.`,
+          });
+          continue;
+        }
+        // Denial repair: "I cannot run commands / text-only AI" contradicts
+        // the tools on hand. Remind once instead of stranding the user.
+        if (deniesCapability(content)) {
+          repairNudges++;
+          opts?.onRepair?.({ kind: "denial" });
+          onEvent(`\n[note: false capability denial - reminding of available tools]\n`);
+          convo.push({ role: "assistant", content });
+          convo.push({
+            role: "user",
+            content:
+              `You DO have that capability: shell_run runs commands, ` +
+              `fs_list/fs_read read files - side effects just need the user's ` +
+              `popup approval. Never claim to be text-only or unable. Either ` +
+              `emit the real tool call NOW or explain the next approved step.`,
+          });
+          continue;
+        }
+      }
       return content;
     }
 
@@ -1432,7 +1638,8 @@ export async function chatWithTools(
             role: "user",
             content:
               `${loopNote}Tool budget exhausted. Write your final answer now using only the tool results above. ` +
-              `Reply with PLAIN TEXT ONLY - no tool calls, no JSON: what you found/did, and what remains.` +
+              `Reply with PLAIN TEXT ONLY - no tool calls, no JSON: what you found/did, and what remains. ` +
+              `Cite the actual tool outputs observed above (paths, results). Do NOT claim confusion, misunderstanding, or missing context when tool results already exist, and do NOT invent tool calls or results beyond this turn's history.` +
               (attempt > 0 ? ` This is attempt ${attempt + 1}: your previous reply was not plain text. Text only.` : ""),
           },
         ],

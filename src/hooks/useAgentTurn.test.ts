@@ -18,6 +18,7 @@ function setInvokeImpl(fn: (cmd: string, args?: any) => Promise<any>) {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  localStorage.clear();
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
@@ -33,13 +34,22 @@ function setup(opts?: {
   busy?: boolean;
   provHistLength?: number;
   skills?: { name: string; description: string }[];
+  memoryText?: string;
+  repoMap?: string;
+  gitSnapshot?: string;
+  openPath?: string;
+  provider?: Partial<ProviderConfig>;
 }) {
-  let ws: Workspace = newWorkspace("main:ws", "/w");
+  let ws: Workspace = {
+    ...newWorkspace("main:ws", "/w"),
+    ...(opts?.provider ? { provider: { ...newWorkspace("main:ws", "/w").provider, ...opts.provider } } : {}),
+  };
   const busy: boolean[] = [];
   const remembered: ProviderConfig[] = [];
   const centerTabs: string[] = [];
   const audits: any[] = [];
   const turnAbort = { current: null as AbortController | null };
+  const stopTurnIdRef = { current: "" };
   const hook = renderHook(() =>
     useAgentTurn({
       ws,
@@ -48,8 +58,13 @@ function setup(opts?: {
       conventionsName: "",
       skills: opts?.skills ?? [],
       provHistLength: opts?.provHistLength ?? 1,
+      memoryText: opts?.memoryText,
+      repoMap: opts?.repoMap,
+      gitSnapshot: opts?.gitSnapshot,
+      openPath: opts?.openPath,
       busy: opts?.busy ?? false,
       turnAbort: turnAbort as any,
+      stopTurnIdRef: stopTurnIdRef as any,
       streamRaf: { current: null } as any,
       stickBottom: { current: true },
       lastSynced: { current: { pad: "", plan: "", memory: "" } },
@@ -161,6 +176,92 @@ describe("useAgentTurn stop", () => {
     const last = h.wsOf().messages[h.wsOf().messages.length - 1];
     expect(last.content).toMatch(/turn stopped/);
     expect(h.turnAbort.current).toBeNull();
+  });
+});
+
+describe("useAgentTurn context packing", () => {
+  it("packs contract, clarify rule, memory, repo map, git and open file into the system prompt", async () => {
+    let sys = "";
+    stubFetch((_url, init: any) => {
+      try {
+        sys = JSON.parse(init.body).messages[0].content;
+      } catch {
+        sys = "";
+      }
+      return openAIText("ok");
+    });
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup({
+      memoryText: "Decided: use pnpm, never npm.",
+      repoMap: "dir src\nfile package.json",
+      gitSnapshot: "main · 2 changed: a.txt, b.txt",
+      openPath: "/w/src/App.tsx",
+      provider: { baseUrl: "https://api.openai.com/v1", model: "gpt-4o" },
+    });
+    await act(async () => {
+      await h.result.current.runAgentTurn("go");
+    });
+    expect(sys).toMatch(/Answer contract/);
+    expect(sys).toMatch(/Ambiguity rule/);
+    expect(sys).toMatch(/Read-before-edit/);
+    expect(sys).toMatch(/Decided: use pnpm/);
+    expect(sys).toMatch(/Repo map/);
+    expect(sys).toMatch(/main · 2 changed/);
+    expect(sys).toMatch(/open=\/w\/src\/App\.tsx/);
+  });
+});
+
+describe("useAgentTurn model variants", () => {
+  async function captureSys(provider?: Partial<ProviderConfig>): Promise<string> {
+    let sys = "";
+    stubFetch((_url, init: any) => {
+      try {
+        sys = JSON.parse(init.body).messages[0].content;
+      } catch {
+        sys = "";
+      }
+      return openAIText("ok");
+    });
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup(provider ? { provider } : undefined);
+    await act(async () => {
+      await h.result.current.runAgentTurn("go");
+    });
+    return sys;
+  }
+
+  it("uses the compact one-tool prompt for weak local models", async () => {
+    const sys = await captureSys({ baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder:7b" });
+    expect(sys).toMatch(/ONE tool call per reply/);
+    expect(sys).toMatch(/talking about a tool does nothing/);
+    expect(sys).toMatch(/meta-commentary/);
+    expect(sys).toMatch(/NO cd tool/);
+    expect(sys).toMatch(/ALREADY pasted above/);
+    expect(sys).toMatch(/needs NO tools/);
+    expect(sys).toMatch(/Grounding/);
+    expect(sys).toMatch(/text-only/);
+    expect(sys).toMatch(/ONLY from a shell_run tool result/);
+    expect(sys).not.toMatch(/Answer contract/);
+  });
+
+  it("uses the full contract prompt for frontier models", async () => {
+    const sys = await captureSys({ baseUrl: "https://api.openai.com/v1", model: "gpt-4o" });
+    expect(sys).toMatch(/Answer contract/);
+    expect(sys).toMatch(/Grounding/);
+    expect(sys).toMatch(/only shell_run results count as output/);
+    expect(sys).not.toMatch(/ONE tool call per reply/);
+  });
+
+  it("lets observed repair history override the heuristic", async () => {
+    const { recordTurnRepairs } = await import("../lib/modelBands");
+    for (let i = 0; i < 3; i++) {
+      recordTurnRepairs("https://api.openai.com/v1", "gpt-4o", 2);
+    }
+    const sys = await captureSys({ baseUrl: "https://api.openai.com/v1", model: "gpt-4o" });
+    expect(sys).toMatch(/ONE tool call per reply/);
+    expect(sys).not.toMatch(/Answer contract/);
   });
 });
 

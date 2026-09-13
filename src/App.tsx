@@ -16,13 +16,15 @@ import EditorPane from "./components/EditorPane";
 import TopBar from "./components/TopBar";
 import ProviderBar from "./components/ProviderBar";
 import WorkspaceBar from "./components/WorkspaceBar";
+import SessionBar from "./components/SessionBar";
 import { invoke } from "@tauri-apps/api/core";
 import { baseName } from "./lib/utils";
+import { loadFeedback, rateMessage, ratingMap } from "./lib/feedback";
 import { useGit } from "./hooks/useGit";
 import { useWorkspaceState, windowLabel, ptyId } from "./hooks/useWorkspaceState";
 import { useAgentTurn } from "./hooks/useAgentTurn";
 import { useNexa } from "./hooks/useNexa";
-import { useSession } from "./hooks/useSession";
+import { useSessions } from "./hooks/useSessions";
 import { useEditor } from "./hooks/useEditor";
 import { useFiles } from "./hooks/useFiles";
 import { useProvider } from "./hooks/useProvider";
@@ -38,6 +40,7 @@ import { useRoutines } from "./hooks/useRoutines";
 // backend), separate PTYs, separate sessions, separate everything.
 export default function App() {
   const [auditNote, setAuditNote] = useState("");
+  const [ratings, setRatings] = useState<Record<string, 1 | -1>>(() => ratingMap(loadFeedback()));
   const { themeId, setThemeId, theme, leftW, rightW, onResizerDown } = usePrefs();
 
   const {
@@ -46,6 +49,7 @@ export default function App() {
     busy,
     setBusy,
     turnAbort,
+    stopTurnIdRef,
     streamRaf,
     pendingTools,
     setPendingTools,
@@ -211,6 +215,15 @@ export default function App() {
     loadNexa,
   } = useNexa({ workspaceRoot });
 
+  // Pre-packed turn context: cheap orientation so the model spends its
+  // tool budget on the task, not on discovering cwd/tree/git/memory.
+  const repoMap = files
+    .slice(0, 40)
+    .map((f) => `${f.is_dir ? "dir " : "file "}${f.name}`)
+    .join("\n");
+  const gitSnapshot = gitBranch
+    ? `${gitBranch} · ${gitFiles.length} changed${gitFiles.length ? `: ${gitFiles.slice(0, 10).map((f) => f.path).join(", ")}${gitFiles.length > 10 ? "…" : ""}` : ""}`
+    : "";
   const { expandSkill, runAgentTurn } = useAgentTurn({
     ws,
     workspaceRoot,
@@ -218,8 +231,13 @@ export default function App() {
     conventionsName,
     skills,
     provHistLength: provHist.length,
+    memoryText,
+    repoMap,
+    gitSnapshot,
+    openPath,
     busy,
     turnAbort,
+    stopTurnIdRef,
     streamRaf,
     stickBottom,
     lastSynced,
@@ -237,11 +255,23 @@ export default function App() {
     flushStreamFrame,
   });
 
-  const { saveSessionNow, loadSession, sessionReady } = useSession({
+  const {
+    sessions,
+    currentId: sessionId,
+    currentTitle: sessionTitle,
+    sessionsReady,
+    refreshSessions,
+    persistCurrent: saveSessionNow,
+    newSession,
+    resumeSession,
+    removeSession,
+    bootFresh,
+  } = useSessions({
     ws,
     workspaceRoot,
     setWs,
     setCwdState,
+    setOpenPath,
     note: (text) => updateWs((w) => ({ ...w, shellOut: w.shellOut + text })),
   });
 
@@ -262,7 +292,7 @@ export default function App() {
     workspaceRoot,
     wsCommitted,
     nexaReady,
-    sessionReady,
+    sessionsReady,
     routinesReady,
     setWorkspaceRoot,
     setCwdState,
@@ -270,7 +300,7 @@ export default function App() {
     setOpenPath,
     updateWs,
     saveSessionNow,
-    loadSession,
+    bootFresh,
     loadNexa,
     loadRoutines,
     refreshSkills,
@@ -377,6 +407,16 @@ export default function App() {
         cwd={cwd}
         setCwd={setCwd}
       />
+      <SessionBar
+        sessions={sessions}
+        currentId={sessionId}
+        currentTitle={sessionTitle}
+        busy={busy}
+        onNew={() => void newSession()}
+        onResume={(id) => void resumeSession(id)}
+        onDelete={(id) => void removeSession(id)}
+        onRefresh={() => void refreshSessions()}
+      />
       <div className="main">
         <FileTree
           cwd={cwd}
@@ -470,6 +510,29 @@ export default function App() {
           setInput={setInput}
           sendChat={sendChat}
           stopTurn={stopTurn}
+          pendingToolsCount={pendingTools.length}
+          ratings={ratings}
+          onRateMessage={(messageId, rating) => {
+            const msgs = ws.messages;
+            const idx = msgs.findIndex((m) => m.id === messageId);
+            const answer = idx >= 0 ? msgs[idx].content : "";
+            let prompt = "";
+            for (let i = idx - 1; i >= 0; i--) {
+              if (msgs[i].role === "user") {
+                prompt = msgs[i].content;
+                break;
+              }
+            }
+            const next = rateMessage({
+              messageId,
+              sessionId,
+              model: ws.provider.model,
+              rating,
+              prompt,
+              answer,
+            });
+            setRatings(ratingMap(next));
+          }}
           padText={padText}
           setPadText={setPadText}
           planText={planText}

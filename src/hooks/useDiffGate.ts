@@ -57,13 +57,47 @@ export function useDiffGate(opts: {
     let current = "";
     try {
       current = await fsRead(d.path);
-    } catch {
-      current = ""; // gone or unreadable - treat as new-file write
+    } catch (e) {
+      const msg = String(e);
+      // File gone: safe to write (it's a new file). Permission/locked: warn.
+      if (msg.includes("No such file or directory") || msg.includes("not exist")) {
+        current = ""; // gone or new file
+      } else {
+        return window.confirm(
+          `${baseName(d.path)} could not be read (${msg}) — likely locked or permission-denied. Apply anyway and overwrite?`,
+        );
+      }
     }
     if (current === d.original) return true;
     return window.confirm(
       `${baseName(d.path)} changed on disk since this diff was staged (another window, the agent, or an external editor).\n\nApply anyway and overwrite those changes?`,
     );
+  }
+
+  // Verify pass: re-read after writing. A mismatch means the write didn't
+  // stick or something rewrote the file in between - report it loudly
+  // instead of claiming success.
+  async function verifyApplied(path: string, expected: string): Promise<boolean> {
+    try {
+      return (await fsRead(path)) === expected;
+    } catch {
+      return false;
+    }
+  }
+
+  function noteVerifyFailure(path: string) {
+    updateWs((w) => ({
+      ...w,
+      shellOut: w.shellOut + `\n⚠ verify: ${path} differs on disk right after apply - re-read the file before trusting it`,
+    }));
+    opts.logAudit({
+      tool: "fs_write",
+      args: JSON.stringify({ path }).slice(0, 1000),
+      decision: "approved",
+      ok: false,
+      ms: 0,
+      note: "verify mismatch after apply",
+    });
   }
 
   async function approveDiff() {
@@ -72,11 +106,13 @@ export function useDiffGate(opts: {
     if (!(await driftOk(d))) return;
     await fsWrite(d.path, d.content);
     markApplied(d.path, d.content);
+    const verified = await verifyApplied(d.path, d.content);
     updateWs((w) => ({
       ...w,
       pendingDiff: null,
-      shellOut: w.shellOut + `\n✓ applied ${d.path}`,
+      shellOut: w.shellOut + `\n✓ applied ${d.path}${verified ? "" : " (unverified - see warning)"}`,
     }));
+    if (!verified) noteVerifyFailure(d.path);
     opts.refreshFiles(opts.cwd);
     opts.refreshGit();
     opts.refreshSkills();
@@ -91,6 +127,8 @@ export function useDiffGate(opts: {
     
     await fsWrite(d.path, d.content);
     markApplied(d.path, d.content);
+    const verified = await verifyApplied(d.path, d.content);
+    if (!verified) noteVerifyFailure(d.path);
     const msg = opts.commitMsg.trim() || `Update ${d.path.split("/").pop()}`;
     const t0 = Date.now();
     try {
