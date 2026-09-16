@@ -202,3 +202,42 @@ describe("lsp tool", () => {
     await expect(runTool("lsp", { path: "/w/a.ts" }, pol)).resolves.toMatch(/^error:/);
   });
 });
+
+describe("background shell jobs", () => {
+  it("gates start and kill, polls free", async () => {
+    const seen: string[] = [];
+    setInvokeImpl(async (cmd) => {
+      seen.push(cmd);
+      if (cmd === "shell_bg") return "job_abc";
+      if (cmd === "shell_poll") return { status: "done", code: 0, stdout_tail: "ok", stderr_tail: "", elapsed_ms: 5 };
+      if (cmd === "shell_kill") return "killed job_abc";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const APPROVE = { requestApproval: async () => true };
+    expect(await runTool("shell_bg", { cwd: "/w", cmd: "sleep 60" }, APPROVE)).toMatch(/job_abc/);
+    let approvals = 0;
+    const poll = await runTool("shell_poll", { job_id: "job_abc" }, {
+      requestApproval: async () => { approvals++; return true; },
+    });
+    expect(poll).toContain("done");
+    expect(approvals).toBe(0);
+    expect(await runTool("shell_kill", { job_id: "job_abc" }, APPROVE)).toMatch(/killed/);
+    expect(seen).toEqual(["shell_bg", "shell_poll", "shell_kill"]);
+  });
+  it("rejected start never spawns, empty args error", async () => {
+    const out = await runTool("shell_bg", { cwd: "/w", cmd: "rm -rf ~" }, REJECT);
+    expect(out).toMatch(/^user rejected/);
+    expect(calls).toEqual([]);
+    await expect(runTool("shell_bg", { cmd: "" }, { requestApproval: async () => true })).resolves.toMatch(/^error:/);
+    await expect(runTool("shell_poll", {}, { requestApproval: async () => true })).resolves.toMatch(/^error:/);
+  });
+  it("plan mode blocks start/kill but allows poll", async () => {
+    setInvokeImpl(async () => ({ status: "running", code: null, stdout_tail: "", stderr_tail: "", elapsed_ms: 1 }));
+    const PLAN = { requestApproval: async () => true, planMode: true };
+    await expect(runTool("shell_bg", { cmd: "make" }, PLAN)).resolves.toMatch(/^error: plan mode/);
+    await expect(runTool("shell_kill", { job_id: "job_x" }, PLAN)).resolves.toMatch(/^error: plan mode/);
+    expect(calls).toEqual([]);
+    const out = await runTool("shell_poll", { job_id: "job_x" }, PLAN);
+    expect(out).toContain("running");
+  });
+});

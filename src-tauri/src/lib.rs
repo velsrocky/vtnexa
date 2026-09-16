@@ -13,6 +13,7 @@ pub(crate) mod lsp;
 pub(crate) mod lsp_ops;
 pub(crate) mod mcp;
 pub(crate) mod mcp_oauth;
+pub(crate) mod shell_jobs;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -2035,6 +2036,7 @@ pub fn run() {
         .manage(PtyStore::default())
         .manage(WorkspaceRoots::default())
         .manage(browser::BrowserState::default())
+        .manage(shell_jobs::ShellJobs::default())
         // Stop the browser sidecar only when the LAST window closes - other
         // windows would lose a running browser otherwise. kill_on_drop (set
         // at spawn) is the backstop for abnormal exits; this is the clean path.
@@ -2079,6 +2081,10 @@ pub fn run() {
                             }
                         }
                     }
+                    // Background shell jobs die with the app too: no orphans.
+                    if let Some(jobs) = window.try_state::<shell_jobs::ShellJobs>() {
+                        shell_jobs::kill_all_jobs(&jobs);
+                    }
                 }
             }
         })
@@ -2114,6 +2120,9 @@ pub fn run() {
             git_log,
             git_init,
             shell_run,
+            shell_jobs::shell_bg,
+            shell_jobs::shell_poll,
+            shell_jobs::shell_kill,
             pty_spawn,
             pty_write,
             pty_resize,

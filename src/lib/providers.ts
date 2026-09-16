@@ -17,6 +17,9 @@ import {
   nexaRead,
   nexaWrite,
   shellRun,
+  shellBg,
+  shellPoll,
+  shellKill,
   lspDiagnostics,
   lspOp,
   type NexaKind,
@@ -69,6 +72,7 @@ export const READONLY_TOOLS: ReadonlySet<string> = new Set([
   "browser_snapshot",
   "browser_screenshot",
   "browser_scroll",
+  "shell_poll",
   "lsp_diagnostics",
   "lsp",
 ]);
@@ -304,11 +308,49 @@ export const TOOL_DEFS: ToolDef[] = [
     function: {
       name: "shell_run",
       description:
-        "Run a shell command via sh -c (REQUIRES user approval - explain what and why first; cwd must be an absolute dir inside the workspace). Prefer read-only commands; never chain destructive ones.",
+        "Run a shell command via sh -c and wait (30s timeout, REQUIRES user approval - explain what and why first; cwd must be an absolute dir inside the workspace). For anything that may take longer (installs, builds, test suites, servers): use shell_bg instead, then shell_poll until done. Prefer read-only commands; never chain destructive ones.",
       parameters: {
         type: "object",
         properties: { cwd: { type: "string" }, cmd: { type: "string" } },
         required: ["cmd"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "shell_bg",
+      description:
+        "Start a shell command in the background via sh -c (REQUIRES user approval - explain what and why first; cwd must be an absolute dir inside the workspace). Returns a job_id immediately. Poll it with shell_poll until status is done; kill with shell_kill. Use for installs, builds, test suites - anything past ~25s. Same destructive-pattern screening as shell_run.",
+      parameters: {
+        type: "object",
+        properties: { cwd: { type: "string" }, cmd: { type: "string" } },
+        required: ["cmd"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "shell_poll",
+      description:
+        "Check a background job from shell_bg (read-only, auto-approved). Returns status running|done with output tails; when done, full output (truncated). A done job is collected once - polling again errors, so save what you need. Keep polling running jobs instead of starting duplicates.",
+      parameters: {
+        type: "object",
+        properties: { job_id: { type: "string" } },
+        required: ["job_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "shell_kill",
+      description: "Stop a background job from shell_bg (REQUIRES user approval). Use when a job is stuck, wrong, or superseded - not to silence output you haven't read.",
+      parameters: {
+        type: "object",
+        properties: { job_id: { type: "string" } },
+        required: ["job_id"],
       },
     },
   },
@@ -738,6 +780,8 @@ function stashImage(b64: string): string {
 // directly. Shared with chatWithTools so audit events record the decision.
 const GATED_TOOLS = new Set([
   "shell_run",
+  "shell_bg",
+  "shell_kill",
   "browser_navigate",
   "browser_click",
   "browser_type",
@@ -875,6 +919,24 @@ export async function runTool(
         if (cmd.length > 20000) return "error: cmd too long";
         return JSON.stringify(await shellRun(args.cwd ?? ".", cmd));
       }
+      case "shell_bg": {
+        const cmd = String(args.cmd ?? "");
+        if (!cmd) return "error: shell_bg cmd is required";
+        if (cmd.length > 20000) return "error: cmd too long";
+        const id = await shellBg(args.cwd ?? ".", cmd);
+        return `started background job ${id} - poll with shell_poll until status is done; do not start duplicates`;
+      }
+      case "shell_poll": {
+        const id = String(args.job_id ?? "");
+        if (!id) return "error: shell_poll job_id is required - use the id shell_bg returned";
+        const r = await shellPoll(id);
+        return JSON.stringify(r).slice(0, 12000);
+      }
+      case "shell_kill": {
+        const id = String(args.job_id ?? "");
+        if (!id) return "error: shell_kill job_id is required";
+        return await shellKill(id);
+      }
       case "git_status":
         return JSON.stringify(await gitStatus(String(args.cwd ?? ".")));
       case "git_diff": {
@@ -971,7 +1033,10 @@ export async function chatWithTools(
   // Multi-backend agent loop (OpenAI-compatible, Anthropic, Gemini) with tool
   // calling. Models without tool support (e.g. some Ollama vision models) get
   // a plain-chat retry instead of a hard failure.
-  const MAX_ROUNDS = 8;
+  // Budget: 10 tool rounds per turn. Long shell work goes to background jobs
+  // (shell_bg + shell_poll) so one install doesn't eat the turn; the UI
+  // offers Continue for whatever still doesn't fit.
+  const MAX_ROUNDS = 10;
   // Dynamic MCP tools ride along for this turn only. Capped: every extra tool
   // costs context on every round (OpenCode's main MCP caveat). Plan mode
   // withholds everything non-read-only (plus all MCP extras) up front;

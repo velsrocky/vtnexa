@@ -3,7 +3,7 @@ import type { SkillInfo, SideTab, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
 import { useInputHistory } from "../hooks/useInputHistory";
 
-export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, pendingToolsCount, ratings, onRateMessage }: {
+export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, showContinue, onContinue, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, pendingToolsCount, ratings, onRateMessage }: {
   ws: Workspace;
   busy: boolean;
   sideTab: SideTab;
@@ -21,6 +21,8 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
   stopTurn: (id: string) => void;
   planMode: boolean;
   onTogglePlan: () => void;
+  showContinue: boolean;
+  onContinue: () => void;
   padText: string;
   setPadText: (v: string) => void;
   planText: string;
@@ -146,6 +148,14 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
             <button onClick={sendChat} disabled={busy}>
               Send
             </button>
+            {showContinue && !busy && (
+              <button
+                onClick={onContinue}
+                title="The last turn ran out of tool budget. Continue it with fresh rounds over the full history (nothing is repeated or lost)."
+              >
+                ▶ Continue
+              </button>
+            )}
             {busy && (
               <button
                 onClick={() => stopTurn(ws.id)}
