@@ -61,8 +61,8 @@ Most coding agents either (a) ask for permission on every keystroke or
   `<workspace>/.vtnexa/vtnexa.json`, see `.vtnexa/vtnexa.json.example`).
   Toggle + per-server status in the ⛁ panel; tools appear as
   `mcp_<server>_<tool>`, always require approval. Remote auth is static
-  headers with `{env:...}` substitution (never commit tokens); OAuth login
-  is not supported yet.
+  headers with `{env:...}` substitution (never commit tokens), or OAuth browser
+  sign-in from the ⛁ panel (tokens in the OS keychain, silent refresh).
 
 ## The 👍 / 👎 buttons (what they do)
 

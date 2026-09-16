@@ -59,6 +59,25 @@ export async function setMcpServerEnabled(server: string, enabled: boolean): Pro
   await invoke("mcp_set_server_enabled", { server, enabled });
 }
 
+export interface McpAuthStatus {
+  signed_in: boolean;
+  expires_in: number | null;
+  has_refresh: boolean;
+}
+
+export async function mcpOAuthStatus(server: string): Promise<McpAuthStatus> {
+  return invoke<McpAuthStatus>("mcp_oauth_status", { server });
+}
+
+/** Opens the system browser and waits (up to 5 min) for the redirect. */
+export async function mcpOAuthLogin(server: string): Promise<string> {
+  return invoke<string>("mcp_oauth_login", { server });
+}
+
+export async function mcpOAuthLogout(server: string): Promise<void> {
+  await invoke("mcp_oauth_logout", { server });
+}
+
 export async function mcpCallTool(server: string, tool: string, args: Record<string, unknown>): Promise<string> {
   return invoke<string>("mcp_call_tool", { server, tool, args: args ?? {} });
 }

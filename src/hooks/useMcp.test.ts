@@ -76,4 +76,31 @@ describe("useMcp", () => {
     });
     expect(calls).toContain("mcp_set_server_enabled");
   });
+
+  it("loads OAuth status for remote servers, signs in and out", async () => {
+    localStorage.setItem("vtai.mcpEnabled", "1");
+    const calls: { cmd: string; args?: any }[] = [];
+    const { result } = setup(async (cmd: string, args?: any) => {
+      calls.push({ cmd, args });
+      if (cmd === "mcp_list_servers") return [{ name: "r", kind: "remote", enabled: true }];
+      if (cmd === "mcp_list_tools") return [];
+      if (cmd === "mcp_oauth_status") return { signed_in: false, expires_in: null, has_refresh: false };
+      if (cmd === "mcp_oauth_login") return "signed in to 'r'";
+      if (cmd === "mcp_oauth_logout") return {};
+      throw new Error(`unexpected ${cmd}`);
+    });
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.servers[0].auth).toEqual({ signed_in: false, expires_in: null, has_refresh: false });
+    await act(async () => {
+      await result.current.signIn("r");
+    });
+    expect(calls.some((c) => c.cmd === "mcp_oauth_login")).toBe(true);
+    expect(result.current.signingIn).toBeNull();
+    await act(async () => {
+      await result.current.signOut("r");
+    });
+    expect(calls.some((c) => c.cmd === "mcp_oauth_logout")).toBe(true);
+  });
 });

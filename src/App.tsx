@@ -306,9 +306,12 @@ export default function App() {
     toolCount: mcpTools,
     errorCount: mcpErrors,
     loading: mcpLoading,
+    signingIn: mcpSigningIn,
     note: mcpNote,
     refresh: refreshMcp,
     setServerOn: setMcpServerOn,
+    signIn: signInMcp,
+    signOut: signOutMcp,
     showMcp,
     setShowMcp,
   } = useMcp({ workspaceRoot });
@@ -423,8 +426,11 @@ export default function App() {
           toolCount={mcpTools}
           errorCount={mcpErrors}
           loading={mcpLoading}
+          signingIn={mcpSigningIn}
           note={mcpNote}
           onToggleServer={(name, on) => void setMcpServerOn(name, on)}
+          onSignIn={(name) => void signInMcp(name)}
+          onSignOut={(name) => void signOutMcp(name)}
           onRefresh={() => void refreshMcp()}
           onClose={() => setShowMcp(false)}
         />

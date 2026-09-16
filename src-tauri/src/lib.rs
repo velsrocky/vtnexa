@@ -11,6 +11,7 @@ use tauri::{Emitter, Manager};
 mod browser;
 pub(crate) mod lsp;
 pub(crate) mod mcp;
+pub(crate) mod mcp_oauth;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -2131,6 +2132,9 @@ pub fn run() {
             mcp::mcp_call_tool,
             mcp::mcp_config_get,
             mcp::mcp_set_server_enabled,
+            mcp_oauth::mcp_oauth_status,
+            mcp_oauth::mcp_oauth_login,
+            mcp_oauth::mcp_oauth_logout,
             lsp::lsp_diagnostics
         ])
         .run(tauri::generate_context!())

@@ -3,8 +3,12 @@ import {
   isMcpEnabled,
   mcpListServers,
   mcpListToolsRaw,
+  mcpOAuthLogin,
+  mcpOAuthLogout,
+  mcpOAuthStatus,
   setMcpEnabled,
   setMcpServerEnabled,
+  type McpAuthStatus,
 } from "../lib/mcp";
 
 export interface McpServerRow {
@@ -13,6 +17,8 @@ export interface McpServerRow {
   enabled: boolean;
   tools: number;
   error?: string;
+  /** Remote servers only: OAuth state (undefined while loading/failed). */
+  auth?: McpAuthStatus;
 }
 
 // Status panel state for MCP (OpenCode-pattern port). The LLM turn itself
@@ -21,6 +27,7 @@ export function useMcp({ workspaceRoot }: { workspaceRoot: string }) {
   const [mcpOn, setMcpOn] = useState<boolean>(() => isMcpEnabled());
   const [servers, setServers] = useState<McpServerRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [signingIn, setSigningIn] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [showMcp, setShowMcp] = useState(false);
 
@@ -56,6 +63,18 @@ export function useMcp({ workspaceRoot }: { workspaceRoot: string }) {
           setNote(`tools failed: ${e}`);
         }
       }
+      // OAuth state for remote servers (best-effort, never fails refresh).
+      await Promise.all(
+        rows
+          .filter((r) => r.kind === "remote")
+          .map(async (r) => {
+            try {
+              r.auth = await mcpOAuthStatus(r.name);
+            } catch {
+              r.auth = undefined;
+            }
+          }),
+      );
       setServers(rows);
     } catch (e) {
       setNote(`servers failed: ${e}`);
@@ -87,6 +106,30 @@ export function useMcp({ workspaceRoot }: { workspaceRoot: string }) {
     await refresh();
   }
 
+  async function signIn(name: string) {
+    setSigningIn(name);
+    setNote("");
+    try {
+      const msg = await mcpOAuthLogin(name);
+      setNote(msg);
+    } catch (e) {
+      setNote(`sign-in failed: ${e}`);
+    } finally {
+      setSigningIn(null);
+      await refresh();
+    }
+  }
+
+  async function signOut(name: string) {
+    setNote("");
+    try {
+      await mcpOAuthLogout(name);
+    } catch (e) {
+      setNote(`sign-out failed: ${e}`);
+    }
+    await refresh();
+  }
+
   return {
     mcpOn,
     setMcpOn: setOn,
@@ -94,9 +137,12 @@ export function useMcp({ workspaceRoot }: { workspaceRoot: string }) {
     toolCount: servers.reduce((n, s) => n + s.tools, 0),
     errorCount: servers.filter((s) => s.error).length,
     loading,
+    signingIn,
     note,
     refresh,
     setServerOn,
+    signIn,
+    signOut,
     showMcp,
     setShowMcp,
   };

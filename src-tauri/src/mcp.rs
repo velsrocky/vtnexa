@@ -508,18 +508,6 @@ pub(crate) fn subst_env_placeholders(value: &str) -> String {
     out
 }
 
-/// Fail-fast OAuth gate: static headers only until the browser code flow lands.
-fn check_oauth_unsupported(name: &str, cfg: &McpServerConfig) -> Result<(), String> {
-    match &cfg.oauth {
-        None => Ok(()),
-        Some(v) if v == &serde_json::Value::Bool(false) => Ok(()),
-        _ => Err(format!(
-            "mcp: server '{}' sets oauth, which is not supported yet — use header auth ({{env:...}}) or disable the server",
-            name
-        )),
-    }
-}
-
 /// `data:` payloads of an SSE body, in order.
 pub(crate) fn extract_sse_data(body: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -543,8 +531,14 @@ struct RemoteSession {
     host_display: String,
 }
 
-fn remote_session(name: &str, cfg: &McpServerConfig) -> Result<RemoteSession, String> {
-    check_oauth_unsupported(name, cfg)?;
+/// Marker prefix for 401s: callers refresh once and retry before surfacing.
+pub(crate) const AUTH_RETRY_MARKER: &str = "mcp-auth-required";
+
+async fn remote_session(
+    name: &str,
+    cfg: &McpServerConfig,
+    force_refresh: bool,
+) -> Result<RemoteSession, String> {
     let url = validate_remote_url(cfg.url.as_deref().unwrap_or(""))?;
     let host_display = url_host_display(&url);
     let mut headers = Vec::new();
@@ -557,6 +551,14 @@ fn remote_session(name: &str, cfg: &McpServerConfig) -> Result<RemoteSession, St
             return Err(format!("mcp: server '{}' header value too long", name));
         }
         headers.push((k, value));
+    }
+    // OAuth bearer when credentials exist. Unsigned servers still proceed —
+    // static headers may be all they need; a 401 then guides to sign-in.
+    match crate::mcp_oauth::bearer_for(name, cfg, force_refresh).await? {
+        crate::mcp_oauth::Bearer::Token(token) => {
+            headers.push(("Authorization".to_string(), format!("Bearer {}", token)));
+        }
+        crate::mcp_oauth::Bearer::Disabled | crate::mcp_oauth::Bearer::Unsigned => {}
     }
     let timeout = Duration::from_millis(clamp_timeout(cfg.timeout));
     let client = reqwest::Client::builder()
@@ -602,9 +604,11 @@ impl RemoteSession {
             }
         })?;
         if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+            // Marker, not prose: callers refresh once and retry before the
+            // user ever sees it. Never include bodies (may echo tokens).
             return Err(format!(
-                "mcp: {} requires authentication (HTTP 401) — OAuth login is not supported yet; use header auth ({{env:...}}) or disable the server",
-                self.host_display
+                "{}: {} rejected the token",
+                AUTH_RETRY_MARKER, self.host_display
             ));
         }
         if let Some(sid) = res.headers().get("mcp-session-id") {
@@ -684,8 +688,48 @@ impl RemoteSession {
     }
 }
 
+/// Map a 401 marker: header-only servers get credential guidance, OAuth
+/// servers get one silent refresh + retry, then sign-in guidance.
+async fn retry_remote<T, F, Fut>(name: &str, cfg: &McpServerConfig, once: F) -> Result<T, String>
+where
+    F: Fn(bool) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    match once(false).await {
+        Err(e) if e.starts_with(AUTH_RETRY_MARKER) => {
+            if crate::mcp_oauth::oauth_mode(cfg) == crate::mcp_oauth::OAuthMode::Disabled {
+                let host = e
+                    .strip_prefix(AUTH_RETRY_MARKER)
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches(':')
+                    .trim();
+                return Err(format!(
+                    "mcp: {} rejected the credentials (HTTP 401) — check header values / {{env:}} vars",
+                    host
+                ));
+            }
+            once(true).await.map_err(|_| {
+                format!(
+                    "mcp: '{}' rejected the session — sign in again from the ⛁ panel",
+                    name
+                )
+            })
+        }
+        other => other,
+    }
+}
+
 async fn remote_list_tools(name: &str, cfg: &McpServerConfig) -> Result<Vec<McpToolInfo>, String> {
-    let mut sess = remote_session(name, cfg)?;
+    retry_remote(name, cfg, |force| remote_list_tools_once(name, cfg, force)).await
+}
+
+async fn remote_list_tools_once(
+    name: &str,
+    cfg: &McpServerConfig,
+    force_refresh: bool,
+) -> Result<Vec<McpToolInfo>, String> {
+    let mut sess = remote_session(name, cfg, force_refresh).await?;
     sess.initialize().await?;
     let resp = sess
         .post_rpc(
@@ -713,7 +757,23 @@ async fn remote_call_tool(
     if arg_str.len() > MCP_MAX_ARGS_BYTES {
         return Err("mcp: args too large (64KB max)".to_string());
     }
-    let mut sess = remote_session(server, cfg)?;
+    match retry_remote(server, cfg, |force| {
+        remote_call_tool_once(server, cfg, tool, args.clone(), force)
+    })
+    .await
+    {
+        other => other,
+    }
+}
+
+async fn remote_call_tool_once(
+    server: &str,
+    cfg: &McpServerConfig,
+    tool: &str,
+    args: serde_json::Value,
+    force_refresh: bool,
+) -> Result<String, String> {
+    let mut sess = remote_session(server, cfg, force_refresh).await?;
     sess.initialize().await?;
     let resp = sess
         .post_rpc(
@@ -1156,33 +1216,27 @@ mod tests {
     }
 
     #[test]
-    fn remote_servers_reject_oauth_and_validate_url_without_network() {
-        // oauth object -> clear error before any I/O.
-        let cfg = McpServerConfig {
-            r#type: "remote".to_string(),
-            url: Some("https://example.com/mcp".to_string()),
-            oauth: Some(serde_json::json!({"clientId": "x"})),
-            ..Default::default()
-        };
-        let err = tauri::async_runtime::block_on(list_tools_for_server(
-            "r",
-            &cfg,
-            std::path::Path::new("/tmp"),
-        ))
-        .unwrap_err();
-        assert!(err.contains("oauth"), "got: {}", err);
-        // Missing url -> validation error, no network touched.
-        let cfg = McpServerConfig {
-            r#type: "remote".to_string(),
-            ..Default::default()
-        };
-        let err = tauri::async_runtime::block_on(list_tools_for_server(
-            "r",
-            &cfg,
-            std::path::Path::new("/tmp"),
-        ))
-        .unwrap_err();
-        assert!(err.contains("no url"), "got: {}", err);
+    fn remote_config_fails_fast_without_network() {
+        // OAuth objects are supported now: without a url, validation (not
+        // discovery) fails — no network touched either way.
+        for oauth in [
+            None,
+            Some(serde_json::json!(false)),
+            Some(serde_json::json!({"clientId": "x"})),
+        ] {
+            let mut cfg = McpServerConfig {
+                r#type: "remote".to_string(),
+                ..Default::default()
+            };
+            cfg.oauth = oauth;
+            let err = tauri::async_runtime::block_on(list_tools_for_server(
+                "r",
+                &cfg,
+                std::path::Path::new("/tmp"),
+            ))
+            .unwrap_err();
+            assert!(err.contains("no url"), "got: {}", err);
+        }
     }
 
     #[test]

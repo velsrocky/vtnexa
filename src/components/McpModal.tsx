@@ -1,14 +1,24 @@
 import type { McpServerRow } from "../hooks/useMcp";
 
-export default function McpModal({ mcpOn, setMcpOn, servers, toolCount, errorCount, loading, note, onToggleServer, onRefresh, onClose }: {
+function fmtExpiry(secs: number): string {
+  if (secs < 90) return "expires in <2m";
+  const m = Math.round(secs / 60);
+  if (m < 90) return `expires in ${m}m`;
+  return `expires in ${Math.round(m / 60)}h`;
+}
+
+export default function McpModal({ mcpOn, setMcpOn, servers, toolCount, errorCount, loading, signingIn, note, onToggleServer, onSignIn, onSignOut, onRefresh, onClose }: {
   mcpOn: boolean;
   setMcpOn: (on: boolean) => void;
   servers: McpServerRow[];
   toolCount: number;
   errorCount: number;
   loading: boolean;
+  signingIn: string | null;
   note: string;
   onToggleServer: (name: string, on: boolean) => void;
+  onSignIn: (name: string) => void;
+  onSignOut: (name: string) => void;
   onRefresh: () => void;
   onClose: () => void;
 }) {
@@ -88,6 +98,26 @@ export default function McpModal({ mcpOn, setMcpOn, servers, toolCount, errorCou
                 <span className="muted small">
                   {s.enabled ? `${s.tools} tool${s.tools === 1 ? "" : "s"}` : "disabled"}
                 </span>
+                {s.kind === "remote" && s.enabled && (
+                  s.auth?.signed_in ? (
+                    <>
+                      <span className="muted small" title={s.auth.has_refresh ? "Refresh token stored - renews silently" : "No refresh token - you will sign in again on expiry"}>
+                        ✓ signed in{s.auth.expires_in != null ? ` · ${fmtExpiry(s.auth.expires_in)}` : ""}
+                      </span>
+                      <button onClick={() => onSignOut(s.name)} title="Delete stored OAuth tokens from the OS keychain">
+                        Sign out
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => onSignIn(s.name)}
+                      disabled={signingIn !== null}
+                      title="OAuth sign-in: opens the system browser, tokens go to the OS keychain"
+                    >
+                      {signingIn === s.name ? "Waiting for browser…" : "Sign in"}
+                    </button>
+                  )
+                )}
               </div>
               {s.error && <pre className="small">{s.error.slice(0, 300)}</pre>}
             </div>

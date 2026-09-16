@@ -8,7 +8,12 @@
   // Secrets: NEVER paste tokens here (this file is git-committed). Use
   // {env:NAME} in header values - the backend substitutes from its own
   // environment and never echoes values back in errors or logs.
-  // OAuth ("oauth": {...}) is rejected until the login flow lands.
+  //
+  // OAuth (browser sign-in, tokens in the OS keychain):
+  // - omit "oauth" entirely: auto-discover + register (RFC 7591) on sign-in.
+  // - "oauth": false: disable login, header-only auth.
+  // - "oauth": {"clientId": "...", "clientSecret": "...", "scope": "..."}:
+  //   skip registration with a pre-registered client.
   "mcp": {
     "everything": {
       "type": "local",
