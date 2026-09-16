@@ -1,0 +1,34 @@
+{
+  "$schema": "https://github.com/velsrocky/vtnexa/schemas/vtnexa.json",
+  // MCP servers (OpenCode-pattern port: local stdio + remote HTTP).
+  // Global defaults live in ~/.config/vtnexa/vtnexa.json; this workspace file
+  // wins per server name. MCP is OFF in the UI until opted in (flag
+  // `vtai.mcpEnabled`), and every mcp_* call requires approval.
+  //
+  // Secrets: NEVER paste tokens here (this file is git-committed). Use
+  // {env:NAME} in header values - the backend substitutes from its own
+  // environment and never echoes values back in errors or logs.
+  //
+  // OAuth (browser sign-in, tokens in the OS keychain):
+  // - omit "oauth" entirely: auto-discover + register (RFC 7591) on sign-in.
+  // - "oauth": false: disable login, header-only auth.
+  // - "oauth": {"clientId": "...", "clientSecret": "...", "scope": "..."}:
+  //   skip registration with a pre-registered client.
+  "mcp": {
+    "everything": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
+      "enabled": true,
+      "timeout": 5000
+    },
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+      },
+      "enabled": false,
+      "timeout": 5000
+    }
+  }
+}

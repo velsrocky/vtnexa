@@ -35,6 +35,8 @@ function setup(over: Partial<Workspace> = {}) {
     files: 0,
     git: 0,
     skills: 0,
+    retargeted: [] as [string, string][],
+    closed: [] as string[],
   };
   const hook = renderHook(() =>
     useDiffGate({
@@ -63,6 +65,8 @@ function setup(over: Partial<Workspace> = {}) {
       commitMsg: "",
       setCommitMsg: (v) => calls.commitMsg.push(v),
       logAudit: (e) => calls.audits.push(e),
+      retargetTabs: (o, n) => calls.retargeted.push([o, n]),
+      closeTab: (p) => calls.closed.push(p),
     }),
   );
   return { ...hook, calls, wsOf: () => ws };
@@ -184,5 +188,140 @@ describe("useDiffGate.approveAndCommit", () => {
     expect(h.wsOf().shellOut).toMatch(/deadbee/);
     expect(h.calls.audits[0]).toMatchObject({ tool: "git_commit", decision: "approved", ok: true });
     expect(h.calls.commitMsg).toEqual([""]);
+  });
+});
+
+describe("useDiffGate undo/redo", () => {
+  function diskStub() {
+    let disk = "old";
+    const writes: any[] = [];
+    const deleted: string[] = [];
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "fs_read") return disk;
+      if (cmd === "fs_write") {
+        writes.push(args);
+        disk = args.content;
+        return {};
+      }
+      if (cmd === "fs_delete") {
+        deleted.push(args.path);
+        return {};
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    return {
+      writes,
+      deleted,
+      disk: () => disk,
+    };
+  }
+
+  it("approve -> undo restores disk + buffers -> redo reapplies", async () => {
+    const d = diskStub();
+    const h = setup(staged);
+    expect(h.result.current.canUndo).toBe(false);
+    await act(async () => {
+      await h.result.current.approveDiff();
+    });
+    expect(d.disk()).toBe("new");
+    expect(h.result.current.canUndo).toBe(true);
+    expect(h.result.current.undoLabel).toBe("write a.txt");
+
+    await act(async () => {
+      await h.result.current.undo();
+    });
+    expect(d.disk()).toBe("old");
+    expect(h.wsOf().shellOut).toMatch(/↩ undid write a\.txt/);
+    expect(h.calls.originals[h.calls.originals.length - 1]({})).toEqual({ "/w/a.txt": "old" });
+    expect(h.calls.etext[h.calls.etext.length - 1]).toBe("old");
+    expect(h.result.current.canRedo).toBe(true);
+
+    await act(async () => {
+      await h.result.current.redo();
+    });
+    expect(d.disk()).toBe("new");
+    expect(h.wsOf().shellOut).toMatch(/↪ redid write a\.txt/);
+    expect(h.result.current.canUndo).toBe(true);
+    expect(h.calls.audits).toMatchObject([{ tool: "undo" }, { tool: "redo" }]);
+  });
+
+  it("says so when the stacks are empty", async () => {
+    setInvokeImpl(async () => {
+      throw new Error("must not touch backend");
+    });
+    const h = setup();
+    await act(async () => {
+      await h.result.current.undo();
+    });
+    expect(h.wsOf().shellOut).toMatch(/nothing to undo/);
+    await act(async () => {
+      await h.result.current.redo();
+    });
+    expect(h.wsOf().shellOut).toMatch(/nothing to redo/);
+  });
+
+  it("a new capture clears redo", async () => {
+    const d = diskStub();
+    const h = setup(staged);
+    await act(async () => {
+      await h.result.current.approveDiff();
+    });
+    await act(async () => {
+      await h.result.current.undo();
+    });
+    expect(h.result.current.canRedo).toBe(true);
+    // Second approval stages a fresh write (disk now "old" again).
+    await act(async () => {
+      h.result.current.pushUndo({ kind: "write", path: "/w/a.txt", before: "old", after: "v2", existedBefore: true });
+    });
+    expect(h.result.current.canRedo).toBe(false);
+    expect(d.disk()).toBe("old");
+  });
+
+  it("undoing a new-file write deletes it and closes the tab", async () => {
+    let gone = true;
+    const deleted: string[] = [];
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "fs_read") {
+        if (gone) throw new Error("No such file or directory");
+        return "v1";
+      }
+      if (cmd === "fs_write") {
+        gone = false;
+        return {};
+      }
+      if (cmd === "fs_delete") {
+        deleted.push(args.path);
+        gone = true;
+        return {};
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup({
+      tabs: ["/w/n.txt"],
+      buffers: { "/w/n.txt": "v1" },
+      originals: { "/w/n.txt": "" },
+      openPath: "/w/n.txt",
+      pendingDiff: { path: "/w/n.txt", content: "v1", original: "" },
+    });
+    await act(async () => {
+      await h.result.current.approveDiff();
+    });
+    expect(h.result.current.undoLabel).toBe("create n.txt");
+    await act(async () => {
+      await h.result.current.undo();
+    });
+    expect(deleted).toEqual(["/w/n.txt"]);
+    expect(h.calls.closed).toEqual(["/w/n.txt"]);
+    expect(h.calls.etext[h.calls.etext.length - 1]).toBe("");
+  });
+
+  it("skips oversized snapshots with a note", async () => {
+    const h = setup();
+    await act(async () => {
+      h.result.current.pushUndo({ kind: "write", path: "/w/big", before: "x".repeat(300 * 1024), after: "y", existedBefore: true });
+    });
+    expect(h.result.current.canUndo).toBe(false);
+    expect(h.wsOf().shellOut).toMatch(/too large to snapshot/);
   });
 });

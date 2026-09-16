@@ -33,8 +33,16 @@ Most coding agents either (a) ask for permission on every keystroke or
 ## Features
 
 - **Commander** — tool-calling agent: list/read/search files, propose diffs,
-  run shell commands, drive a real Chromium browser (navigate, click, type,
-  screenshot with vision), and commit to git — all behind the review gate.
+  run shell commands, typecheck edited files (`lsp_diagnostics`: tsc, cargo
+  check, py_compile) and query language servers (`lsp`: hover, definition,
+  references, symbols — read-only, auto-approved), drive a real Chromium
+  browser (navigate, click, type, screenshot with vision), and commit to
+  git — all behind the review gate. **Plan mode** (◔ toggle or per-turn)
+  restricts it to read-only tools for investigation-first flows; routines
+  always run Build.
+- **Undo** — approved writes, renames and file deletes are captured
+  (↩/↪ buttons, `/undo` `/redo` in chat). Shell/terminal, directory deletes
+  and files over 256KB are out of scope; the stack resets on reload.
 - **Editor** — Monaco with tabs, live markdown/HTML preview, and a Diff view
   that is also the approval surface.
 - **Terminal** — a genuine interactive PTY per window (xterm.js): run dev
@@ -49,6 +57,13 @@ Most coding agents either (a) ask for permission on every keystroke or
 - **Routines** — scheduled agent runs with a 15-minute minimum interval.
 - **Browser Use** — persistent Chromium profile (signed in as you) the agent
   can operate with your approval; screenshots come back as vision input.
+- **MCP (early, opt-in)** — local-stdio and remote-HTTP MCP servers from
+  `vtnexa.json` (`~/.config/vtnexa/vtnexa.json` +
+  `<workspace>/.vtnexa/vtnexa.json`, see `.vtnexa/vtnexa.json.example`).
+  Toggle + per-server status in the ⛁ panel; tools appear as
+  `mcp_<server>_<tool>`, always require approval. Remote auth is static
+  headers with `{env:...}` substitution (never commit tokens), or OAuth browser
+  sign-in from the ⛁ panel (tokens in the OS keychain, silent refresh).
 
 ## The 👍 / 👎 buttons (what they do)
 

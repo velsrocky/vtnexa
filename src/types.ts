@@ -64,6 +64,8 @@ export interface Workspace {
   sideTab: SideTab;
   chatDraft: string;
   previewUrl: string;
+  /** Commander mode: true = plan (read-only turns), false = build. */
+  planMode: boolean;
 }
 
 /** Center-column tab. */
@@ -105,3 +107,21 @@ export const DEFAULT_PROVIDER: ProviderConfig = {
   model: "qwen2.5-coder:7b",
   kind: "auto",
 };
+
+/** One reversible file op. Files only — directory deletes are not captured. */
+export type UndoEntry =
+  | { kind: "write"; path: string; before: string; after: string; existedBefore: boolean }
+  | { kind: "rename"; oldPath: string; newPath: string }
+  | { kind: "delete"; path: string; content: string };
+
+export function undoEntryLabel(e: UndoEntry): string {
+  const short = (p: string) => p.split("/").pop() ?? p;
+  switch (e.kind) {
+    case "write":
+      return e.existedBefore ? `write ${short(e.path)}` : `create ${short(e.path)}`;
+    case "rename":
+      return `rename ${short(e.oldPath)} → ${short(e.newPath)}`;
+    case "delete":
+      return `delete ${short(e.path)}`;
+  }
+}

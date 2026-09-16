@@ -1,4 +1,4 @@
-import type { ProviderConfig, ProviderKind } from "../types";
+import type { ProviderConfig, ProviderKind, UndoEntry } from "../types";
 import {
   fsCreate,
   fsDelete,
@@ -17,6 +17,8 @@ import {
   nexaRead,
   nexaWrite,
   shellRun,
+  lspDiagnostics,
+  lspOp,
   type NexaKind,
 } from "./tauri";
 import {
@@ -29,6 +31,7 @@ import {
   browserStart,
   browserType,
 } from "./browser";
+import { isMcpToolName, mcpCallTool, resolveMcpQualified } from "./mcp";
 
 export interface ToolDef {
   type: "function";
@@ -43,6 +46,42 @@ export interface ToolPolicy {
   requestApproval?: (tool: string, args: Record<string, any>) => Promise<boolean>;
   /** Agent wrote a Nexa note directly: mirror it into the sidebar state. */
   onNexaWrite?: (kind: NexaKind, content: string) => void;
+  /** Plan mode: runTool refuses every non-read-only tool (fail-closed), and
+   *  chatWithTools withholds their defs so the model plans instead of acts. */
+  planMode?: boolean;
+  /** Reversible agent file op just applied (rename/delete) - UI pushes it for /undo. */
+  onUndoCapture?: (e: UndoEntry) => void;
+}
+
+/** Plan-mode allowlist: everything else is withheld from the model and
+ *  refused by runTool. Writes are out entirely - even staged ones. */
+export const READONLY_TOOLS: ReadonlySet<string> = new Set([
+  "fs_list",
+  "fs_read",
+  "fs_search",
+  "fs_glob",
+  "skill_list",
+  "skill_read",
+  "git_status",
+  "git_diff",
+  "git_log",
+  "nexa_read",
+  "browser_snapshot",
+  "browser_screenshot",
+  "browser_scroll",
+  "lsp_diagnostics",
+  "lsp",
+]);
+
+export function isReadOnlyTool(name: string): boolean {
+  return READONLY_TOOLS.has(name);
+}
+
+/** Turn tool list for the mode. Plan drops MCP extras (unknown side effects)
+ *  and every non-read-only built-in. Capped: tools cost context per round. */
+export function toolsForMode(base: ToolDef[], extra: ToolDef[], plan: boolean): ToolDef[] {
+  if (!plan) return [...base, ...extra.slice(0, 50)];
+  return base.filter((t) => READONLY_TOOLS.has(t.function.name));
 }
 
 export const TOOL_DEFS: ToolDef[] = [
@@ -93,6 +132,38 @@ export const TOOL_DEFS: ToolDef[] = [
         type: "object",
         properties: { pattern: { type: "string" }, path: { type: "string" } },
         required: ["pattern"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "lsp_diagnostics",
+      description:
+        "Typecheck/lint one file and return diagnostics filtered to it (tsc for ts/js, cargo check for rs, py_compile for py). Absolute path inside the workspace. Read-only, auto-approved. Use after edits to verify. Project-level checkers can take up to ~2min on first run.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "lsp",
+      description:
+        "Code intelligence via language servers (typescript-language-server, rust-analyzer). Ops: hover, definition, references (need 1-based line, optional character), documentSymbol (symbols in one file), workspaceSymbol (needs symbol query). Absolute path inside the workspace. Read-only, auto-approved. Needs no project setup beyond the server binary; first runs index the project and can take ~1min.",
+      parameters: {
+        type: "object",
+        properties: {
+          op: { type: "string" },
+          path: { type: "string" },
+          line: { type: "number" },
+          character: { type: "number" },
+          symbol: { type: "string" },
+        },
+        required: ["op", "path"],
       },
     },
   },
@@ -343,6 +414,11 @@ interface ToolCall {
 
 const TOOL_NAMES = new Set(TOOL_DEFS.map((t) => t.function.name));
 
+/** Built-in or MCP (`mcp_*`, validated against the live server at call time). */
+function isKnownToolName(name: string): boolean {
+  return TOOL_NAMES.has(name) || isMcpToolName(name);
+}
+
 // Weak models narrate instead of acting ("please approve the fs_write…",
 // "Next action: shell_run…") and the turn dies as prose. Detect the
 // announcement so the loop can nudge the model into emitting the real call.
@@ -393,7 +469,7 @@ export function narratesBareToolCall(text: string): string | null {
     const m = c.match(BARE_CALL_RE);
     if (!m) continue;
     const name = m[1].toLowerCase();
-    if (!TOOL_NAMES.has(name)) continue;
+    if (!isKnownToolName(name)) continue;
     if (!ARGS_LOOK_RE.test(m[2].trim())) continue;
     return name;
   }
@@ -435,7 +511,7 @@ function toTextToolCall(item: unknown): ToolCall | null {
   const o = item as Record<string, unknown>;
   const fn = (o.function && typeof o.function === "object" ? o.function : o) as Record<string, unknown>;
   const name = typeof fn.name === "string" ? fn.name : "";
-  if (!TOOL_NAMES.has(name)) return null;
+  if (!isKnownToolName(name)) return null;
   let args = "{}";
   if (typeof fn.arguments === "string") {
     try {
@@ -671,16 +747,32 @@ const GATED_TOOLS = new Set([
   "fs_delete",
 ]);
 
+/** MCP tools (`mcp_*`) always require approval — OpenCode `mcp_* ask` default. */
+export function isGatedTool(name: string): boolean {
+  return GATED_TOOLS.has(name) || isMcpToolName(name);
+}
+
 export async function runTool(
   name: string,
   args: Record<string, any>,
   policy?: ToolPolicy,
 ): Promise<string> {
-  const needsApproval = GATED_TOOLS;
   try {
-    if (needsApproval.has(name) && policy?.requestApproval) {
+    // Plan-mode backstop (covers prose-recovered calls too): the defs are
+    // already withheld above, so anything arriving here is a violation.
+    // Fail-closed, before any approval popup.
+    if (policy?.planMode && !isReadOnlyTool(name)) {
+      return `error: plan mode is on - ${name} is disabled this turn (read-only tools only; switch to Build to act)`;
+    }
+    if (isGatedTool(name) && policy?.requestApproval) {
       const ok = await policy.requestApproval(name, args);
       if (!ok) return `user rejected ${name} - do not retry without changing the plan`;
+    }
+    if (isMcpToolName(name)) {
+      const parts = resolveMcpQualified(name);
+      if (!parts) return `error: unknown MCP tool ${name} - reload MCP tools first`;
+      const out = await mcpCallTool(parts.server, parts.tool, args ?? {});
+      return out.slice(0, 30000);
     }
     switch (name) {
       case "fs_list": {
@@ -703,11 +795,29 @@ export async function runTool(
         return (await skillRead(String(args.name ?? ""))).slice(0, 30000);
       case "fs_create":
         return await fsCreate(String(args.path ?? ""), !!args.is_dir);
-      case "fs_rename":
-        return await fsRename(String(args.old_path ?? ""), String(args.new_path ?? ""));
-      case "fs_delete":
-        await fsDelete(String(args.path ?? ""), !!args.recursive);
-        return `deleted ${args.path}`;
+      case "fs_rename": {
+        const oldP = String(args.old_path ?? "");
+        const newP = String(args.new_path ?? "");
+        const out = await fsRename(oldP, newP);
+        policy?.onUndoCapture?.({ kind: "rename", oldPath: oldP, newPath: newP });
+        return out;
+      }
+      case "fs_delete": {
+        const p = String(args.path ?? "");
+        const recursive = !!args.recursive;
+        // Capture file content for /undo (dirs are out of scope - noted).
+        let content: string | null = null;
+        if (!recursive) {
+          try {
+            content = await fsRead(p);
+          } catch {
+            content = null;
+          }
+        }
+        await fsDelete(p, recursive);
+        if (content !== null) policy?.onUndoCapture?.({ kind: "delete", path: p, content });
+        return `deleted ${args.path}${recursive ? " (directory - not undoable)" : ""}`;
+      }
       case "fs_search": {
         const res = await fsSearch(
           String(args.query ?? ""),
@@ -724,6 +834,29 @@ export async function runTool(
           args.path ? String(args.path) : undefined,
         );
         return JSON.stringify(res).slice(0, 30000);
+      }
+      case "lsp_diagnostics": {
+        const p = String(args.path ?? "");
+        if (!p) return "error: lsp_diagnostics path is required - e.g. {path: \"/ws/src/App.tsx\"}";
+        if (!p.startsWith("/"))
+          return `error: lsp_diagnostics path must be absolute inside the workspace (got ${JSON.stringify(p)}). Use fs_list/fs_glob to resolve the full path first.`;
+        return (await lspDiagnostics(p)).slice(0, 10000);
+      }
+      case "lsp": {
+        const p = String(args.path ?? "");
+        const op = String(args.op ?? "");
+        if (!p || !op) return "error: lsp needs op + path - e.g. {op: \"hover\", path: \"/ws/src/a.ts\", line: 12}";
+        if (!p.startsWith("/"))
+          return `error: lsp path must be absolute inside the workspace (got ${JSON.stringify(p)}). Use fs_list/fs_glob to resolve the full path first.`;
+        return (
+          await lspOp({
+            op,
+            path: p,
+            line: typeof args.line === "number" ? args.line : undefined,
+            character: typeof args.character === "number" ? args.character : undefined,
+            symbol: typeof args.symbol === "string" ? args.symbol : undefined,
+          })
+        ).slice(0, 6000);
       }
       case "fs_write": {
         const path = String(args.path ?? "");
@@ -831,12 +964,19 @@ export async function chatWithTools(
       ms: number;
       note?: string;
     }) => void;
+    /** Dynamic tools (MCP). Merged with built-ins for this turn only. Capped by caller. */
+    extraTools?: ToolDef[];
   },
 ): Promise<string> {
   // Multi-backend agent loop (OpenAI-compatible, Anthropic, Gemini) with tool
   // calling. Models without tool support (e.g. some Ollama vision models) get
   // a plain-chat retry instead of a hard failure.
   const MAX_ROUNDS = 8;
+  // Dynamic MCP tools ride along for this turn only. Capped: every extra tool
+  // costs context on every round (OpenCode's main MCP caveat). Plan mode
+  // withholds everything non-read-only (plus all MCP extras) up front;
+  // runTool enforces the same boundary as backstop.
+  const allTools: ToolDef[] = toolsForMode(TOOL_DEFS, opts?.extraTools ?? [], !!opts?.policy?.planMode);
   // History window: a long chat currently resends EVERYTHING each turn —
   // unbounded payloads that gateways kill mid-flight ("Load failed").
   // Keep sys + last 20, cutting only at user boundaries so tool
@@ -1070,7 +1210,7 @@ export async function chatWithTools(
     const res = await postJSON(url, headers, {
       model: cfg.model,
       messages: toOpenAI(convo),
-      ...(useTools ? { tools: TOOL_DEFS } : {}),
+      ...(useTools ? { tools: allTools } : {}),
       stream: true,
       ...(preferStreamOptions ? { stream_options: { include_usage: true } } : {}),
     });
@@ -1230,7 +1370,7 @@ export async function chatWithTools(
       messages,
       ...(useTools
         ? {
-            tools: TOOL_DEFS.map((t) => ({
+            tools: allTools.map((t) => ({
               name: t.function.name,
               description: t.function.description,
               input_schema: t.function.parameters,
@@ -1373,7 +1513,7 @@ export async function chatWithTools(
         ? {
             tools: [
               {
-                functionDeclarations: TOOL_DEFS.map((t) => ({
+                functionDeclarations: allTools.map((t) => ({
                   name: t.function.name,
                   description: t.function.description,
                   parameters: toGeminiSchema(t.function.parameters),
@@ -1576,7 +1716,7 @@ export async function chatWithTools(
         tool: tc.function.name,
         args: JSON.stringify(args).slice(0, 1000),
         decision:
-          GATED_TOOLS.has(tc.function.name) && opts?.policy?.requestApproval
+          isGatedTool(tc.function.name) && opts?.policy?.requestApproval
             ? rejected
               ? "rejected"
               : "approved"

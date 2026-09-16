@@ -9,7 +9,7 @@ import { useInputHistory } from "../hooks/useInputHistory";
 
 // Center column: tabbed edit/diff/preview/browser/git panes + review-gate
 // row + one-shot shell + this window's PTY.
-export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, originals, editorText, originalText, setEditorText, monacoTheme, centerTab, setCenterTab, gitCount, gitPane, previewUrl, setPreviewUrl, previewDoc, openFile, closeTab, saveFile, commitMsg, setCommitMsg, approveDiff, approveAndCommit, onRejectDiff, shellCmd, onShellCmdChange, runShell, shellH, ptyH, themeId, onHResizerDown }: {
+export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, originals, editorText, originalText, setEditorText, monacoTheme, centerTab, setCenterTab, gitCount, gitPane, previewUrl, setPreviewUrl, previewDoc, openFile, closeTab, saveFile, commitMsg, setCommitMsg, approveDiff, approveAndCommit, onRejectDiff, undo, redo, canUndo, canRedo, undoLabel, shellCmd, onShellCmdChange, runShell, shellH, ptyH, themeId, onHResizerDown }: {
   ws: Workspace;
   ptyId: string;
   busy: boolean;
@@ -36,6 +36,11 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
   approveDiff: () => void;
   approveAndCommit: () => void;
   onRejectDiff: () => void;
+  undo: () => void;
+  redo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  undoLabel: string;
   shellCmd: string;
   onShellCmdChange: (v: string) => void;
   runShell: () => void;
@@ -167,6 +172,14 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
             <button onClick={onRejectDiff}>Reject</button>
           </span>
         )}
+        <span className="gate" title="Undo covers approved writes, renames and file deletes (not shell/terminal/directory ops). Stack resets on reload. /undo /redo work from chat too.">
+          <button onClick={undo} disabled={!canUndo} title={canUndo ? `Undo ${undoLabel}` : "Nothing to undo"}>
+            ↩ Undo
+          </button>
+          <button onClick={redo} disabled={!canRedo} title={canRedo ? "Redo" : "Nothing to redo"}>
+            ↪ Redo
+          </button>
+        </span>
       </div>
       <div className="pane-title">shell - one-shot (agent tool parity)</div>
       <div className="row">

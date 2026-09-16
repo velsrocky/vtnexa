@@ -39,6 +39,7 @@ function setup(opts?: {
   gitSnapshot?: string;
   openPath?: string;
   provider?: Partial<ProviderConfig>;
+  planMode?: boolean;
 }) {
   let ws: Workspace = {
     ...newWorkspace("main:ws", "/w"),
@@ -82,6 +83,8 @@ function setup(opts?: {
       setNexaState: vi.fn(),
       setShowJump: vi.fn(),
       flushStreamFrame: vi.fn(),
+      planMode: opts?.planMode ?? false,
+      pushUndo: vi.fn(),
     }),
   );
   return { ...hook, wsOf: () => ws, busy, remembered, centerTabs, audits, turnAbort };
@@ -331,4 +334,42 @@ describe("useAgentTurn tools", () => {
     const last = h.wsOf().messages[h.wsOf().messages.length - 1];
     expect(last.content).toMatch(/ollama serve/);
   }, 10000);
+});
+
+describe("useAgentTurn plan mode", () => {
+  async function planTurn(opts?: { planMode?: boolean; override?: { plan?: boolean } }) {
+    let body: any = null;
+    stubFetch(async (_url: string, init: any) => {
+      body = JSON.parse(init.body);
+      return openAIText("here is the plan");
+    });
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup({ planMode: opts?.planMode });
+    await act(async () => {
+      await h.result.current.runAgentTurn("plan this", opts?.override);
+    });
+    return body;
+  }
+
+  it("withholds side-effect tools and says PLAN MODE", async () => {
+    const body = await planTurn({ override: { plan: true } });
+    const sys = body.messages[0].content as string;
+    expect(sys).toContain("PLAN MODE");
+    const names = (body.tools as any[]).map((t) => t.function.name);
+    expect(names).toContain("fs_read");
+    expect(names).not.toContain("shell_run");
+    expect(names).not.toContain("fs_write");
+    expect(names).not.toContain("git_commit");
+  });
+
+  it("defaults to the window toggle, overridable per call", async () => {
+    const fromToggle = await planTurn({ planMode: true });
+    expect((fromToggle.messages[0].content as string)).toContain("PLAN MODE");
+    // Routines force Build even when the toggle is on.
+    const forced = await planTurn({ planMode: true, override: { plan: false } });
+    expect((forced.messages[0].content as string)).not.toContain("PLAN MODE");
+    const names = (forced.tools as any[]).map((t) => t.function.name);
+    expect(names).toContain("shell_run");
+  });
 });

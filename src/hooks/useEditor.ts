@@ -41,6 +41,8 @@ export function useEditor(opts: {
     setBuffers: tabs.setBuffers,
     setOriginalText: tabs.setOriginalText,
     setEditorText: tabs.setEditorText,
+    retargetTabs: tabs.retargetTabs,
+    closeTab: tabs.closeTab,
     refreshFiles: opts.refreshFiles,
     refreshGit: opts.refreshGit,
     refreshSkills: opts.refreshSkills,
@@ -98,5 +100,11 @@ export function useEditor(opts: {
     saveFile: gate.saveFile,
     approveDiff: gate.approveDiff,
     approveAndCommit: gate.approveAndCommit,
+    pushUndo: gate.pushUndo,
+    undo: gate.undo,
+    redo: gate.redo,
+    canUndo: gate.canUndo,
+    canRedo: gate.canRedo,
+    undoLabel: gate.undoLabel,
   };
 }

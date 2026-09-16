@@ -1,6 +1,6 @@
 import { useState } from "react";
-import type { Workspace } from "../types";
-import { fsCreate, fsDelete, fsRename } from "../lib/tauri";
+import type { UndoEntry, Workspace } from "../types";
+import { fsCreate, fsDelete, fsRead, fsRename } from "../lib/tauri";
 import { baseName, dirName } from "../lib/utils";
 
 export interface CreatingState {
@@ -23,6 +23,7 @@ export function useFiles(opts: {
   openFile: (path: string) => void;
   retargetTabs: (oldP: string, newP: string) => void;
   dropTabsUnder: (path: string) => void;
+  pushUndo: (e: UndoEntry) => void;
 }) {
   const [creating, setCreating] = useState<CreatingState | null>(null);
   const [renaming, setRenaming] = useState<RenamingState | null>(null);
@@ -57,6 +58,7 @@ export function useFiles(opts: {
     const target = dirName(renaming.path) + "/" + name;
     try {
       await fsRename(renaming.path, target);
+      opts.pushUndo({ kind: "rename", oldPath: renaming.path, newPath: target });
       opts.retargetTabs(renaming.path, target);
       setRenaming(null);
       opts.refreshFiles(opts.cwd);
@@ -67,8 +69,18 @@ export function useFiles(opts: {
 
   async function doDelete(path: string, isDir: boolean) {
     if (!window.confirm(`Permanently delete ${baseName(path)}${isDir ? " and everything inside it" : ""}?`)) return;
+    // Snapshot file content for /undo (directory trees are out of scope).
+    let content: string | null = null;
+    if (!isDir) {
+      try {
+        content = await fsRead(path);
+      } catch {
+        content = null;
+      }
+    }
     try {
       await fsDelete(path, isDir);
+      if (content !== null) opts.pushUndo({ kind: "delete", path, content });
       opts.dropTabsUnder(path);
       opts.refreshFiles(opts.cwd);
       opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\n✓ deleted ${path}` }));

@@ -331,3 +331,14 @@ describe("useSession.loadSession", () => {
     }
   });
 });
+
+describe("planMode persistence", () => {
+  it("snapshots and restores the mode flag, defaulting to Build", async () => {
+    const { snapshotWorkspace, restoreWorkspace } = await import("./useSession");
+    expect(snapshotWorkspace({ ...BASE_WS, planMode: true }, 10)).toMatchObject({ planMode: true });
+    expect(snapshotWorkspace(BASE_WS, 10)).toMatchObject({ planMode: false });
+    expect(restoreWorkspace({}, "x").planMode).toBe(false);
+    expect(restoreWorkspace({ planMode: true }, "x").planMode).toBe(true);
+    expect(restoreWorkspace({ planMode: "yes" }, "x").planMode).toBe(false);
+  });
+});

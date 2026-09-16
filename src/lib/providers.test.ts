@@ -164,6 +164,22 @@ describe("runTool", () => {
   it("reports unknown tools instead of throwing", async () => {
     await expect(runTool("teleport", {})).resolves.toMatch(/unknown tool/);
   });
+  it("runs lsp_diagnostics without approval and requires absolute paths", async () => {
+    let approvals = 0;
+    setInvokeImpl(async (cmd) => {
+      expect(cmd).toBe("lsp_diagnostics");
+      return "clean: no diagnostics for /w/a.ts";
+    });
+    const out = await runTool(
+      "lsp_diagnostics",
+      { path: "/w/a.ts" },
+      { requestApproval: async () => { approvals++; return true; } },
+    );
+    expect(out).toContain("clean:");
+    expect(approvals).toBe(0);
+    await expect(runTool("lsp_diagnostics", { path: "relative/a.ts" })).resolves.toMatch(/^error:/);
+    await expect(runTool("lsp_diagnostics", {})).resolves.toMatch(/^error:/);
+  });
   it("classifies weak vs frontier models", async () => {
     const { isWeakModel } = await import("./providers");
     expect(isWeakModel("http://localhost:11434/v1", "qwen2.5-coder:7b")).toBe(true);

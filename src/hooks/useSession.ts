@@ -99,6 +99,7 @@ export function snapshotWorkspace(ws: Workspace, msgCap: number): Record<string,
     sideTab: ws.sideTab ?? "chat",
     chatDraft: ws.chatDraft ?? "",
     previewUrl: ws.previewUrl ?? "",
+    planMode: ws.planMode ?? false,
     pendingDiff: ws.pendingDiff,
   };
 }
@@ -144,6 +145,7 @@ export function restoreWorkspace(l: any, fallbackId: string): Workspace {
     sideTab: asSideTab(l?.sideTab),
     chatDraft: typeof l?.chatDraft === "string" ? l.chatDraft.slice(0, 20000) : "",
     previewUrl: typeof l?.previewUrl === "string" ? l.previewUrl.slice(0, 4096) : "",
+    planMode: l?.planMode === true,
   };
 }
 

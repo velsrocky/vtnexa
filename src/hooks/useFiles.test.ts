@@ -29,6 +29,7 @@ function setup() {
     retargeted: [] as [string, string][],
     dropped: [] as string[],
     shellOut: [] as string[],
+    undo: [] as unknown[],
   };
   const hook = renderHook(() =>
     useFiles({
@@ -43,6 +44,7 @@ function setup() {
       openFile: (path) => calls.opened.push(path),
       retargetTabs: (o, n) => calls.retargeted.push([o, n]),
       dropTabsUnder: (p) => calls.dropped.push(p),
+      pushUndo: (e) => calls.undo.push(e),
     }),
   );
   return { ...hook, calls };
@@ -169,5 +171,39 @@ describe("useFiles.doDelete", () => {
       await h.result.current.doDelete("/w/keep", false);
     });
     expect(invoked).toBe(false);
+  });
+});
+
+describe("useFiles undo capture", () => {
+  it("captures tree renames for /undo", async () => {
+    setInvokeImpl(async () => "/w/b.txt");
+    const h = setup();
+    act(() => {
+      h.result.current.setRenaming({ path: "/w/a.txt", name: "b.txt" });
+    });
+    await act(async () => {
+      await h.result.current.doRename();
+    });
+    expect(h.calls.undo).toEqual([{ kind: "rename", oldPath: "/w/a.txt", newPath: "/w/b.txt" }]);
+  });
+
+  it("captures file deletes with content, not dirs", async () => {
+    (window as any).confirm = vi.fn(() => true);
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") return "body";
+      if (cmd === "fs_delete") return {};
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup();
+    await act(async () => {
+      await h.result.current.doDelete("/w/a.txt", false);
+    });
+    expect(h.calls.undo).toEqual([{ kind: "delete", path: "/w/a.txt", content: "body" }]);
+
+    h.calls.undo.length = 0;
+    await act(async () => {
+      await h.result.current.doDelete("/w/dir", true);
+    });
+    expect(h.calls.undo).toEqual([]);
   });
 });
