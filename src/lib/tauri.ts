@@ -128,6 +128,26 @@ export async function shellRun(cwd: string, cmd: string): Promise<ShellResult> {
   return invoke<ShellResult>("shell_run", { cwd, cmd });
 }
 
+export interface ShellPoll {
+  status: string;
+  code: number | null;
+  stdout_tail: string;
+  stderr_tail: string;
+  elapsed_ms: number;
+}
+
+export async function shellBg(cwd: string, cmd: string): Promise<string> {
+  return invoke<string>("shell_bg", { cwd, cmd });
+}
+
+export async function shellPoll(id: string): Promise<ShellPoll> {
+  return invoke<ShellPoll>("shell_poll", { id });
+}
+
+export async function shellKill(id: string): Promise<string> {
+  return invoke<string>("shell_kill", { id });
+}
+
 export async function lspDiagnostics(path: string): Promise<string> {
   return invoke<string>("lsp_diagnostics", { path });
 }

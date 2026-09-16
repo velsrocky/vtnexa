@@ -2,7 +2,7 @@ import type { FileEntry, SideTab } from "../types";
 import type { SkillInfo } from "../types";
 import type { CreatingState, RenamingState } from "../hooks/useFiles";
 
-export default function FileTree({ cwd, workspaceRoot, files, creating, renaming, skills, conventionsName, width, setCreating, setRenaming, setCwd, openFile, createEntry, doRename, doDelete, createSkill, setInput, setSideTab }: {
+export default function FileTree({ cwd, workspaceRoot, files, creating, renaming, skills, conventionsName, width, skillH, onSkillResizerDown, setCreating, setRenaming, setCwd, openFile, createEntry, doRename, doDelete, createSkill, setInput, setSideTab }: {
   cwd: string;
   workspaceRoot: string;
   files: FileEntry[];
@@ -11,6 +11,8 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
   skills: SkillInfo[];
   conventionsName: string;
   width: number;
+  skillH: number;
+  onSkillResizerDown: (e: React.MouseEvent) => void;
   setCreating: (v: CreatingState | null) => void;
   setRenaming: (v: RenamingState | null) => void;
   setCwd: (v: string) => void;
@@ -100,6 +102,7 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
         )}
       </div>
       <button onClick={() => workspaceRoot && setCwd(workspaceRoot)}>⌂ workspace root</button>
+      <div className="hresizer" onMouseDown={onSkillResizerDown} title="Drag to resize skills panel" />
       <div className="pane-title row-between" style={{ marginTop: 8 }}>
         <span>
           skills ({skills.length}){conventionsName ? ` · ${conventionsName} ✓` : ""}
@@ -108,7 +111,7 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
           <button onClick={createSkill} title="New skill in .vtnexa/skills/">＋</button>
         </span>
       </div>
-      <div className="filelist" style={{ flex: "0 1 auto", maxHeight: 150 }}>
+      <div className="filelist" style={{ flex: "0 1 auto", maxHeight: skillH, overflowY: "auto" }}>
         {skills.map((s) => (
           <div
             key={s.name}

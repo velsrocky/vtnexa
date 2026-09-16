@@ -19,7 +19,7 @@ import ProviderBar from "./components/ProviderBar";
 import WorkspaceBar from "./components/WorkspaceBar";
 import SessionBar from "./components/SessionBar";
 import { invoke } from "@tauri-apps/api/core";
-import { baseName } from "./lib/utils";
+import { baseName, didExhaustBudget } from "./lib/utils";
 import { loadFeedback, rateMessage, ratingMap } from "./lib/feedback";
 import { useGit } from "./hooks/useGit";
 import { useWorkspaceState, windowLabel, ptyId } from "./hooks/useWorkspaceState";
@@ -43,7 +43,7 @@ import { useMcp } from "./hooks/useMcp";
 export default function App() {
   const [auditNote, setAuditNote] = useState("");
   const [ratings, setRatings] = useState<Record<string, 1 | -1>>(() => ratingMap(loadFeedback()));
-  const { themeId, setThemeId, theme, leftW, rightW, onResizerDown } = usePrefs();
+  const { themeId, setThemeId, theme, leftW, rightW, onResizerDown, skillH, onSkillResizerDown } = usePrefs();
 
   const {
     ws,
@@ -371,6 +371,16 @@ export default function App() {
     runAgentTurn(await expandSkill(text));
   }
 
+  // Continue a turn that died of tool budget: fresh rounds over the full
+  // history (which already holds every tool result). Transparent user
+  // message, not hidden state.
+  function continueTurn() {
+    if (busy) return;
+    runAgentTurn(
+      "▶ Continue the task from the tool results above. Do not repeat completed steps; pick up exactly where you stopped. If you are done, say what was accomplished instead of calling more tools.",
+    );
+  }
+
   // Ctrl/Cmd+Shift+N: open an independent window (same as the TopBar button;
   // second app launch does this too via the single-instance hook).
   useEffect(() => {
@@ -485,6 +495,8 @@ export default function App() {
           skills={skills}
           conventionsName={conventionsName}
           width={leftW}
+          skillH={skillH}
+          onSkillResizerDown={onSkillResizerDown}
           setCreating={setCreating}
           setRenaming={setRenaming}
           setCwd={setCwd}
@@ -575,6 +587,8 @@ export default function App() {
           stopTurn={stopTurn}
           planMode={ws.planMode}
           onTogglePlan={() => updateWs((w) => ({ ...w, planMode: !w.planMode }))}
+          showContinue={didExhaustBudget(ws.messages)}
+          onContinue={continueTurn}
           pendingToolsCount={pendingTools.length}
           ratings={ratings}
           onRateMessage={(messageId, rating) => {

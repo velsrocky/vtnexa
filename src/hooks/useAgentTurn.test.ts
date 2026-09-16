@@ -358,7 +358,9 @@ describe("useAgentTurn plan mode", () => {
     expect(sys).toContain("PLAN MODE");
     const names = (body.tools as any[]).map((t) => t.function.name);
     expect(names).toContain("fs_read");
+    expect(names).toContain("shell_poll");
     expect(names).not.toContain("shell_run");
+    expect(names).not.toContain("shell_bg");
     expect(names).not.toContain("fs_write");
     expect(names).not.toContain("git_commit");
   });

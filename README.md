@@ -37,6 +37,11 @@ Most coding agents either (a) ask for permission on every keystroke or
   check, py_compile) and query language servers (`lsp`: hover, definition,
   references, symbols — read-only, auto-approved), drive a real Chromium
   browser (navigate, click, type, screenshot with vision), and commit to
+  git — all behind the review gate. Long shell work (installs, builds, test
+  suites) runs as background jobs (`shell_bg` + `shell_poll`, same screening
+  as foreground); turns that run out of budget offer a ▶ Continue button
+  over full history. **Plan mode** (◔ toggle or per-turn)
+  browser (navigate, click, type, screenshot with vision), and commit to
   git — all behind the review gate. **Plan mode** (◔ toggle or per-turn)
   restricts it to read-only tools for investigation-first flows; routines
   always run Build.
