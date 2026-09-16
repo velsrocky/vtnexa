@@ -1,14 +1,28 @@
 {
   "$schema": "https://github.com/velsrocky/vtnexa/schemas/vtnexa.json",
-  // MCP servers (OpenCode-pattern port, local stdio only in this build).
+  // MCP servers (OpenCode-pattern port: local stdio + remote HTTP).
   // Global defaults live in ~/.config/vtnexa/vtnexa.json; this workspace file
   // wins per server name. MCP is OFF in the UI until opted in (flag
   // `vtai.mcpEnabled`), and every mcp_* call requires approval.
+  //
+  // Secrets: NEVER paste tokens here (this file is git-committed). Use
+  // {env:NAME} in header values - the backend substitutes from its own
+  // environment and never echoes values back in errors or logs.
+  // OAuth ("oauth": {...}) is rejected until the login flow lands.
   "mcp": {
     "everything": {
       "type": "local",
       "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
       "enabled": true,
+      "timeout": 5000
+    },
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+      },
+      "enabled": false,
       "timeout": 5000
     }
   }

@@ -1,14 +1,16 @@
-// Minimal MCP host (OpenCode-pattern port, local stdio only).
+// MCP host (OpenCode-pattern port): local stdio + remote Streamable HTTP.
 //
 // Scope: read `mcp` section from vtnexa.json (global + workspace merge),
-// speak newline-delimited JSON-RPC over stdio to `type: "local"` servers,
-// expose tools/list + tools/call. `type: "remote"` is rejected with a clear
-// error until the HTTP/SSE transport lands.
+// speak newline-delimited JSON-RPC over stdio to `type: "local"` servers and
+// Streamable HTTP POST to `type: "remote"` servers, expose tools/list +
+// tools/call. Remote auth is static headers with `{env:VAR}` substitution —
+// OAuth (RFC 7591 + browser code flow) is rejected clearly until it lands.
 //
 // Security: servers are arbitrary code. Cwd is confined to the workspace,
 // stderr is captured (capped) for errors, outputs are truncated, and secrets
-// (headers/env) are never echoed back or written to logs. All `mcp_*` calls
-// from the agent go through the approval popup (see frontend GATED_TOOLS).
+// (header values, env, URL query strings) are never echoed back in errors or
+// logs. All `mcp_*` calls from the agent go through the approval popup
+// (see frontend GATED_TOOLS).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,9 +29,8 @@ pub(crate) struct VtnexaConfigFile {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // url/headers reserved for remote transport ( minimal build rejects remote )
 pub(crate) struct McpServerConfig {
-    /// "local" (supported) or "remote" (rejected for now with a clear error).
+    /// "local" (stdio) or "remote" (Streamable HTTP).
     #[serde(default = "default_server_type")]
     pub r#type: String,
     #[serde(default)]
@@ -46,6 +47,9 @@ pub(crate) struct McpServerConfig {
     pub enabled: bool,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// Reserved: any non-false value is rejected until the OAuth flow lands.
+    #[serde(default)]
+    pub oauth: Option<serde_json::Value>,
 }
 
 fn default_server_type() -> String {
@@ -69,6 +73,7 @@ impl Default for McpServerConfig {
             cwd: None,
             enabled: true,
             timeout: MCP_DEFAULT_TIMEOUT_MS,
+            oauth: None,
         }
     }
 }
@@ -428,45 +433,314 @@ fn handshake_lines() -> Vec<String> {
     ]
 }
 
-pub(crate) fn list_tools_for_server(
-    name: &str,
-    cfg: &McpServerConfig,
-    root: &std::path::Path,
-) -> Result<Vec<McpToolInfo>, String> {
-    if cfg.r#type != "local" {
-        return Err(format!(
-            "mcp: server '{}' is type '{}' — remote servers are not supported in this minimal build, use type \"local\"",
-            name, cfg.r#type
-        ));
+// ---- Remote transport (Streamable HTTP) ----
+
+/// Reject anything but http(s). Returns the trimmed URL.
+pub(crate) fn validate_remote_url(raw: &str) -> Result<String, String> {
+    let url = raw.trim().to_string();
+    if url.is_empty() {
+        return Err("mcp: remote server has no url".to_string());
     }
-    let command = cfg.command.as_deref().unwrap_or(&[]).to_vec();
-    if command.is_empty() {
-        return Err(format!("mcp: server '{}' has no command", name));
+    if url.len() > 2048 {
+        return Err("mcp: remote url too long".to_string());
     }
-    let cwd = resolve_cwd(cfg, root)?;
-    let env = cfg.environment.clone().unwrap_or_default();
-    let timeout = Duration::from_millis(clamp_timeout(cfg.timeout));
-    let mut send = handshake_lines();
-    send.push(jsonrpc_request(
-        "tools/list",
-        Some(2),
-        serde_json::json!({}),
-    ));
-    let (lines, stderr) = run_stdio_once(&command, &cwd, &env, &send, timeout)?;
-    let resp = find_response(&lines, 2).ok_or_else(|| {
-        if stderr.trim().is_empty() {
-            format!(
-                "mcp: server '{}' gave no tools/list response (timeout {}ms)",
-                name,
-                timeout.as_millis()
-            )
-        } else {
-            format!("mcp: server '{}' failed: {}", name, stderr.trim())
+    let lower = url.to_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err("mcp: remote url must start with http:// or https://".to_string());
+    }
+    if url.contains([' ', '\n', '\r', '\t']) {
+        return Err("mcp: remote url contains whitespace".to_string());
+    }
+    Ok(url)
+}
+
+/// scheme://host for errors — query strings may carry secrets.
+pub(crate) fn url_host_display(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let scheme = if url.to_lowercase().starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    };
+    format!(
+        "{}://{}",
+        scheme,
+        host.chars().take(253).collect::<String>()
+    )
+}
+
+/// `{env:NAME}` substitution for header values. Missing vars become "" (the
+/// server then 401s with a clear error — never leak which var was missing
+/// beyond its name, which is already in the user's own config).
+pub(crate) fn subst_env_placeholders(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("{env:") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 5..];
+        match after.find('}') {
+            Some(end) => {
+                let name = &after[..end];
+                if !name.is_empty()
+                    && name.len() <= 128
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    out.push_str(&std::env::var(name).unwrap_or_default());
+                } else {
+                    // Not a valid placeholder: leave it literally.
+                    out.push_str("{env:");
+                    out.push_str(name);
+                    out.push('}');
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
         }
-    })?;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Fail-fast OAuth gate: static headers only until the browser code flow lands.
+fn check_oauth_unsupported(name: &str, cfg: &McpServerConfig) -> Result<(), String> {
+    match &cfg.oauth {
+        None => Ok(()),
+        Some(v) if v == &serde_json::Value::Bool(false) => Ok(()),
+        _ => Err(format!(
+            "mcp: server '{}' sets oauth, which is not supported yet — use header auth ({{env:...}}) or disable the server",
+            name
+        )),
+    }
+}
+
+/// `data:` payloads of an SSE body, in order.
+pub(crate) fn extract_sse_data(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let t = line.trim();
+        if let Some(payload) = t.strip_prefix("data:") {
+            let payload = payload.trim();
+            if !payload.is_empty() && payload != "[DONE]" {
+                out.push(payload.to_string());
+            }
+        }
+    }
+    out
+}
+
+struct RemoteSession {
+    client: reqwest::Client,
+    url: String,
+    headers: Vec<(String, String)>,
+    session_id: Option<String>,
+    host_display: String,
+}
+
+fn remote_session(name: &str, cfg: &McpServerConfig) -> Result<RemoteSession, String> {
+    check_oauth_unsupported(name, cfg)?;
+    let url = validate_remote_url(cfg.url.as_deref().unwrap_or(""))?;
+    let host_display = url_host_display(&url);
+    let mut headers = Vec::new();
+    for (k, v) in cfg.headers.clone().unwrap_or_default() {
+        if k.trim().is_empty() || k.len() > 256 {
+            return Err(format!("mcp: server '{}' has an invalid header name", name));
+        }
+        let value = subst_env_placeholders(&v);
+        if value.len() > 8192 {
+            return Err(format!("mcp: server '{}' header value too long", name));
+        }
+        headers.push((k, value));
+    }
+    let timeout = Duration::from_millis(clamp_timeout(cfg.timeout));
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| format!("mcp: http client failed: {}", e))?;
+    Ok(RemoteSession {
+        client,
+        url,
+        headers,
+        session_id: None,
+        host_display,
+    })
+}
+
+impl RemoteSession {
+    /// POST one JSON-RPC message. Notifications (no id) accept any 2xx.
+    /// Returns the matching response object for calls with an id.
+    async fn post_rpc(
+        &mut self,
+        body: String,
+        expect_id: Option<u64>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(body);
+        if let Some(sid) = &self.session_id {
+            req = req.header("Mcp-Session-Id", sid);
+        }
+        for (k, v) in &self.headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let res = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                format!("mcp: {} timed out", self.host_display)
+            } else if e.is_connect() {
+                format!("mcp: cannot reach {} ({})", self.host_display, e)
+            } else {
+                format!("mcp: {} request failed: {}", self.host_display, e)
+            }
+        })?;
+        if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(format!(
+                "mcp: {} requires authentication (HTTP 401) — OAuth login is not supported yet; use header auth ({{env:...}}) or disable the server",
+                self.host_display
+            ));
+        }
+        if let Some(sid) = res.headers().get("mcp-session-id") {
+            if let Ok(s) = sid.to_str() {
+                if !s.is_empty() {
+                    self.session_id = Some(s.to_string());
+                }
+            }
+        }
+        if !res.status().is_success() {
+            // Status only: bodies may echo tokens back.
+            return Err(format!(
+                "mcp: {} answered HTTP {}",
+                self.host_display,
+                res.status()
+            ));
+        }
+        let id = match expect_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let ctype = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if ctype.contains("text/event-stream") {
+            let text = res.text().await.unwrap_or_default();
+            return find_response(&extract_sse_data(&text), id)
+                .map(Some)
+                .ok_or_else(|| {
+                    format!(
+                        "mcp: {} gave no JSON-RPC response (id {})",
+                        self.host_display, id
+                    )
+                });
+        }
+        let text = res.text().await.unwrap_or_default();
+        if text.trim().is_empty() {
+            return Err(format!(
+                "mcp: {} returned an empty body for id {}",
+                self.host_display, id
+            ));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|_| format!("mcp: {} returned non-JSON", self.host_display))?;
+        if v.get("id").and_then(|i| i.as_u64()) != Some(id) {
+            return Err(format!(
+                "mcp: {} response id mismatch (wanted {})",
+                self.host_display, id
+            ));
+        }
+        Ok(Some(v))
+    }
+
+    async fn initialize(&mut self) -> Result<(), String> {
+        let init = jsonrpc_request(
+            "initialize",
+            Some(1),
+            serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "vtnexa", "version": env!("CARGO_PKG_VERSION")}
+            }),
+        );
+        let resp = self
+            .post_rpc(init, Some(1))
+            .await?
+            .ok_or_else(|| "mcp: unreachable".to_string())?;
+        if let Some(err) = rpc_error_to_string(&resp) {
+            return Err(err);
+        }
+        let note = jsonrpc_request("notifications/initialized", None, serde_json::json!({}));
+        self.post_rpc(note, None).await?;
+        Ok(())
+    }
+}
+
+async fn remote_list_tools(name: &str, cfg: &McpServerConfig) -> Result<Vec<McpToolInfo>, String> {
+    let mut sess = remote_session(name, cfg)?;
+    sess.initialize().await?;
+    let resp = sess
+        .post_rpc(
+            jsonrpc_request("tools/list", Some(2), serde_json::json!({})),
+            Some(2),
+        )
+        .await?
+        .ok_or_else(|| format!("mcp: {} gave no tools/list response", sess.host_display))?;
     if let Some(err) = rpc_error_to_string(&resp) {
         return Err(err);
     }
+    tools_from_list_response(name, &resp)
+}
+
+async fn remote_call_tool(
+    server: &str,
+    cfg: &McpServerConfig,
+    tool: &str,
+    args: serde_json::Value,
+) -> Result<String, String> {
+    if tool.is_empty() || tool.len() > 128 {
+        return Err("mcp: invalid tool name".to_string());
+    }
+    let arg_str = serde_json::to_string(&args).unwrap_or_default();
+    if arg_str.len() > MCP_MAX_ARGS_BYTES {
+        return Err("mcp: args too large (64KB max)".to_string());
+    }
+    let mut sess = remote_session(server, cfg)?;
+    sess.initialize().await?;
+    let resp = sess
+        .post_rpc(
+            jsonrpc_request(
+                "tools/call",
+                Some(2),
+                serde_json::json!({"name": tool, "arguments": args}),
+            ),
+            Some(2),
+        )
+        .await?
+        .ok_or_else(|| format!("mcp: {} gave no tools/call response", sess.host_display))?;
+    if let Some(err) = rpc_error_to_string(&resp) {
+        return Err(err);
+    }
+    let result = resp
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    Ok(truncate_output(flatten_tool_result(&result)))
+}
+
+/// Shared tools/list parsing for stdio + HTTP paths.
+fn tools_from_list_response(
+    name: &str,
+    resp: &serde_json::Value,
+) -> Result<Vec<McpToolInfo>, String> {
     let tools = resp
         .get("result")
         .and_then(|r| r.get("tools"))
@@ -506,17 +780,65 @@ pub(crate) fn list_tools_for_server(
     Ok(out)
 }
 
-pub(crate) fn call_tool_for_server(
+pub(crate) async fn list_tools_for_server(
+    name: &str,
+    cfg: &McpServerConfig,
+    root: &std::path::Path,
+) -> Result<Vec<McpToolInfo>, String> {
+    if cfg.r#type == "remote" {
+        return remote_list_tools(name, cfg).await;
+    }
+    if cfg.r#type != "local" {
+        return Err(format!(
+            "mcp: server '{}' has unknown type '{}' (want \"local\" or \"remote\")",
+            name, cfg.r#type
+        ));
+    }
+    let command = cfg.command.as_deref().unwrap_or(&[]).to_vec();
+    if command.is_empty() {
+        return Err(format!("mcp: server '{}' has no command", name));
+    }
+    let cwd = resolve_cwd(cfg, root)?;
+    let env = cfg.environment.clone().unwrap_or_default();
+    let timeout = Duration::from_millis(clamp_timeout(cfg.timeout));
+    let mut send = handshake_lines();
+    send.push(jsonrpc_request(
+        "tools/list",
+        Some(2),
+        serde_json::json!({}),
+    ));
+    let (lines, stderr) = run_stdio_once(&command, &cwd, &env, &send, timeout)?;
+    let resp = find_response(&lines, 2).ok_or_else(|| {
+        if stderr.trim().is_empty() {
+            format!(
+                "mcp: server '{}' gave no tools/list response (timeout {}ms)",
+                name,
+                timeout.as_millis()
+            )
+        } else {
+            format!("mcp: server '{}' failed: {}", name, stderr.trim())
+        }
+    })?;
+    if let Some(err) = rpc_error_to_string(&resp) {
+        return Err(err);
+    }
+    tools_from_list_response(name, &resp)
+}
+
+pub(crate) async fn call_tool_for_server(
     server: &str,
     cfg: &McpServerConfig,
     root: &std::path::Path,
     tool: &str,
     args: serde_json::Value,
 ) -> Result<String, String> {
+    if cfg.r#type == "remote" {
+        return remote_call_tool(server, cfg, tool, args).await;
+    }
     if cfg.r#type != "local" {
         return Err(format!(
-            "mcp: server '{}' is remote — not supported in this minimal build",
-            server
+            "mcp: server '{}' has unknown type '{}' (want \"local\" or \"remote\")",
+            server, cfg.r#type
         ));
     }
     if tool.is_empty() || tool.len() > 128 {
@@ -623,7 +945,7 @@ pub(crate) fn mcp_list_servers(
 }
 
 #[tauri::command]
-pub(crate) fn mcp_list_tools(
+pub(crate) async fn mcp_list_tools(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::WorkspaceRoots>,
 ) -> Result<Vec<McpToolInfo>, String> {
@@ -638,7 +960,7 @@ pub(crate) fn mcp_list_tools(
             continue;
         }
         // One failing server must not hide the others.
-        match list_tools_for_server(&name, cfg, &root) {
+        match list_tools_for_server(&name, cfg, &root).await {
             Ok(mut tools) => out.append(&mut tools),
             Err(e) => {
                 out.push(McpToolInfo {
@@ -655,7 +977,7 @@ pub(crate) fn mcp_list_tools(
 }
 
 #[tauri::command]
-pub(crate) fn mcp_call_tool(
+pub(crate) async fn mcp_call_tool(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::WorkspaceRoots>,
     server: String,
@@ -668,7 +990,7 @@ pub(crate) fn mcp_call_tool(
     let root = crate::root_snapshot(&state, window.label());
     let merged = load_merged_mcp_config(&root)?;
     let cfg = check_server_usable(&merged, &server)?;
-    call_tool_for_server(&server, cfg, &root, &tool, args)
+    call_tool_for_server(&server, cfg, &root, &tool, args).await
 }
 
 #[tauri::command]
@@ -834,21 +1156,101 @@ mod tests {
     }
 
     #[test]
-    fn remote_servers_are_rejected_clearly() {
+    fn remote_servers_reject_oauth_and_validate_url_without_network() {
+        // oauth object -> clear error before any I/O.
         let cfg = McpServerConfig {
             r#type: "remote".to_string(),
             url: Some("https://example.com/mcp".to_string()),
+            oauth: Some(serde_json::json!({"clientId": "x"})),
             ..Default::default()
         };
-        let err = list_tools_for_server("r", &cfg, std::path::Path::new("/tmp")).unwrap_err();
-        assert!(err.contains("remote"), "got: {}", err);
+        let err = tauri::async_runtime::block_on(list_tools_for_server(
+            "r",
+            &cfg,
+            std::path::Path::new("/tmp"),
+        ))
+        .unwrap_err();
+        assert!(err.contains("oauth"), "got: {}", err);
+        // Missing url -> validation error, no network touched.
+        let cfg = McpServerConfig {
+            r#type: "remote".to_string(),
+            ..Default::default()
+        };
+        let err = tauri::async_runtime::block_on(list_tools_for_server(
+            "r",
+            &cfg,
+            std::path::Path::new("/tmp"),
+        ))
+        .unwrap_err();
+        assert!(err.contains("no url"), "got: {}", err);
     }
 
     #[test]
     fn missing_command_is_a_clear_error() {
         let cfg = McpServerConfig::default();
-        let err = list_tools_for_server("s", &cfg, std::path::Path::new("/tmp")).unwrap_err();
+        let err = tauri::async_runtime::block_on(list_tools_for_server(
+            "s",
+            &cfg,
+            std::path::Path::new("/tmp"),
+        ))
+        .unwrap_err();
         assert!(err.contains("no command"), "got: {}", err);
+    }
+
+    #[test]
+    fn remote_urls_are_validated() {
+        assert!(validate_remote_url("https://mcp.example.com/mcp").is_ok());
+        assert!(validate_remote_url("http://127.0.0.1:3000/mcp").is_ok());
+        assert!(validate_remote_url("").unwrap_err().contains("no url"));
+        assert!(validate_remote_url("ws://example.com")
+            .unwrap_err()
+            .contains("http"));
+        assert!(validate_remote_url("https://example.com/a b")
+            .unwrap_err()
+            .contains("whitespace"));
+    }
+
+    #[test]
+    fn host_display_strips_secrets() {
+        assert_eq!(
+            url_host_display("https://mcp.example.com/mcp?key=SECRET"),
+            "https://mcp.example.com"
+        );
+        assert_eq!(
+            url_host_display("http://127.0.0.1:3000/x"),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn env_placeholders_substitute() {
+        std::env::set_var("VTNEXA_TEST_SUBST", "s3cret");
+        assert_eq!(
+            subst_env_placeholders("Bearer {env:VTNEXA_TEST_SUBST}"),
+            "Bearer s3cret"
+        );
+        assert_eq!(
+            subst_env_placeholders("Bearer {env:VTNEXA_TEST_MISSING_XYZ}"),
+            "Bearer "
+        );
+        // Invalid placeholder shape is left literally.
+        assert_eq!(subst_env_placeholders("{env:bad-name!}"), "{env:bad-name!}");
+        assert_eq!(subst_env_placeholders("plain"), "plain");
+        std::env::remove_var("VTNEXA_TEST_SUBST");
+    }
+
+    #[test]
+    fn sse_data_lines_extract() {
+        let body = ": ping\n\ndata: {\"a\":1}\n\ndata: [DONE]\n\ndata: {\"b\":2}\n\n";
+        assert_eq!(
+            extract_sse_data(body),
+            vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()]
+        );
+        // SSE envelope + id matching reuses the stdio matcher.
+        let lines =
+            extract_sse_data("data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}\n\n");
+        let r = find_response(&lines, 2).unwrap();
+        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), 0);
     }
 
     fn usable_map() -> HashMap<String, McpServerConfig> {
@@ -901,5 +1303,144 @@ mod tests {
     fn enabled_patch_rejects_non_objects() {
         assert!(apply_enabled_patch(r#"{"mcp": []}"#, "s", true).is_err());
         assert!(apply_enabled_patch(r#"{"mcp": {"s": 1}}"#, "s", true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod remote_roundtrip_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    /// Minimal Streamable-HTTP mock: initialize (with session id), 202 for
+    /// notifications, canned tools/list + tools/call. Records whether the
+    /// session header was threaded on post-handshake requests.
+    fn spawn_mock() -> (String, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_srv = seen.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/mcp",
+            listener.local_addr().unwrap().port()
+        );
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let seen_srv = seen_srv.clone();
+                std::thread::spawn(move || {
+                    let mut buf = vec![0u8; 65536];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let has_session = req.to_lowercase().contains("mcp-session-id: test123");
+                    seen_srv
+                        .lock()
+                        .unwrap()
+                        .push(format!("session={}", has_session));
+                    let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                    let method = serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(str::to_string))
+                        .unwrap_or_default();
+                    let id = serde_json::from_str::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| v.get("id").cloned())
+                        .unwrap_or(serde_json::Value::Null);
+                    let (status, extra_headers, resp_body) = match method.as_str() {
+                        "initialize" => (
+                            "200 OK",
+                            "Mcp-Session-Id: test123\r\nContent-Type: application/json\r\n",
+                            serde_json::json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "mock"}}
+                            })
+                            .to_string(),
+                        ),
+                        "notifications/initialized" => ("202 Accepted", "", String::new()),
+                        "tools/list" => (
+                            "200 OK",
+                            "Content-Type: application/json\r\n",
+                            serde_json::json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": {"tools": [{"name": "add", "description": "add numbers", "inputSchema": {"type": "object"}}]}
+                            })
+                            .to_string(),
+                        ),
+                        "tools/call" => (
+                            "200 OK",
+                            "Content-Type: application/json\r\n",
+                            serde_json::json!({
+                                "jsonrpc": "2.0", "id": id,
+                                "result": {"content": [{"type": "text", "text": "7"}]}
+                            })
+                            .to_string(),
+                        ),
+                        _ => (
+                            "200 OK",
+                            "Content-Type: application/json\r\n",
+                            serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"message": "unknown"}}).to_string(),
+                        ),
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status,
+                        extra_headers,
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = stream.write_all(reply.as_bytes());
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    fn remote_cfg(url: String) -> McpServerConfig {
+        McpServerConfig {
+            r#type: "remote".to_string(),
+            url: Some(url),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn remote_list_and_call_thread_the_session() {
+        let (url, seen) = spawn_mock();
+        let cfg = remote_cfg(url);
+        let tools = tauri::async_runtime::block_on(list_tools_for_server(
+            "mock",
+            &cfg,
+            std::path::Path::new("/tmp"),
+        ))
+        .expect("list failed");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].qualified_name, "mcp_mock_add");
+        let out = tauri::async_runtime::block_on(call_tool_for_server(
+            "mock",
+            &cfg,
+            std::path::Path::new("/tmp"),
+            "add",
+            serde_json::json!({"a": 3, "b": 4}),
+        ))
+        .expect("call failed");
+        assert!(out.contains('7'), "got: {}", out);
+        // Each operation re-handshakes: initialize carries no session yet;
+        // every later request in that operation must thread it.
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            *seen,
+            vec![
+                "session=false", // list: initialize
+                "session=true",  // list: notifications/initialized
+                "session=true",  // list: tools/list
+                "session=false", // call: initialize
+                "session=true",  // call: notifications/initialized
+                "session=true",  // call: tools/call
+            ],
+            "seen: {:?}",
+            *seen
+        );
     }
 }
