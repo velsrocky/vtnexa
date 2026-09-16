@@ -1,7 +1,8 @@
 import type { MutableRefObject } from "react";
 import type { AuditInput, CenterTab, ChatMsg, ProviderConfig, SkillInfo, Workspace } from "../types";
 import { fsRead, skillRead, type NexaKind } from "../lib/tauri";
-import { chatWithTools } from "../lib/providers";
+import { chatWithTools, type ToolDef } from "../lib/providers";
+import { isMcpEnabled, mcpListTools, setMcpToolCache, toMcpToolDefs } from "../lib/mcp";
 import { recordTurnRepairs, resolvePromptTier } from "../lib/modelBands";
 import { uid } from "../lib/utils";
 import type { PendingTool } from "../components/ApprovalModal";
@@ -79,6 +80,22 @@ export function useAgentTurn(d: Deps) {
       const weak = resolvePromptTier(usedCfg.baseUrl, usedCfg.model) === "weak";
       const mem = (d.memoryText ?? "").trim().slice(0, weak ? 1000 : 2000);
       const repo = (d.repoMap ?? "").split("\n").slice(0, weak ? 20 : 40).join("\n");
+      // MCP tools (opt-in): loaded once per turn, capped to protect context.
+      // Fail-closed: a broken server never breaks the turn.
+      let mcpTools: ToolDef[] = [];
+      let mcpNote = "";
+      if (isMcpEnabled()) {
+        try {
+          const infos = await mcpListTools();
+          setMcpToolCache(infos);
+          mcpTools = toMcpToolDefs(infos).slice(0, weak ? 10 : 30);
+          if (mcpTools.length > 0) {
+            mcpNote = `MCP tools (external, REQUIRE approval, prefer built-ins when equivalent):\n${mcpTools.map((t) => `- ${t.function.name} - ${t.function.description.slice(0, 120)}`).join("\n")}`;
+          }
+        } catch {
+          setMcpToolCache([]);
+        }
+      }
       const sys = {
         role: "system",
         content: [
@@ -101,6 +118,7 @@ export function useAgentTurn(d: Deps) {
           d.skills.length
             ? `Project skills (user may invoke /name, or load full text with skill_read when the task matches):\n${d.skills.map((s) => `- ${s.name}${s.description ? ` - ${s.description}` : ""}`).join("\n")}`
             : "Project skills: none yet (markdown files in .vtnexa/skills/)",
+          mcpNote,
         ]
           .filter((s) => s.length > 0)
           .join("\n"),
@@ -176,6 +194,7 @@ export function useAgentTurn(d: Deps) {
           onAudit: (e) => {
             d.logAudit(e);
           },
+          extraTools: mcpTools,
         },
       );
       d.flushStreamFrame();

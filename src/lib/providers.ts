@@ -29,6 +29,7 @@ import {
   browserStart,
   browserType,
 } from "./browser";
+import { isMcpToolName, mcpCallTool, resolveMcpQualified } from "./mcp";
 
 export interface ToolDef {
   type: "function";
@@ -343,6 +344,11 @@ interface ToolCall {
 
 const TOOL_NAMES = new Set(TOOL_DEFS.map((t) => t.function.name));
 
+/** Built-in or MCP (`mcp_*`, validated against the live server at call time). */
+function isKnownToolName(name: string): boolean {
+  return TOOL_NAMES.has(name) || isMcpToolName(name);
+}
+
 // Weak models narrate instead of acting ("please approve the fs_write…",
 // "Next action: shell_run…") and the turn dies as prose. Detect the
 // announcement so the loop can nudge the model into emitting the real call.
@@ -393,7 +399,7 @@ export function narratesBareToolCall(text: string): string | null {
     const m = c.match(BARE_CALL_RE);
     if (!m) continue;
     const name = m[1].toLowerCase();
-    if (!TOOL_NAMES.has(name)) continue;
+    if (!isKnownToolName(name)) continue;
     if (!ARGS_LOOK_RE.test(m[2].trim())) continue;
     return name;
   }
@@ -435,7 +441,7 @@ function toTextToolCall(item: unknown): ToolCall | null {
   const o = item as Record<string, unknown>;
   const fn = (o.function && typeof o.function === "object" ? o.function : o) as Record<string, unknown>;
   const name = typeof fn.name === "string" ? fn.name : "";
-  if (!TOOL_NAMES.has(name)) return null;
+  if (!isKnownToolName(name)) return null;
   let args = "{}";
   if (typeof fn.arguments === "string") {
     try {
@@ -671,16 +677,26 @@ const GATED_TOOLS = new Set([
   "fs_delete",
 ]);
 
+/** MCP tools (`mcp_*`) always require approval — OpenCode `mcp_* ask` default. */
+export function isGatedTool(name: string): boolean {
+  return GATED_TOOLS.has(name) || isMcpToolName(name);
+}
+
 export async function runTool(
   name: string,
   args: Record<string, any>,
   policy?: ToolPolicy,
 ): Promise<string> {
-  const needsApproval = GATED_TOOLS;
   try {
-    if (needsApproval.has(name) && policy?.requestApproval) {
+    if (isGatedTool(name) && policy?.requestApproval) {
       const ok = await policy.requestApproval(name, args);
       if (!ok) return `user rejected ${name} - do not retry without changing the plan`;
+    }
+    if (isMcpToolName(name)) {
+      const parts = resolveMcpQualified(name);
+      if (!parts) return `error: unknown MCP tool ${name} - reload MCP tools first`;
+      const out = await mcpCallTool(parts.server, parts.tool, args ?? {});
+      return out.slice(0, 30000);
     }
     switch (name) {
       case "fs_list": {
@@ -831,12 +847,17 @@ export async function chatWithTools(
       ms: number;
       note?: string;
     }) => void;
+    /** Dynamic tools (MCP). Merged with built-ins for this turn only. Capped by caller. */
+    extraTools?: ToolDef[];
   },
 ): Promise<string> {
   // Multi-backend agent loop (OpenAI-compatible, Anthropic, Gemini) with tool
   // calling. Models without tool support (e.g. some Ollama vision models) get
   // a plain-chat retry instead of a hard failure.
   const MAX_ROUNDS = 8;
+  // Dynamic MCP tools ride along for this turn only. Capped: every extra tool
+  // costs context on every round (OpenCode's main MCP caveat).
+  const allTools: ToolDef[] = [...TOOL_DEFS, ...(opts?.extraTools ?? []).slice(0, 50)];
   // History window: a long chat currently resends EVERYTHING each turn —
   // unbounded payloads that gateways kill mid-flight ("Load failed").
   // Keep sys + last 20, cutting only at user boundaries so tool
@@ -1070,7 +1091,7 @@ export async function chatWithTools(
     const res = await postJSON(url, headers, {
       model: cfg.model,
       messages: toOpenAI(convo),
-      ...(useTools ? { tools: TOOL_DEFS } : {}),
+      ...(useTools ? { tools: allTools } : {}),
       stream: true,
       ...(preferStreamOptions ? { stream_options: { include_usage: true } } : {}),
     });
@@ -1230,7 +1251,7 @@ export async function chatWithTools(
       messages,
       ...(useTools
         ? {
-            tools: TOOL_DEFS.map((t) => ({
+            tools: allTools.map((t) => ({
               name: t.function.name,
               description: t.function.description,
               input_schema: t.function.parameters,
@@ -1373,7 +1394,7 @@ export async function chatWithTools(
         ? {
             tools: [
               {
-                functionDeclarations: TOOL_DEFS.map((t) => ({
+                functionDeclarations: allTools.map((t) => ({
                   name: t.function.name,
                   description: t.function.description,
                   parameters: toGeminiSchema(t.function.parameters),
@@ -1576,7 +1597,7 @@ export async function chatWithTools(
         tool: tc.function.name,
         args: JSON.stringify(args).slice(0, 1000),
         decision:
-          GATED_TOOLS.has(tc.function.name) && opts?.policy?.requestApproval
+          isGatedTool(tc.function.name) && opts?.policy?.requestApproval
             ? rejected
               ? "rejected"
               : "approved"

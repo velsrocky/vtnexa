@@ -1,0 +1,15 @@
+{
+  "$schema": "https://github.com/velsrocky/vtnexa/schemas/vtnexa.json",
+  // MCP servers (OpenCode-pattern port, local stdio only in this build).
+  // Global defaults live in ~/.config/vtnexa/vtnexa.json; this workspace file
+  // wins per server name. MCP is OFF in the UI until opted in (flag
+  // `vtai.mcpEnabled`), and every mcp_* call requires approval.
+  "mcp": {
+    "everything": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
+      "enabled": true,
+      "timeout": 5000
+    }
+  }
+}
