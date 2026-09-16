@@ -40,4 +40,16 @@ describe("bundled skill docs", () => {
       expect(doc).toContain(marker);
     }
   });
+
+  it("stays in sync with the bundled copy (what ships in the .deb)", () => {
+    // Tauri bundles src-tauri/.vtnexa/skills, so a stale copy there ships
+    // stale skills. sync-skills regenerates it; this test forbids drift.
+    const bundled = "src-tauri/.vtnexa/skills";
+    expect(readdirSync(bundled).filter((f: string) => f.endsWith(".md")).sort()).toEqual(
+      EXPECTED.map((n) => `${n}.md`),
+    );
+    for (const name of EXPECTED) {
+      expect(readFileSync(join(bundled, `${name}.md`), "utf8")).toBe(read(name));
+    }
+  });
 });
