@@ -757,13 +757,11 @@ async fn remote_call_tool(
     if arg_str.len() > MCP_MAX_ARGS_BYTES {
         return Err("mcp: args too large (64KB max)".to_string());
     }
-    match retry_remote(server, cfg, |force| {
+    let other = retry_remote(server, cfg, |force| {
         remote_call_tool_once(server, cfg, tool, args.clone(), force)
     })
-    .await
-    {
-        other => other,
-    }
+    .await;
+    other
 }
 
 async fn remote_call_tool_once(

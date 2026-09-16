@@ -126,16 +126,28 @@ fn rpc(method: &str, id: Option<u64>, params: serde_json::Value) -> String {
 /// shutdown -> exit), collect responses. Staged, not pipelined: real servers
 /// may terminate on `exit` before answering queued requests, so each request
 /// goes out only after the previous reply arrives. Always reaps the child.
-fn roundtrip(
-    program: &str,
-    args: &[String],
-    cwd: &std::path::Path,
-    init_frames: &[Vec<u8>],
-    open_frames: &[Vec<u8>],
-    op_frame: &dyn Fn(u64) -> Vec<u8>,
+struct Roundtrip<'a> {
+    program: &'a str,
+    args: &'a [String],
+    cwd: &'a std::path::Path,
+    init_frames: &'a [Vec<u8>],
+    open_frames: &'a [Vec<u8>],
+    op_frame: &'a dyn Fn(u64) -> Vec<u8>,
     op_first_id: u64,
     timeout: Duration,
-) -> Result<Vec<serde_json::Value>, String> {
+}
+
+fn roundtrip(rt: Roundtrip<'_>) -> Result<Vec<serde_json::Value>, String> {
+    let Roundtrip {
+        program,
+        args,
+        cwd,
+        init_frames,
+        open_frames,
+        op_frame,
+        op_first_id,
+        timeout,
+    } = rt;
     let mut child = std::process::Command::new(program)
         .args(args)
         .current_dir(cwd)
@@ -453,16 +465,16 @@ pub(crate) fn run_lsp_op(
     };
     let op_frame = |id: u64| frame(&rpc(method, Some(id), params.clone()));
 
-    let mut responses = roundtrip(
+    let mut responses = roundtrip(Roundtrip {
         program,
         args,
-        project_root,
-        &init,
-        &frames,
-        &op_frame,
-        2,
-        LSP_OP_TIMEOUT,
-    )?;
+        cwd: project_root,
+        init_frames: &init,
+        open_frames: &frames,
+        op_frame: &op_frame,
+        op_first_id: 2,
+        timeout: LSP_OP_TIMEOUT,
+    })?;
     let resp = responses.pop().ok_or_else(|| {
         "lsp: server gave no response (timeout or crash — retry; first runs index the project)"
             .to_string()
