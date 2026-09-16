@@ -764,23 +764,6 @@ pub(crate) async fn bearer_for(
     }
 }
 
-/// Valid access token, refreshing silently when possible.
-/// Ok(None) = OAuth disabled for this server (header/static path applies).
-/// Err = not signed in / expired / keychain broken (message says what to do).
-pub(crate) async fn get_valid_token(
-    name: &str,
-    cfg: &McpServerConfig,
-) -> Result<Option<String>, String> {
-    match bearer_for(name, cfg, false).await? {
-        Bearer::Disabled => Ok(None),
-        Bearer::Token(t) => Ok(Some(t)),
-        Bearer::Unsigned => Err(format!(
-            "mcp: '{}' is not signed in — open the ⛁ panel and Sign in",
-            name
-        )),
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct OAuthStatus {
     pub signed_in: bool,

@@ -132,6 +132,24 @@ export async function lspDiagnostics(path: string): Promise<string> {
   return invoke<string>("lsp_diagnostics", { path });
 }
 
+export interface LspOpArgs {
+  op: string;
+  path: string;
+  line?: number;
+  character?: number;
+  symbol?: string;
+}
+
+export async function lspOp(args: LspOpArgs): Promise<string> {
+  return invoke<string>("lsp_op", {
+    op: args.op,
+    path: args.path,
+    line: args.line ?? null,
+    character: args.character ?? null,
+    symbol: args.symbol ?? null,
+  });
+}
+
 export async function workspaceRoot(): Promise<string> {
   return invoke<string>("workspace_root");
 }

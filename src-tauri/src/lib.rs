@@ -10,6 +10,7 @@ use tauri::{Emitter, Manager};
 
 mod browser;
 pub(crate) mod lsp;
+pub(crate) mod lsp_ops;
 pub(crate) mod mcp;
 pub(crate) mod mcp_oauth;
 
@@ -2135,7 +2136,8 @@ pub fn run() {
             mcp_oauth::mcp_oauth_status,
             mcp_oauth::mcp_oauth_login,
             mcp_oauth::mcp_oauth_logout,
-            lsp::lsp_diagnostics
+            lsp::lsp_diagnostics,
+            lsp_ops::lsp_op
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

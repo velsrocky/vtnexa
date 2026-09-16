@@ -18,6 +18,7 @@ import {
   nexaWrite,
   shellRun,
   lspDiagnostics,
+  lspOp,
   type NexaKind,
 } from "./tauri";
 import {
@@ -69,6 +70,7 @@ export const READONLY_TOOLS: ReadonlySet<string> = new Set([
   "browser_screenshot",
   "browser_scroll",
   "lsp_diagnostics",
+  "lsp",
 ]);
 
 export function isReadOnlyTool(name: string): boolean {
@@ -143,6 +145,25 @@ export const TOOL_DEFS: ToolDef[] = [
         type: "object",
         properties: { path: { type: "string" } },
         required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "lsp",
+      description:
+        "Code intelligence via language servers (typescript-language-server, rust-analyzer). Ops: hover, definition, references (need 1-based line, optional character), documentSymbol (symbols in one file), workspaceSymbol (needs symbol query). Absolute path inside the workspace. Read-only, auto-approved. Needs no project setup beyond the server binary; first runs index the project and can take ~1min.",
+      parameters: {
+        type: "object",
+        properties: {
+          op: { type: "string" },
+          path: { type: "string" },
+          line: { type: "number" },
+          character: { type: "number" },
+          symbol: { type: "string" },
+        },
+        required: ["op", "path"],
       },
     },
   },
@@ -820,6 +841,22 @@ export async function runTool(
         if (!p.startsWith("/"))
           return `error: lsp_diagnostics path must be absolute inside the workspace (got ${JSON.stringify(p)}). Use fs_list/fs_glob to resolve the full path first.`;
         return (await lspDiagnostics(p)).slice(0, 10000);
+      }
+      case "lsp": {
+        const p = String(args.path ?? "");
+        const op = String(args.op ?? "");
+        if (!p || !op) return "error: lsp needs op + path - e.g. {op: \"hover\", path: \"/ws/src/a.ts\", line: 12}";
+        if (!p.startsWith("/"))
+          return `error: lsp path must be absolute inside the workspace (got ${JSON.stringify(p)}). Use fs_list/fs_glob to resolve the full path first.`;
+        return (
+          await lspOp({
+            op,
+            path: p,
+            line: typeof args.line === "number" ? args.line : undefined,
+            character: typeof args.character === "number" ? args.character : undefined,
+            symbol: typeof args.symbol === "string" ? args.symbol : undefined,
+          })
+        ).slice(0, 6000);
       }
       case "fs_write": {
         const path = String(args.path ?? "");

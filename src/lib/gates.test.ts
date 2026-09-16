@@ -180,3 +180,25 @@ describe("undo capture for agent rename/delete", () => {
     expect(captured).toEqual([]);
   });
 });
+
+describe("lsp tool", () => {
+  it("passes ops through, validates paths, stays read-only in plan", async () => {
+    const seen: any[] = [];
+    setInvokeImpl(async (cmd, args?: any) => {
+      expect(cmd).toBe("lsp_op");
+      seen.push(args);
+      return "mock-hover";
+    });
+    let approvals = 0;
+    const pol = {
+      requestApproval: async () => { approvals++; return true; },
+      planMode: true,
+    };
+    const out = await runTool("lsp", { op: "hover", path: "/w/a.ts", line: 3 }, pol);
+    expect(out).toBe("mock-hover");
+    expect(approvals).toBe(0);
+    expect(seen[0]).toMatchObject({ op: "hover", path: "/w/a.ts", line: 3 });
+    await expect(runTool("lsp", { op: "hover", path: "rel/a.ts" }, pol)).resolves.toMatch(/^error:/);
+    await expect(runTool("lsp", { path: "/w/a.ts" }, pol)).resolves.toMatch(/^error:/);
+  });
+});

@@ -34,7 +34,8 @@ Most coding agents either (a) ask for permission on every keystroke or
 
 - **Commander** — tool-calling agent: list/read/search files, propose diffs,
   run shell commands, typecheck edited files (`lsp_diagnostics`: tsc, cargo
-  check, py_compile — read-only, auto-approved), drive a real Chromium
+  check, py_compile) and query language servers (`lsp`: hover, definition,
+  references, symbols — read-only, auto-approved), drive a real Chromium
   browser (navigate, click, type, screenshot with vision), and commit to
   git — all behind the review gate. **Plan mode** (◔ toggle or per-turn)
   restricts it to read-only tools for investigation-first flows; routines
