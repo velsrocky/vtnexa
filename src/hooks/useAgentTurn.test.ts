@@ -375,3 +375,63 @@ describe("useAgentTurn plan mode", () => {
     expect(names).toContain("shell_run");
   });
 });
+
+describe("useAgentTurn stall escalation", () => {
+  const Q = "Should I proceed with the setup?";
+  function stubScript(replies: (string | { tool: string; args: unknown })[]) {
+    const bodies: any[] = [];
+    let i = 0;
+    stubFetch((_url: string, init: any) => {
+      try {
+        bodies.push(JSON.parse(init.body));
+      } catch {
+        /* ignore */
+      }
+      const next = replies[Math.min(i++, replies.length - 1)];
+      if (typeof next === "string") return openAIText(next);
+      return json({
+        choices: [
+          {
+            message: {
+              content: "",
+              tool_calls: [
+                { id: "c1", type: "function", function: { name: next.tool, arguments: JSON.stringify(next.args) } },
+              ],
+            },
+          },
+        ],
+        usage: { prompt_tokens: 20, completion_tokens: 10 },
+      });
+    });
+    stubRafSync();
+    return bodies;
+  }
+  function stubFs() {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [{ name: "a", path: "/w/a", is_dir: false }];
+      throw new Error(`unexpected ${cmd}`);
+    });
+  }
+  const sysOf = (bodies: any[]) => bodies[0].messages[0].content as string;
+
+  it("warns after question-only turns, resets once the model acts", async () => {
+    stubFs();
+    const h = setup();
+    const run = (p: string) => act(async () => { await h.result.current.runAgentTurn(p); });
+
+    let bodies = stubScript([Q, Q]);
+    await run("set it up");
+    expect(sysOf(bodies)).not.toContain("Stall warning");
+    expect(sysOf(bodies)).toContain("may be reused directly");
+
+    bodies = stubScript([Q, Q]);
+    await run("set it up");
+    expect(sysOf(bodies)).toContain("Stall warning: the last 1 turn");
+
+    bodies = stubScript([{ tool: "fs_list", args: { path: "/w" } }, "listed it"]);
+    await run("list again");
+    bodies = stubScript([Q, Q]);
+    await run("and again");
+    expect(sysOf(bodies)).not.toContain("Stall warning");
+  });
+});

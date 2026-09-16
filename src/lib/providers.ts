@@ -526,6 +526,23 @@ export function deniesCapability(text: string): boolean {
   return false;
 }
 
+/**
+ * Detects authorization-seeking / meta-procedural questions ("should I
+ * proceed?", "would you like me to ...?", "how would you like to proceed?").
+ * Deliberately narrow: genuine ambiguity questions ("which directory?",
+ * "what should the message say?") never match, so the ambiguity rule keeps
+ * working. Only applied when NO tool has run yet this turn — questions
+ * after acting are legitimate follow-ups and pass through untouched.
+ */
+const AUTH_QUESTION_RE =
+  /should i (proceed|go ahead|start|continue|run|begin)|would you like me to|do you want me to|how would you like (me )?to proceed|let me know (how|if|whether|what)|shall i\b|confirm (that|whether|if).{0,60}(proceed|continue|go ahead|start)|want me to (proceed|continue|go ahead|run|start)|how should (i|we) proceed/i;
+
+export function asksAuthQuestion(text: string): boolean {
+  if (!text || text.length > 4000) return false;
+  if (!text.includes("?")) return false;
+  return AUTH_QUESTION_RE.test(text);
+}
+
 /** Returns the narrated tool name for bare `Tool args` lines, else null. */
 export function narratesBareToolCall(text: string): string | null {
   if (!text) return null;
@@ -1087,7 +1104,7 @@ export async function chatWithTools(
     onUsage?: (u: { input: number; output: number; model: string; cost?: number }) => void;
     onToolActivity?: (a: { name: string; ms: number; ok: boolean }) => void;
     /** Fires on every repair nudge (narration or denial) - powers auto-banding. */
-    onRepair?: (r: { kind: "narration" | "denial" }) => void;
+    onRepair?: (r: { kind: "narration" | "denial" | "question" }) => void;
     onAudit?: (e: {
       tool: string;
       args: string;
@@ -1204,6 +1221,9 @@ export async function chatWithTools(
   // Loop guard: weak models re-issue the same calls forever. 3x identical = stuck.
   // Shared bound for repair nudges (narration + capability denial).
   let repairNudges = 0;
+  // Own bound for question redirects: one per turn is enough to break the
+  // ask-instead-of-act loop; after acting, questions are fine unchecked.
+  let questionNudges = 0;
   const seen = new Map<string, number>();
   const usedTools: string[] = [];
   let loopNote = "";
@@ -1824,6 +1844,25 @@ export async function chatWithTools(
           });
           continue;
         }
+      }
+      // Question repair: authorization-seeking prose ("should I proceed?",
+      // "would you like me to ...?") with zero tools run so far this turn.
+      // One redirect per turn (own budget, independent of narration/denial):
+      // it either breaks the ask-loop or the turn ends visibly stalled.
+      if (useTools && questionNudges < 1 && usedTools.length === 0 && asksAuthQuestion(content)) {
+        questionNudges++;
+        opts?.onRepair?.({ kind: "question" });
+        onEvent(`\n[note: asked for direction instead of acting - redirecting to the tools]\n`);
+        convo.push({ role: "assistant", content });
+        convo.push({
+          role: "user",
+          content:
+            `You asked for direction instead of acting, and no tool has run yet this turn. ` +
+            `Authorization is already handled by approval popups - you never need to ask for it in text. ` +
+            `Emit the real tool call NOW via tool_calls, or write the final answer if there is nothing to do. ` +
+            `Do not ask another question.`,
+        });
+        continue;
       }
       return content;
     }

@@ -1,7 +1,8 @@
+import { useRef } from "react";
 import type { MutableRefObject } from "react";
 import type { AuditInput, CenterTab, ChatMsg, ProviderConfig, SkillInfo, UndoEntry, Workspace } from "../types";
 import { fsRead, skillRead, type NexaKind } from "../lib/tauri";
-import { chatWithTools, type ToolDef } from "../lib/providers";
+import { chatWithTools, asksAuthQuestion, type ToolDef } from "../lib/providers";
 import { isMcpEnabled, mcpListTools, setMcpToolCache, toMcpToolDefs } from "../lib/mcp";
 import { recordTurnRepairs, resolvePromptTier } from "../lib/modelBands";
 import { uid } from "../lib/utils";
@@ -47,6 +48,11 @@ interface Deps {
 }
 
 export function useAgentTurn(d: Deps) {
+  // Cross-turn stall: consecutive turns that ended asking for direction with
+  // zero tools run. Per window, transient (resets on reload) - the visible
+  // chat already carries the evidence; this just counts it.
+  const stallRef = useRef({ questionTurns: 0 });
+
   async function expandSkill(text: string): Promise<string> {
     const m = text.match(/^\/([A-Za-z0-9_-]+)\s*([\s\S]*)$/);
     if (!m) return text;
@@ -80,6 +86,8 @@ export function useAgentTurn(d: Deps) {
     d.stopTurnIdRef.current = target.id;
     let acc = "";
     let turnRepairs = 0;
+    let toolCallsThisTurn = 0;
+    const stalledTurns = stallRef.current.questionTurns;
     try {
       const history = [...target.messages, userMsg].map((m) => ({ role: m.role, content: m.content }));
       // Prompt tier: observed repair behavior overrides the name heuristic
@@ -112,6 +120,10 @@ export function useAgentTurn(d: Deps) {
             : `Answer contract: 1) restate intent in one line, 2) plan (numbered, short), 3) act with tools (emit real calls - never narrate them in prose), 4) verify (re-read edited files; run lsp_diagnostics on edited ts/rs/py files, or lint/tests when relevant), 5) final summary: files changed, commands run, what remains. Grounding: never assert a file exists, is staged, was saved, or is (un)available, and never claim tool calls or results beyond THIS turn's history - unsure? Call fs_list/fs_read first. You have shell/file tools: never claim to be text-only, and never present a command as its output - only shell_run results count as output.`,
           `Ambiguity rule: if the request is ambiguous OR the action is destructive/irreversible, ask 1-2 targeted questions BEFORE acting. Never guess paths, filenames, or commit messages.`,
           `Lost context (asked to proceed/continue but this chat is empty)? sessions_list finds the prior thread, session_read loads its messages - re-orient with tools instead of asking the user to re-explain. Never invent prior work.`,
+          `Prior turns in THIS chat are evidence: toolchain versions, paths and decisions established earlier (or in Memory below) may be reused directly - do not re-ask the user for them, and do not re-run discovery for them unless a tool result contradicts them. Re-read files before editing; that rule is unchanged. When you verify durable setup facts (toolchain, layout), record them with nexa_write to memory in one line so future turns keep them.`,
+          stalledTurns > 0
+            ? `Stall warning: the last ${stalledTurns >= 3 ? "3+" : stalledTurns} turn(s) ended with you asking for direction instead of acting. The user has ALREADY authorized this work - approvals happen via popup, never in text. This turn, your first reply must contain a real tool call or the final answer. No questions.`
+            : "",
           `Read-before-edit: always fs_read a file before fs_write/fs_rename on it. Never re-send an identical staged write.`,
           plan
             ? `PLAN MODE (read-only turn): investigate with read-only tools only (fs_list/read/search/glob, skill_read, git_status/diff/log, nexa_read, browser_snapshot/screenshot, lsp_diagnostics, lsp hover/definition/references/symbols). All writes, shell, browser actions, commits and MCP tools are DISABLED and error if called - do not attempt them, do not narrate them. End with a short numbered plan (files to touch, commands to run, risks). Ask the user to switch to Build to execute.`
@@ -195,6 +207,7 @@ export function useAgentTurn(d: Deps) {
             }));
           },
           onToolActivity: (a) => {
+            toolCallsThisTurn++;
             d.updateWs((w) => ({
               ...w,
               usage: { ...w.usage, tools: w.usage.tools + 1, toolMs: w.usage.toolMs + a.ms },
@@ -211,9 +224,18 @@ export function useAgentTurn(d: Deps) {
       );
       d.flushStreamFrame();
       d.rememberProvider(usedCfg);
+      const finalText = text || acc || "(empty)";
+      // Stall accounting: a turn that ran zero tools and ended asking for
+      // direction escalates the next turn's warning; anything else resets.
+      // Aborts and provider errors (catch below) never count.
+      if (toolCallsThisTurn === 0 && asksAuthQuestion(finalText)) {
+        stallRef.current.questionTurns = Math.min(stallRef.current.questionTurns + 1, 3);
+      } else {
+        stallRef.current.questionTurns = 0;
+      }
       d.updateWs((w) => ({
         ...w,
-        messages: w.messages.filter((m) => m.id !== "stream").concat([{ id: uid(), role: "assistant", content: text || acc || "(empty)" }]),
+        messages: w.messages.filter((m) => m.id !== "stream").concat([{ id: uid(), role: "assistant", content: finalText }]),
       }));
     } catch (e) {
       d.flushStreamFrame();

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { announcesToolAction, chatWithTools, deniesCapability, estimateCost, extractEmbeddedToolCalls, listModels, narratesBareToolCall, parseTextToolCalls, runTool } from "./providers";
+import { announcesToolAction, asksAuthQuestion, chatWithTools, deniesCapability, estimateCost, extractEmbeddedToolCalls, listModels, narratesBareToolCall, parseTextToolCalls, runTool } from "./providers";
 
 // ---- Backend seam: Tauri invoke is stubbed per test ----
 vi.mock("@tauri-apps/api/core", () => ({
@@ -607,5 +607,96 @@ describe("chatWithTools text-call fallback", () => {
     // Second request carries the tool result.
     const body = JSON.parse(calls[1].init.body);
     expect(body.messages.some((m: any) => m.role === "tool")).toBe(true);
+  });
+});
+
+describe("asksAuthQuestion", () => {
+  it.each([
+    "Should I proceed with the setup?",
+    "Would you like me to run the commands?",
+    "Do you want me to continue?",
+    "How would you like to proceed?",
+    "Let me know how to proceed?",
+    "Shall I start the install?",
+    "Please confirm that I should proceed?",
+    "Want me to go ahead?",
+    "How should we proceed here?",
+  ])("flags authorization-seeking: %s", (text) => {
+    expect(asksAuthQuestion(text)).toBe(true);
+  });
+  it.each([
+    "Which directory should I use?",
+    "What should the commit message say?",
+    "The file is ready for review.",
+    "I ran the tests and they pass - 3 failures remain.",
+    "Should the backup include node_modules?",
+    "",
+  ])("leaves genuine questions and prose alone: %s", (text) => {
+    expect(asksAuthQuestion(text)).toBe(false);
+  });
+});
+
+describe("chatWithTools question repair", () => {
+  it("redirects an asking model into a real call", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [{ name: "a", path: "/w/a", is_dir: false }];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAIText("Should I proceed with the setup? Would you like me to run the commands?");
+      }
+      if (prev.length === 2) {
+        const body = JSON.parse(_init.body);
+        const last = body.messages[body.messages.length - 1];
+        expect(last.role).toBe("user");
+        expect(last.content).toMatch(/instead of acting/);
+        return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      }
+      return openAIText("listed.");
+    });
+    const events: string[] = [];
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "set it up" }],
+      (d) => events.push(d),
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(res).toBe("listed.");
+    expect(events.join("")).toMatch(/asked for direction instead of acting/);
+    expect(repairs).toEqual(["question"]);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("redirects only once, then ends the turn visibly stalled", async () => {
+    stubFetch(() => openAIText("Should I proceed? Just say the word."));
+    setInvokeImpl(async () => {
+      throw new Error("must not run tools");
+    });
+    const events: string[] = [];
+    const res = await chatWithTools(CFG, [{ role: "user", content: "go" }], (d) => events.push(d));
+    expect(res).toBe("Should I proceed? Just say the word.");
+    expect(events.join("").match(/asked for direction instead of acting/g)).toHaveLength(1);
+  });
+
+  it("leaves post-action questions alone", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      }
+      return openAIText("Done. Should I proceed with the delete?");
+    });
+    const events: string[] = [];
+    const res = await chatWithTools(CFG, [{ role: "user", content: "list then ask" }], (d) =>
+      events.push(d),
+    );
+    expect(res).toBe("Done. Should I proceed with the delete?");
+    expect(events.join("")).not.toMatch(/asked for direction/);
+    expect(calls).toHaveLength(2);
   });
 });
