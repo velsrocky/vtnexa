@@ -588,6 +588,21 @@ fn flatten_tool_result(v: &serde_json::Value) -> String {
 
 // ---- Tauri commands ----
 
+/// Gate shared by list/call paths: unknown and disabled servers never spawn.
+/// Remote is reported (not spawned) — transport lands separately.
+pub(crate) fn check_server_usable<'a>(
+    merged: &'a HashMap<String, McpServerConfig>,
+    server: &str,
+) -> Result<&'a McpServerConfig, String> {
+    let cfg = merged
+        .get(server)
+        .ok_or_else(|| format!("mcp: unknown server '{}'", server))?;
+    if !cfg.enabled {
+        return Err(format!("mcp: server '{}' is disabled", server));
+    }
+    Ok(cfg)
+}
+
 #[tauri::command]
 pub(crate) fn mcp_list_servers(
     window: tauri::WebviewWindow,
@@ -652,12 +667,7 @@ pub(crate) fn mcp_call_tool(
     }
     let root = crate::root_snapshot(&state, window.label());
     let merged = load_merged_mcp_config(&root)?;
-    let cfg = merged
-        .get(&server)
-        .ok_or_else(|| format!("mcp: unknown server '{}'", server))?;
-    if !cfg.enabled {
-        return Err(format!("mcp: server '{}' is disabled", server));
-    }
+    let cfg = check_server_usable(&merged, &server)?;
     call_tool_for_server(&server, cfg, &root, &tool, args)
 }
 
@@ -841,6 +851,31 @@ mod tests {
         assert!(err.contains("no command"), "got: {}", err);
     }
 
+    fn usable_map() -> HashMap<String, McpServerConfig> {
+        let mut m = HashMap::new();
+        m.insert("on".to_string(), McpServerConfig::default());
+        m.insert(
+            "off".to_string(),
+            McpServerConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn gate_blocks_unknown_and_disabled_before_spawn() {
+        let m = usable_map();
+        assert!(check_server_usable(&m, "on").is_ok());
+        assert!(check_server_usable(&m, "off")
+            .unwrap_err()
+            .contains("disabled"));
+        assert!(check_server_usable(&m, "nope")
+            .unwrap_err()
+            .contains("unknown"));
+    }
+
     #[test]
     fn enabled_patch_preserves_other_keys() {
         let out = apply_enabled_patch(
@@ -866,4 +901,5 @@ mod tests {
     fn enabled_patch_rejects_non_objects() {
         assert!(apply_enabled_patch(r#"{"mcp": []}"#, "s", true).is_err());
         assert!(apply_enabled_patch(r#"{"mcp": {"s": 1}}"#, "s", true).is_err());
-    }}
+    }
+}
