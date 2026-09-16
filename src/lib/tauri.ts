@@ -128,6 +128,10 @@ export async function shellRun(cwd: string, cmd: string): Promise<ShellResult> {
   return invoke<ShellResult>("shell_run", { cwd, cmd });
 }
 
+export async function lspDiagnostics(path: string): Promise<string> {
+  return invoke<string>("lsp_diagnostics", { path });
+}
+
 export async function workspaceRoot(): Promise<string> {
   return invoke<string>("workspace_root");
 }

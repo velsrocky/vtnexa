@@ -17,6 +17,7 @@ import {
   nexaRead,
   nexaWrite,
   shellRun,
+  lspDiagnostics,
   type NexaKind,
 } from "./tauri";
 import {
@@ -94,6 +95,19 @@ export const TOOL_DEFS: ToolDef[] = [
         type: "object",
         properties: { pattern: { type: "string" }, path: { type: "string" } },
         required: ["pattern"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "lsp_diagnostics",
+      description:
+        "Typecheck/lint one file and return diagnostics filtered to it (tsc for ts/js, cargo check for rs, py_compile for py). Absolute path inside the workspace. Read-only, auto-approved. Use after edits to verify. Project-level checkers can take up to ~2min on first run.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
       },
     },
   },
@@ -740,6 +754,13 @@ export async function runTool(
           args.path ? String(args.path) : undefined,
         );
         return JSON.stringify(res).slice(0, 30000);
+      }
+      case "lsp_diagnostics": {
+        const p = String(args.path ?? "");
+        if (!p) return "error: lsp_diagnostics path is required - e.g. {path: \"/ws/src/App.tsx\"}";
+        if (!p.startsWith("/"))
+          return `error: lsp_diagnostics path must be absolute inside the workspace (got ${JSON.stringify(p)}). Use fs_list/fs_glob to resolve the full path first.`;
+        return (await lspDiagnostics(p)).slice(0, 10000);
       }
       case "fs_write": {
         const path = String(args.path ?? "");

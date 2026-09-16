@@ -33,8 +33,10 @@ Most coding agents either (a) ask for permission on every keystroke or
 ## Features
 
 - **Commander** — tool-calling agent: list/read/search files, propose diffs,
-  run shell commands, drive a real Chromium browser (navigate, click, type,
-  screenshot with vision), and commit to git — all behind the review gate.
+  run shell commands, typecheck edited files (`lsp_diagnostics`: tsc, cargo
+  check, py_compile — read-only, auto-approved), drive a real Chromium
+  browser (navigate, click, type, screenshot with vision), and commit to
+  git — all behind the review gate.
 - **Editor** — Monaco with tabs, live markdown/HTML preview, and a Diff view
   that is also the approval surface.
 - **Terminal** — a genuine interactive PTY per window (xterm.js): run dev

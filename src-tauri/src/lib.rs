@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 mod browser;
+pub(crate) mod lsp;
 pub(crate) mod mcp;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2130,6 +2131,7 @@ pub fn run() {
             mcp::mcp_call_tool,
             mcp::mcp_config_get,
             mcp::mcp_set_server_enabled,
+            lsp::lsp_diagnostics
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
