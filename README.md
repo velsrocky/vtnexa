@@ -56,9 +56,9 @@ Most coding agents either (a) ask for permission on every keystroke or
   the gate.
 - **Nexa Pad / Plan / Memory** — shared notes and durable cross-session
   context the agent reads and writes (`<workspace>/.nexa/`).
-- **Skills** — 8 ready-made slash commands (`/commit`, `/review`, `/explain`,
-  `/map`, `/fix`, `/refactor`, `/test`, `/docs`); add your own as markdown
-  files. Project `AGENTS.md`/`CLAUDE.md` is loaded every turn.
+- **Skills** — 9 ready-made slash commands (`/commit`, `/review`, `/explain`,
+  `/map`, `/fix`, `/refactor`, `/test`, `/docs`, `/scaffold`); add your own
+  as markdown files. Project `AGENTS.md`/`CLAUDE.md` is loaded every turn.
 - **Routines** — scheduled agent runs with a 15-minute minimum interval.
 - **Browser Use** — persistent Chromium profile (signed in as you) the agent
   can operate with your approval; screenshots come back as vision input.
