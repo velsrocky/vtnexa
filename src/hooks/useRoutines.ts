@@ -17,7 +17,7 @@ export const ROUTINE_PRESETS = [
 
 export function useRoutines(opts: {
   busy: boolean;
-  runAgentTurn: (prompt: string) => void;
+  runAgentTurn: (prompt: string, turnOpts?: { plan?: boolean }) => void;
 }) {
   const { busy, runAgentTurn } = opts;
   const [routines, setRoutines] = useState<Routine[]>([]);
@@ -115,6 +115,8 @@ export function useRoutines(opts: {
     );
     runAgentTurn(
       `🔁 Routine "${r.name}" scheduled run:\n${r.prompt}\n\n[Be concise. Record durable outcomes/decisions in Memory via nexa_write.]`,
+      // Scheduled jobs always run Build: a read-only routine could never act.
+      { plan: false },
     );
   }
 

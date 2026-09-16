@@ -1,6 +1,25 @@
-import type { AuditInput, Workspace } from "../types";
-import { fsRead, fsWrite, gitCommit } from "../lib/tauri";
+import { useState } from "react";
+import type { AuditInput, UndoEntry, Workspace } from "../types";
+import { undoEntryLabel } from "../types";
+import { fsDelete, fsRead, fsRename, fsWrite, gitCommit } from "../lib/tauri";
 import { baseName } from "../lib/utils";
+
+// Undo boundaries (v1): approved Diff-gate writes + file renames/deletes.
+// Shell/terminal side effects, directory deletes and binaries are NOT
+// captured - undo says so when there is nothing (or nothing applicable).
+const MAX_UNDO_ENTRIES = 20;
+const MAX_UNDO_BYTES = 256 * 1024;
+
+function entrySize(e: UndoEntry): number {
+  switch (e.kind) {
+    case "write":
+      return e.before.length + e.after.length;
+    case "delete":
+      return e.content.length;
+    case "rename":
+      return 0;
+  }
+}
 
 // Diff review gate: stage user edits as a pending diff (never direct
 // writes), approve with drift guard, optionally commit. Composes on the
@@ -23,9 +42,27 @@ export function useDiffGate(opts: {
   commitMsg: string;
   setCommitMsg: (v: string) => void;
   logAudit: (e: AuditInput) => void;
+  retargetTabs: (oldP: string, newP: string) => void;
+  closeTab: (path: string) => void;
 }) {
   const { ws, updateWs, openPath, editorText, originalText } = opts;
   const { setOriginals, setBuffers, setOriginalText, setEditorText } = opts;
+  const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
+  const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
+
+  function note(text: string) {
+    updateWs((w) => ({ ...w, shellOut: w.shellOut + text }));
+  }
+
+  /** External capture (agent rename/delete via runTool, tree ops). */
+  function pushUndo(e: UndoEntry) {
+    if (entrySize(e) > MAX_UNDO_BYTES) {
+      note(`\n↩ undo skipped ${undoEntryLabel(e)} (over 256KB - too large to snapshot)`);
+      return;
+    }
+    setUndoStack((prev) => [...prev.slice(-(MAX_UNDO_ENTRIES - 1)), e]);
+    setRedoStack([]);
+  }
   async function saveFile() {
     if (!openPath) return;
     if (ws.pendingDiff && ws.pendingDiff.path !== openPath) {
@@ -53,25 +90,33 @@ export function useDiffGate(opts: {
   // Drift guard: the staged diff carries the on-disk original from staging
   // time. If the file changed since (another window applied something, an
   // external editor touched it), Approve would silently clobber - ask first.
-  async function driftOk(d: { path: string; original: string }): Promise<boolean> {
+  // Returns the pre-apply state too: undo restores what was REALLY there,
+  // not the staging-time copy.
+  async function driftRead(d: {
+    path: string;
+    original: string;
+  }): Promise<{ proceed: boolean; current: string; existed: boolean }> {
     let current = "";
+    let existed = true;
     try {
       current = await fsRead(d.path);
     } catch (e) {
       const msg = String(e);
       // File gone: safe to write (it's a new file). Permission/locked: warn.
       if (msg.includes("No such file or directory") || msg.includes("not exist")) {
-        current = ""; // gone or new file
-      } else {
-        return window.confirm(
-          `${baseName(d.path)} could not be read (${msg}) — likely locked or permission-denied. Apply anyway and overwrite?`,
-        );
+        return { proceed: true, current: "", existed: false };
       }
+      const ok = window.confirm(
+        `${baseName(d.path)} could not be read (${msg}) — likely locked or permission-denied. Apply anyway and overwrite?`,
+      );
+      // Blind overwrite: best-effort undo seed (may be empty).
+      return { proceed: ok, current: d.original, existed: d.original !== "" || existed };
     }
-    if (current === d.original) return true;
-    return window.confirm(
+    if (current === d.original) return { proceed: true, current, existed: true };
+    const ok = window.confirm(
       `${baseName(d.path)} changed on disk since this diff was staged (another window, the agent, or an external editor).\n\nApply anyway and overwrite those changes?`,
     );
+    return { proceed: ok, current, existed: true };
   }
 
   // Verify pass: re-read after writing. A mismatch means the write didn't
@@ -103,9 +148,11 @@ export function useDiffGate(opts: {
   async function approveDiff() {
     const d = ws.pendingDiff;
     if (!d) return;
-    if (!(await driftOk(d))) return;
+    const drift = await driftRead(d);
+    if (!drift.proceed) return;
     await fsWrite(d.path, d.content);
     markApplied(d.path, d.content);
+    pushUndo({ kind: "write", path: d.path, before: drift.current, after: d.content, existedBefore: drift.existed });
     const verified = await verifyApplied(d.path, d.content);
     updateWs((w) => ({
       ...w,
@@ -123,10 +170,12 @@ export function useDiffGate(opts: {
   async function approveAndCommit() {
     const d = ws.pendingDiff;
     if (!d) return;
-    if (!(await driftOk(d))) return;
-    
+    const drift = await driftRead(d);
+    if (!drift.proceed) return;
+
     await fsWrite(d.path, d.content);
     markApplied(d.path, d.content);
+    pushUndo({ kind: "write", path: d.path, before: drift.current, after: d.content, existedBefore: drift.existed });
     const verified = await verifyApplied(d.path, d.content);
     if (!verified) noteVerifyFailure(d.path);
     const msg = opts.commitMsg.trim() || `Update ${d.path.split("/").pop()}`;
@@ -166,6 +215,124 @@ export function useDiffGate(opts: {
     opts.refreshGit();
     opts.refreshSkills();
   }
-  return { saveFile, approveDiff, approveAndCommit };
+  function auditUndoRedo(tool: "undo" | "redo", label: string, ok: boolean, ms: number, extraNote?: string) {
+    opts.logAudit({
+      tool,
+      args: JSON.stringify({ label }).slice(0, 1000),
+      decision: "approved",
+      ok,
+      ms,
+      ...(extraNote ? { note: extraNote } : {}),
+    });
+  }
+
+  // Apply one entry forward (redo) or backward (undo). Buffer state follows
+  // the disk so open tabs never show stale content.
+  async function applyEntry(e: UndoEntry, dir: "undo" | "redo"): Promise<void> {
+    switch (e.kind) {
+      case "write": {
+        const content = dir === "undo" ? e.before : e.after;
+        if (dir === "undo" && !e.existedBefore) {
+          await fsDelete(e.path, false);
+          setOriginals((o) => {
+            const next = { ...o };
+            delete next[e.path];
+            return next;
+          });
+          setBuffers((b) => {
+            const next = { ...b };
+            delete next[e.path];
+            return next;
+          });
+          if (e.path === openPath) {
+            setOriginalText("");
+            setEditorText("");
+          }
+          opts.closeTab(e.path);
+        } else {
+          await fsWrite(e.path, content);
+          markApplied(e.path, content);
+        }
+        break;
+      }
+      case "rename": {
+        const from = dir === "undo" ? e.newPath : e.oldPath;
+        const to = dir === "undo" ? e.oldPath : e.newPath;
+        await fsRename(from, to);
+        opts.retargetTabs(from, to);
+        break;
+      }
+      case "delete": {
+        if (dir === "undo") {
+          await fsWrite(e.path, e.content);
+          markApplied(e.path, e.content);
+        } else {
+          await fsDelete(e.path, false);
+          if (e.path === openPath) {
+            setOriginalText("");
+            setEditorText("");
+          }
+          opts.closeTab(e.path);
+        }
+        break;
+      }
+    }
+  }
+
+  async function undo() {
+    const e = undoStack[undoStack.length - 1];
+    if (!e) {
+      note("\nnothing to undo (writes, renames and file deletes are captured; shell/terminal/directory ops are not)");
+      return;
+    }
+    const label = undoEntryLabel(e);
+    const t0 = Date.now();
+    try {
+      await applyEntry(e, "undo");
+      setUndoStack((prev) => prev.slice(0, -1));
+      setRedoStack((prev) => [...prev.slice(-(MAX_UNDO_ENTRIES - 1)), e]);
+      note(`\n↩ undid ${label}`);
+      auditUndoRedo("undo", label, true, Date.now() - t0);
+    } catch (err) {
+      note(`\n↩ undo failed for ${label}: ${err}`);
+      auditUndoRedo("undo", label, false, Date.now() - t0, String(err).slice(0, 200));
+    }
+    opts.refreshFiles(opts.cwd);
+    opts.refreshGit();
+  }
+
+  async function redo() {
+    const e = redoStack[redoStack.length - 1];
+    if (!e) {
+      note("\nnothing to redo");
+      return;
+    }
+    const label = undoEntryLabel(e);
+    const t0 = Date.now();
+    try {
+      await applyEntry(e, "redo");
+      setRedoStack((prev) => prev.slice(0, -1));
+      setUndoStack((prev) => [...prev.slice(-(MAX_UNDO_ENTRIES - 1)), e]);
+      note(`\n↪ redid ${label}`);
+      auditUndoRedo("redo", label, true, Date.now() - t0);
+    } catch (err) {
+      note(`\n↪ redo failed for ${label}: ${err}`);
+      auditUndoRedo("redo", label, false, Date.now() - t0, String(err).slice(0, 200));
+    }
+    opts.refreshFiles(opts.cwd);
+    opts.refreshGit();
+  }
+
+  return {
+    saveFile,
+    approveDiff,
+    approveAndCommit,
+    pushUndo,
+    undo,
+    redo,
+    canUndo: undoStack.length > 0,
+    canRedo: redoStack.length > 0,
+    undoLabel: undoStack.length ? undoEntryLabel(undoStack[undoStack.length - 1]) : "",
+  };
 }
 

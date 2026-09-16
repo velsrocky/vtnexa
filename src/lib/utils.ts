@@ -22,6 +22,7 @@ export function newWorkspace(id: string, cwd: string, provider?: ProviderConfig)
     sideTab: "chat",
     chatDraft: "",
     previewUrl: "",
+    planMode: false,
   };
 }
 

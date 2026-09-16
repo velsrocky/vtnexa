@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { runTool } from "./providers";
+import { runTool, toolsForMode, type ToolDef } from "./providers";
 import { setMcpToolCache } from "./mcp";
 
 // Cross-layer gate proof: policy decision -> runTool -> backend invoke.
@@ -94,5 +94,89 @@ describe("read-only tools need no approval", () => {
     expect(out).not.toMatch(/^user rejected/);
     expect(approvals).toBe(0);
     expect(calls.length).toBeGreaterThan(0);
+  });
+});
+
+describe("plan mode", () => {
+  const PLAN = { requestApproval: async () => true, planMode: true };
+  it.each([
+    ["shell_run", { cwd: "/w", cmd: "ls" }],
+    ["fs_write", { path: "/w/a", content: "x" }],
+    ["fs_rename", { old_path: "/a", new_path: "/b" }],
+    ["fs_delete", { path: "/a" }],
+    ["git_commit", { cwd: "/w", message: "m", files: [] }],
+    ["browser_navigate", { url: "https://x.test" }],
+    ["nexa_write", { kind: "pad", content: "x" }],
+    ["mcp_demo_add", { a: 1 }],
+    ["teleport", {}],
+  ])("%s is refused before any popup or invoke", async (name, args) => {
+    const out = await runTool(name, args, PLAN);
+    expect(out).toMatch(/^error: plan mode/);
+    expect(calls).toEqual([]);
+  });
+  it("read-only tools still run with zero prompts", async () => {
+    let approvals = 0;
+    setInvokeImpl(async () => "hello");
+    const out = await runTool("fs_read", { path: "/w/a" }, {
+      requestApproval: async () => { approvals++; return true; },
+      planMode: true,
+    });
+    expect(out).toBe("hello");
+    expect(approvals).toBe(0);
+  });
+});
+
+describe("toolsForMode", () => {
+  const base: ToolDef[] = ["fs_read", "shell_run", "fs_write"].map((name) => ({
+    type: "function",
+    function: { name, description: name, parameters: {} },
+  }));
+  const extra: ToolDef[] = [{ type: "function", function: { name: "mcp_x_y", description: "x", parameters: {} } }];
+  it("build keeps everything plus capped extras", () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      type: "function" as const,
+      function: { name: `mcp_s_t${i}`, description: "x", parameters: {} },
+    }));
+    const tools = toolsForMode(base, many, false);
+    expect(tools.map((t) => t.function.name)).toContain("shell_run");
+    expect(tools.filter((t) => t.function.name.startsWith("mcp_"))).toHaveLength(50);
+  });
+  it("plan keeps read-only built-ins only, no MCP", () => {
+    const names = toolsForMode(base, extra, true).map((t) => t.function.name);
+    expect(names).toEqual(["fs_read"]);
+  });
+});
+
+describe("undo capture for agent rename/delete", () => {
+  it("captures renames after success", async () => {
+    const captured: unknown[] = [];
+    setInvokeImpl(async (cmd) => {
+      expect(cmd).toBe("fs_rename");
+      return "renamed";
+    });
+    const out = await runTool(
+      "fs_rename",
+      { old_path: "/a", new_path: "/b" },
+      { requestApproval: async () => true, onUndoCapture: (e) => captured.push(e) },
+    );
+    expect(out).toBe("renamed");
+    expect(captured).toEqual([{ kind: "rename", oldPath: "/a", newPath: "/b" }]);
+  });
+  it("captures file deletes with content, skips dirs and missing files", async () => {
+    const captured: unknown[] = [];
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") return "body";
+      if (cmd === "fs_delete") return {};
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const pol = { requestApproval: async () => true, onUndoCapture: (e: unknown) => captured.push(e) };
+    const out = await runTool("fs_delete", { path: "/w/a" }, pol);
+    expect(out).toBe("deleted /w/a");
+    expect(captured).toEqual([{ kind: "delete", path: "/w/a", content: "body" }]);
+
+    captured.length = 0;
+    const dirOut = await runTool("fs_delete", { path: "/w/d", recursive: true }, pol);
+    expect(dirOut).toMatch(/not undoable/);
+    expect(captured).toEqual([]);
   });
 });

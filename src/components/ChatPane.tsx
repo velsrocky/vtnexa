@@ -3,7 +3,7 @@ import type { SkillInfo, SideTab, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
 import { useInputHistory } from "../hooks/useInputHistory";
 
-export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, pendingToolsCount, ratings, onRateMessage }: {
+export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, pendingToolsCount, ratings, onRateMessage }: {
   ws: Workspace;
   busy: boolean;
   sideTab: SideTab;
@@ -19,6 +19,8 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
   setInput: (v: string) => void;
   sendChat: () => void;
   stopTurn: (id: string) => void;
+  planMode: boolean;
+  onTogglePlan: () => void;
   padText: string;
   setPadText: (v: string) => void;
   planText: string;
@@ -133,7 +135,14 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
             </div>
           )}
           <div className="row">
-            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onInputKeyDown} placeholder="Talk. It drives the workspace. /skill for skills, Tab completes, ↑/↓ history." className="grow" />
+            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onInputKeyDown} placeholder="Talk. It drives the workspace. /skill for skills, /undo /redo file ops, Tab completes, ↑/↓ history." className="grow" />
+            <button
+              onClick={onTogglePlan}
+              title={planMode ? "Plan mode ON: Commander investigates read-only and ends with a plan (no writes, shell, commits). Click for Build mode." : "Build mode: Commander can act (writes stage to Diff gate, side effects need approval). Click for Plan mode."}
+              style={planMode ? { borderColor: "var(--accent)", fontWeight: "bold" } : undefined}
+            >
+              {planMode ? "◔ Plan" : "◑ Build"}
+            </button>
             <button onClick={sendChat} disabled={busy}>
               Send
             </button>

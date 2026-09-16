@@ -1,4 +1,4 @@
-import type { ProviderConfig, ProviderKind } from "../types";
+import type { ProviderConfig, ProviderKind, UndoEntry } from "../types";
 import {
   fsCreate,
   fsDelete,
@@ -45,6 +45,41 @@ export interface ToolPolicy {
   requestApproval?: (tool: string, args: Record<string, any>) => Promise<boolean>;
   /** Agent wrote a Nexa note directly: mirror it into the sidebar state. */
   onNexaWrite?: (kind: NexaKind, content: string) => void;
+  /** Plan mode: runTool refuses every non-read-only tool (fail-closed), and
+   *  chatWithTools withholds their defs so the model plans instead of acts. */
+  planMode?: boolean;
+  /** Reversible agent file op just applied (rename/delete) - UI pushes it for /undo. */
+  onUndoCapture?: (e: UndoEntry) => void;
+}
+
+/** Plan-mode allowlist: everything else is withheld from the model and
+ *  refused by runTool. Writes are out entirely - even staged ones. */
+export const READONLY_TOOLS: ReadonlySet<string> = new Set([
+  "fs_list",
+  "fs_read",
+  "fs_search",
+  "fs_glob",
+  "skill_list",
+  "skill_read",
+  "git_status",
+  "git_diff",
+  "git_log",
+  "nexa_read",
+  "browser_snapshot",
+  "browser_screenshot",
+  "browser_scroll",
+  "lsp_diagnostics",
+]);
+
+export function isReadOnlyTool(name: string): boolean {
+  return READONLY_TOOLS.has(name);
+}
+
+/** Turn tool list for the mode. Plan drops MCP extras (unknown side effects)
+ *  and every non-read-only built-in. Capped: tools cost context per round. */
+export function toolsForMode(base: ToolDef[], extra: ToolDef[], plan: boolean): ToolDef[] {
+  if (!plan) return [...base, ...extra.slice(0, 50)];
+  return base.filter((t) => READONLY_TOOLS.has(t.function.name));
 }
 
 export const TOOL_DEFS: ToolDef[] = [
@@ -702,6 +737,12 @@ export async function runTool(
   policy?: ToolPolicy,
 ): Promise<string> {
   try {
+    // Plan-mode backstop (covers prose-recovered calls too): the defs are
+    // already withheld above, so anything arriving here is a violation.
+    // Fail-closed, before any approval popup.
+    if (policy?.planMode && !isReadOnlyTool(name)) {
+      return `error: plan mode is on - ${name} is disabled this turn (read-only tools only; switch to Build to act)`;
+    }
     if (isGatedTool(name) && policy?.requestApproval) {
       const ok = await policy.requestApproval(name, args);
       if (!ok) return `user rejected ${name} - do not retry without changing the plan`;
@@ -733,11 +774,29 @@ export async function runTool(
         return (await skillRead(String(args.name ?? ""))).slice(0, 30000);
       case "fs_create":
         return await fsCreate(String(args.path ?? ""), !!args.is_dir);
-      case "fs_rename":
-        return await fsRename(String(args.old_path ?? ""), String(args.new_path ?? ""));
-      case "fs_delete":
-        await fsDelete(String(args.path ?? ""), !!args.recursive);
-        return `deleted ${args.path}`;
+      case "fs_rename": {
+        const oldP = String(args.old_path ?? "");
+        const newP = String(args.new_path ?? "");
+        const out = await fsRename(oldP, newP);
+        policy?.onUndoCapture?.({ kind: "rename", oldPath: oldP, newPath: newP });
+        return out;
+      }
+      case "fs_delete": {
+        const p = String(args.path ?? "");
+        const recursive = !!args.recursive;
+        // Capture file content for /undo (dirs are out of scope - noted).
+        let content: string | null = null;
+        if (!recursive) {
+          try {
+            content = await fsRead(p);
+          } catch {
+            content = null;
+          }
+        }
+        await fsDelete(p, recursive);
+        if (content !== null) policy?.onUndoCapture?.({ kind: "delete", path: p, content });
+        return `deleted ${args.path}${recursive ? " (directory - not undoable)" : ""}`;
+      }
       case "fs_search": {
         const res = await fsSearch(
           String(args.query ?? ""),
@@ -877,8 +936,10 @@ export async function chatWithTools(
   // a plain-chat retry instead of a hard failure.
   const MAX_ROUNDS = 8;
   // Dynamic MCP tools ride along for this turn only. Capped: every extra tool
-  // costs context on every round (OpenCode's main MCP caveat).
-  const allTools: ToolDef[] = [...TOOL_DEFS, ...(opts?.extraTools ?? []).slice(0, 50)];
+  // costs context on every round (OpenCode's main MCP caveat). Plan mode
+  // withholds everything non-read-only (plus all MCP extras) up front;
+  // runTool enforces the same boundary as backstop.
+  const allTools: ToolDef[] = toolsForMode(TOOL_DEFS, opts?.extraTools ?? [], !!opts?.policy?.planMode);
   // History window: a long chat currently resends EVERYTHING each turn —
   // unbounded payloads that gateways kill mid-flight ("Load failed").
   // Keep sys + last 20, cutting only at user boundaries so tool

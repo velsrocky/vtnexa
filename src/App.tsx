@@ -150,6 +150,12 @@ export default function App() {
     saveFile,
     approveDiff,
     approveAndCommit,
+    pushUndo,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    undoLabel,
   } = useEditor({
     ws,
     setWs,
@@ -182,6 +188,7 @@ export default function App() {
     openFile,
     retargetTabs,
     dropTabsUnder,
+    pushUndo,
   });
 
   const { shellCmd, onShellCmdChange, runShell } = useShell({
@@ -255,6 +262,8 @@ export default function App() {
     setNexaState,
     setShowJump,
     flushStreamFrame,
+    planMode: ws.planMode,
+    pushUndo,
   });
 
   const {
@@ -346,6 +355,16 @@ export default function App() {
     if (!input.trim() || busy) return;
     const text = input;
     setInput("");
+    // Local commands: undo/redo the last captured file op, no agent turn.
+    const cmd = text.trim().toLowerCase();
+    if (cmd === "/undo") {
+      await undo();
+      return;
+    }
+    if (cmd === "/redo") {
+      await redo();
+      return;
+    }
     runAgentTurn(await expandSkill(text));
   }
 
@@ -517,6 +536,11 @@ export default function App() {
           approveDiff={approveDiff}
           approveAndCommit={approveAndCommit}
           onRejectDiff={() => updateWs((w) => ({ ...w, pendingDiff: null }))}
+          undo={() => void undo()}
+          redo={() => void redo()}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          undoLabel={undoLabel}
           shellCmd={shellCmd}
           onShellCmdChange={onShellCmdChange}
           runShell={runShell}
@@ -543,6 +567,8 @@ export default function App() {
           setInput={setInput}
           sendChat={sendChat}
           stopTurn={stopTurn}
+          planMode={ws.planMode}
+          onTogglePlan={() => updateWs((w) => ({ ...w, planMode: !w.planMode }))}
           pendingToolsCount={pendingTools.length}
           ratings={ratings}
           onRateMessage={(messageId, rating) => {
