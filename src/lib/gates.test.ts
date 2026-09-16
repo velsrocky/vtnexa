@@ -241,3 +241,54 @@ describe("background shell jobs", () => {
     expect(out).toContain("running");
   });
 });
+
+describe("past sessions", () => {
+  const metas = [
+    { id: "s1", title: "Fresh scaffold", directory: "/w/txtiqgame", updated: 42, message_count: 6, preview: "scaffolded…" },
+  ];
+  const file = {
+    id: "s1",
+    title: "Fresh scaffold",
+    directory: "/w/txtiqgame",
+    updated: 42,
+    workspace: {
+      provider: { baseUrl: "http://x", model: "m", apiKey: "SECRET-KEY" },
+      chatDraft: "SECRET-DRAFT",
+      buffers: { "/w/a": "SECRET-BUFFER" },
+      messages: [
+        { id: "u1", role: "user", content: "scaffold fresh" },
+        { id: "a1", role: "assistant", content: "did it" },
+        { id: "s0", role: "system", content: "SECRET-SYSTEM" },
+      ],
+    },
+  };
+  it("lists threads with zero prompts", async () => {
+    let approvals = 0;
+    setInvokeImpl(async (cmd) => {
+      expect(cmd).toBe("sessions_list");
+      return JSON.stringify(metas);
+    });
+    const out = await runTool("sessions_list", {}, {
+      requestApproval: async () => { approvals++; return true; },
+    });
+    expect(out).toContain("Fresh scaffold");
+    expect(approvals).toBe(0);
+  });
+  it("reads messages only - keys, drafts, buffers and system prompts never leak", async () => {
+    setInvokeImpl(async (cmd) => {
+      expect(cmd).toBe("session_get");
+      return JSON.stringify(file);
+    });
+    const out = await runTool("session_read", { id: "s1" }, { requestApproval: async () => true });
+    expect(out).toContain("scaffold fresh");
+    expect(out).toContain("did it");
+    expect(out).not.toContain("SECRET");
+    await expect(runTool("session_read", {}, { requestApproval: async () => true })).resolves.toMatch(/^error:/);
+  });
+  it("both work in plan mode", async () => {
+    setInvokeImpl(async (cmd) => (cmd === "sessions_list" ? JSON.stringify(metas) : JSON.stringify(file)));
+    const PLAN = { requestApproval: async () => true, planMode: true };
+    expect(await runTool("sessions_list", {}, PLAN)).toContain("Fresh scaffold");
+    expect(await runTool("session_read", { id: "s1" }, PLAN)).toContain("did it");
+  });
+});

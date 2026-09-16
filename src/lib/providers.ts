@@ -10,6 +10,8 @@ import {
   fsWrite,
   skillList,
   skillRead,
+  sessionsList,
+  sessionGet,
   gitCommit,
   gitDiff,
   gitLog,
@@ -65,6 +67,8 @@ export const READONLY_TOOLS: ReadonlySet<string> = new Set([
   "fs_glob",
   "skill_list",
   "skill_read",
+  "sessions_list",
+  "session_read",
   "git_status",
   "git_diff",
   "git_log",
@@ -190,6 +194,28 @@ export const TOOL_DEFS: ToolDef[] = [
         type: "object",
         properties: { name: { type: "string" } },
         required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sessions_list",
+      description:
+        "List this workspace's past chat sessions (id, title, directory, updated, message count, preview). Read-only, auto-approved. Use when asked to proceed/continue with no history in THIS chat - find the thread first, never invent prior work.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "session_read",
+      description:
+        "Read one past session's messages by id (from sessions_list): title, directory and recent user/assistant messages, truncated. Read-only, auto-approved. Keys and drafts are never included.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
       },
     },
   },
@@ -837,6 +863,50 @@ export async function runTool(
         return JSON.stringify(await skillList());
       case "skill_read":
         return (await skillRead(String(args.name ?? ""))).slice(0, 30000);
+      case "sessions_list": {
+        const all = await sessionsList();
+        return JSON.stringify(
+          all.slice(0, 30).map((s) => ({
+            id: s.id,
+            title: String(s.title ?? "").slice(0, 120),
+            directory: String(s.directory ?? "").slice(0, 300),
+            updated: s.updated ?? 0,
+            message_count: s.message_count ?? 0,
+            preview: String(s.preview ?? "").slice(0, 200),
+          })),
+        ).slice(0, 8000);
+      }
+      case "session_read": {
+        const id = String(args.id ?? "");
+        if (!id) return "error: session_read id is required - pick one from sessions_list";
+        const file = JSON.parse(await sessionGet(id)) as {
+          id?: unknown;
+          title?: unknown;
+          directory?: unknown;
+          updated?: unknown;
+          workspace?: { messages?: unknown };
+        };
+        // Picklist only: messages + meta. Provider keys, drafts, buffers and
+        // usage never leave the session file through this tool.
+        const rawMsgs = Array.isArray(file?.workspace?.messages) ? file.workspace.messages : [];
+        const messages = (rawMsgs as unknown[])
+          .filter(
+            (m): m is { role?: unknown; content?: unknown } =>
+              !!m && typeof m === "object" && (m as { role?: unknown }).role !== "system",
+          )
+          .slice(-20)
+          .map((m) => ({
+            role: String((m as { role?: unknown }).role ?? "?").slice(0, 20),
+            content: String((m as { content?: unknown }).content ?? "").slice(0, 2000),
+          }));
+        return JSON.stringify({
+          id: typeof file?.id === "string" ? file.id : id,
+          title: typeof file?.title === "string" ? file.title.slice(0, 120) : "",
+          directory: typeof file?.directory === "string" ? file.directory.slice(0, 300) : "",
+          updated: typeof file?.updated === "number" ? file.updated : 0,
+          messages,
+        }).slice(0, 12000);
+      }
       case "fs_create":
         return await fsCreate(String(args.path ?? ""), !!args.is_dir);
       case "fs_rename": {
