@@ -51,8 +51,9 @@ Most coding agents either (a) ask for permission on every keystroke or
   can operate with your approval; screenshots come back as vision input.
 - **MCP (early, opt-in)** — local-stdio MCP servers from `vtnexa.json`
   (`~/.config/vtnexa/vtnexa.json` + `<workspace>/.vtnexa/vtnexa.json`, see
-  `.vtnexa/vtnexa.json.example`). Tools appear as `mcp_<server>_<tool>`,
-  always require approval. Remote MCP not supported yet.
+  `.vtnexa/vtnexa.json.example`). Toggle + per-server status in the ⛁ panel;
+  tools appear as `mcp_<server>_<tool>`, always require approval.
+  Remote MCP not supported yet.
 
 ## The 👍 / 👎 buttons (what they do)
 

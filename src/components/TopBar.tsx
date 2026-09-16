@@ -1,12 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { THEMES, asThemeId, type ThemeId } from "../lib/theme";
 
-export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, themeId, onOpenRoutines, onThemeChange }: {
+export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mcpOn, mcpTools, themeId, onOpenRoutines, onOpenMcp, onThemeChange }: {
   workspaceLabel: string;
   windowLabel: string;
   scheduledCount: number;
+  mcpOn: boolean;
+  mcpTools: number;
   themeId: ThemeId;
   onOpenRoutines: () => void;
+  onOpenMcp: () => void;
   onThemeChange: (id: ThemeId) => void;
 }) {
   return (
@@ -33,6 +36,17 @@ export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, th
           }
         >
           ◷{scheduledCount > 0 ? ` ${scheduledCount}` : ""}
+        </button>
+        <button
+          onClick={onOpenMcp}
+          title={
+            mcpOn
+              ? `MCP on - ${mcpTools} tool(s). Every mcp_* call requires approval`
+              : "MCP off - external tools (local stdio) for Commander"
+          }
+          style={mcpOn ? undefined : { opacity: 0.55 }}
+        >
+          ⛁{mcpOn && mcpTools > 0 ? ` ${mcpTools}` : ""}
         </button>
         <select
           value={themeId}

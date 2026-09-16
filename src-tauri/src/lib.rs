@@ -2129,6 +2129,7 @@ pub fn run() {
             mcp::mcp_list_tools,
             mcp::mcp_call_tool,
             mcp::mcp_config_get,
+            mcp::mcp_set_server_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

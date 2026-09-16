@@ -9,6 +9,7 @@ import "./App.css";
 import type { CenterTab, SideTab } from "./types";
 import ApprovalModal from "./components/ApprovalModal";
 import RoutinesModal from "./components/RoutinesModal";
+import McpModal from "./components/McpModal";
 import GitPane from "./components/GitPane";
 import FileTree from "./components/FileTree";
 import ChatPane from "./components/ChatPane";
@@ -34,6 +35,7 @@ import { useSkills } from "./hooks/useSkills";
 import { useWorkspace } from "./hooks/useWorkspace";
 import { useInit } from "./hooks/useInit";
 import { useRoutines } from "./hooks/useRoutines";
+import { useMcp } from "./hooks/useMcp";
 
 // One OS window = one independent VTNexa instance. Multiple windows are
 // siblings: separate workspace roots (enforced per-label in the Rust
@@ -288,6 +290,20 @@ export default function App() {
     setNewRoutine,
   } = useRoutines({ busy, runAgentTurn });
 
+  const {
+    mcpOn,
+    setMcpOn,
+    servers: mcpServers,
+    toolCount: mcpTools,
+    errorCount: mcpErrors,
+    loading: mcpLoading,
+    note: mcpNote,
+    refresh: refreshMcp,
+    setServerOn: setMcpServerOn,
+    showMcp,
+    setShowMcp,
+  } = useMcp({ workspaceRoot });
+
   const { changeWorkspace, browseWorkspace } = useInit({
     workspaceRoot,
     wsCommitted,
@@ -380,13 +396,30 @@ export default function App() {
           onClose={() => setShowRoutines(false)}
         />
       )}
+      {showMcp && (
+        <McpModal
+          mcpOn={mcpOn}
+          setMcpOn={(on) => void setMcpOn(on)}
+          servers={mcpServers}
+          toolCount={mcpTools}
+          errorCount={mcpErrors}
+          loading={mcpLoading}
+          note={mcpNote}
+          onToggleServer={(name, on) => void setMcpServerOn(name, on)}
+          onRefresh={() => void refreshMcp()}
+          onClose={() => setShowMcp(false)}
+        />
+      )}
       <ApprovalModal queue={pendingTools} onResolve={resolveHead} />
       <TopBar
         workspaceLabel={baseName(workspaceRoot)}
         windowLabel={windowLabel}
         scheduledCount={routines.filter((r) => r.enabled && r.everyMs > 0).length}
+        mcpOn={mcpOn}
+        mcpTools={mcpTools}
         themeId={themeId}
         onOpenRoutines={() => setShowRoutines(true)}
+        onOpenMcp={() => setShowMcp(true)}
         onThemeChange={setThemeId}
       />
       <ProviderBar

@@ -44,10 +44,19 @@ export async function mcpListServers(): Promise<McpServerStatus[]> {
 
 export async function mcpListTools(): Promise<McpToolInfo[]> {
   if (!isMcpEnabled()) return [];
-  const raw = await invoke<McpToolInfo[]>("mcp_list_tools");
+  const raw = await mcpListToolsRaw();
   // Backend emits one __error__ pseudo-tool per failing server: keep it out
   // of the LLM tool list, surface via status UI instead.
   return (raw ?? []).filter((t) => t.name !== "__error__" && isMcpToolName(t.qualified_name));
+}
+
+/** Unfiltered list (includes __error__ pseudo-tools). For the status panel. */
+export async function mcpListToolsRaw(): Promise<McpToolInfo[]> {
+  return invoke<McpToolInfo[]>("mcp_list_tools");
+}
+
+export async function setMcpServerEnabled(server: string, enabled: boolean): Promise<void> {
+  await invoke("mcp_set_server_enabled", { server, enabled });
 }
 
 export async function mcpCallTool(server: string, tool: string, args: Record<string, unknown>): Promise<string> {

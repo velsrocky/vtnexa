@@ -679,6 +679,73 @@ pub(crate) fn mcp_config_get(
     Ok(serde_json::json!({"servers": servers}))
 }
 
+/// Value-level patch: set `.mcp[name].enabled` in the workspace file,
+/// preserving every other key byte-for-byte-ish (re-serialized pretty).
+/// Creates the minimal nesting when missing. Unknown top-level keys survive.
+pub(crate) fn apply_enabled_patch(
+    raw: &str,
+    server: &str,
+    enabled: bool,
+) -> Result<String, String> {
+    let mut doc: serde_json::Value = if raw.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(&strip_json_comments(raw))
+            .map_err(|e| format!("mcp config: invalid JSON: {}", e))?
+    };
+    if !doc.is_object() {
+        return Err("mcp config: top level must be an object".to_string());
+    }
+    let mcp = doc
+        .as_object_mut()
+        .unwrap()
+        .entry("mcp")
+        .or_insert_with(|| serde_json::json!({}));
+    if !mcp.is_object() {
+        return Err("mcp config: \"mcp\" must be an object".to_string());
+    }
+    let entry = mcp
+        .as_object_mut()
+        .unwrap()
+        .entry(server)
+        .or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        return Err(format!(
+            "mcp config: server '{}' entry must be an object",
+            server
+        ));
+    }
+    entry
+        .as_object_mut()
+        .unwrap()
+        .insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+    serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn mcp_set_server_enabled(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::WorkspaceRoots>,
+    server: String,
+    enabled: bool,
+) -> Result<(), String> {
+    if !valid_server_name(&server) {
+        return Err("mcp: invalid server name".to_string());
+    }
+    let root = crate::root_snapshot(&state, window.label());
+    // Must be a known server (global or workspace) — no typos creating junk.
+    let merged = load_merged_mcp_config(&root)?;
+    if !merged.contains_key(&server) {
+        return Err(format!("mcp: unknown server '{}'", server));
+    }
+    let dir = root.join(".vtnexa");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("vtnexa.json");
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let next = apply_enabled_patch(&raw, &server, enabled)?;
+    crate::write_atomic(&path, next.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,4 +840,30 @@ mod tests {
         let err = list_tools_for_server("s", &cfg, std::path::Path::new("/tmp")).unwrap_err();
         assert!(err.contains("no command"), "got: {}", err);
     }
-}
+
+    #[test]
+    fn enabled_patch_preserves_other_keys() {
+        let out = apply_enabled_patch(
+            r#"{"model": "x", "mcp": {"s": {"type": "local", "command": ["a"]}}}"#,
+            "s",
+            false,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["model"], "x");
+        assert_eq!(v["mcp"]["s"]["enabled"], false);
+        assert_eq!(v["mcp"]["s"]["command"][0], "a");
+    }
+
+    #[test]
+    fn enabled_patch_creates_nesting_from_empty() {
+        let out = apply_enabled_patch("", "s", true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["mcp"]["s"]["enabled"], true);
+    }
+
+    #[test]
+    fn enabled_patch_rejects_non_objects() {
+        assert!(apply_enabled_patch(r#"{"mcp": []}"#, "s", true).is_err());
+        assert!(apply_enabled_patch(r#"{"mcp": {"s": 1}}"#, "s", true).is_err());
+    }}
