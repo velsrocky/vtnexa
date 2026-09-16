@@ -43,7 +43,7 @@ import { useMcp } from "./hooks/useMcp";
 export default function App() {
   const [auditNote, setAuditNote] = useState("");
   const [ratings, setRatings] = useState<Record<string, 1 | -1>>(() => ratingMap(loadFeedback()));
-  const { themeId, setThemeId, theme, leftW, rightW, onResizerDown } = usePrefs();
+  const { themeId, setThemeId, theme, leftW, rightW, onResizerDown, skillH, onSkillResizerDown } = usePrefs();
 
   const {
     ws,
@@ -495,6 +495,8 @@ export default function App() {
           skills={skills}
           conventionsName={conventionsName}
           width={leftW}
+          skillH={skillH}
+          onSkillResizerDown={onSkillResizerDown}
           setCreating={setCreating}
           setRenaming={setRenaming}
           setCwd={setCwd}

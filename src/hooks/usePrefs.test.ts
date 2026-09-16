@@ -56,3 +56,40 @@ describe("usePrefs widths", () => {
     expect(localStorage.getItem("vtai.leftW")).toBe("350");
   });
 });
+
+describe("usePrefs skill height", () => {
+  it("defaults, restores, drags and clamps", () => {
+    const first = renderHook(() => usePrefs());
+    expect(first.result.current.skillH).toBe(150);
+    first.unmount();
+
+    localStorage.setItem("vtai.skillH", "220");
+    const { result } = renderHook(() => usePrefs());
+    expect(result.current.skillH).toBe(220);
+
+    // Drag up 40px grows the section.
+    act(() => {
+      result.current.onSkillResizerDown({ preventDefault: () => {}, clientY: 300 } as any);
+    });
+    act(() => {
+      window.dispatchEvent(new MouseEvent("mousemove", { clientY: 260 }));
+    });
+    act(() => {
+      window.dispatchEvent(new MouseEvent("mouseup"));
+    });
+    expect(result.current.skillH).toBe(260);
+    expect(localStorage.getItem("vtai.skillH")).toBe("260");
+
+    // Clamped to [60, 400].
+    act(() => {
+      result.current.onSkillResizerDown({ preventDefault: () => {}, clientY: 260 } as any);
+    });
+    act(() => {
+      window.dispatchEvent(new MouseEvent("mousemove", { clientY: -500 }));
+    });
+    act(() => {
+      window.dispatchEvent(new MouseEvent("mouseup"));
+    });
+    expect(result.current.skillH).toBe(400);
+  });
+});
