@@ -184,18 +184,22 @@ fn dialog_text(action: &str, detail: &str) -> String {
     out
 }
 
-/// Agent path: native OS confirm, then mint. Blocks the command worker thread
-/// (not the UI) until the user answers. Rejection is an Err so the agent turn
-/// reports `user rejected <action>` like any other refusal.
+/// Agent path: native OS confirm, then mint. Async end-to-end: the dialog is
+/// created on the main thread via the plugin's `show` (never `blocking_show`,
+/// which runs GTK off-thread and hangs the main loop), and the command
+/// awaits the answer on a blocking-pool thread. Rejection is an Err so the
+/// agent turn reports `user rejected <action>` like any other refusal.
+/// NOTE: an unanswered dialog parks the turn, it never auto-approves.
 #[tauri::command]
-pub(crate) fn approval_issue(
+pub(crate) async fn approval_issue(
     window: tauri::WebviewWindow,
     store: tauri::State<'_, ApprovalStore>,
     action: String,
     detail: Option<String>,
 ) -> Result<String, String> {
     let (action, normed) = validate_issue(&action, &detail)?;
-    let confirmed = window
+    let (tx, rx) = std::sync::mpsc::channel::<bool>();
+    window
         .dialog()
         .message(dialog_text(&action, &normed))
         .title(format!("VTNexa — approve {}?", action))
@@ -204,7 +208,12 @@ pub(crate) fn approval_issue(
             "Reject".to_string(),
         ))
         .kind(MessageDialogKind::Warning)
-        .blocking_show();
+        .show(move |confirmed| {
+            let _ = tx.send(confirmed);
+        });
+    let confirmed = tauri::async_runtime::spawn_blocking(move || rx.recv().unwrap_or(false))
+        .await
+        .map_err(|e| format!("approval: dialog task failed: {}", e))?;
     if !confirmed {
         return Err(format!("user rejected {}", action));
     }
