@@ -8,6 +8,7 @@ import {
   type GitFile,
   type GitLogEntry,
 } from "../lib/tauri";
+import { claimFor } from "../lib/approval";
 
 // Git tab state + actions for this window: status/diff/log/commit.
 export function useGit(opts: {
@@ -85,7 +86,7 @@ export function useGit(opts: {
     const absFiles = files.map((f) => root.replace(/\/$/, "") + "/" + f.path);
     const t0 = Date.now();
     try {
-      const res = await gitCommit(r, m, absFiles);
+      const res = await gitCommit(r, m, absFiles, await claimFor("git_commit", { cwd: r, message: m, files: absFiles }));
       setMsg("");
       await refreshGit();
       // Set the confirmation AFTER the refresh: refreshGit() rewrites the

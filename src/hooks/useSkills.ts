@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { SkillInfo, Workspace } from "../types";
 import { fsRead, fsWrite, skillList } from "../lib/tauri";
+import { claimFor } from "../lib/approval";
 
 // Project skills (.vtnexa/skills/*.md) + conventions (AGENTS.md/CLAUDE.md).
 // The agent loads skill bodies on demand; conventions ride every turn.
@@ -49,7 +50,7 @@ export function useSkills(opts: {
     if (!opts.workspaceRoot) return;
     try {
       const path = `${opts.workspaceRoot.replace(/\/$/, "")}/.vtnexa/skills/${name}.md`;
-      await fsWrite(path, `# ${name}\n\nOne-line description of when to use this skill.\n\nInstructions for the agent...\n`);
+      await fsWrite(path, `# ${name}\n\nOne-line description of when to use this skill.\n\nInstructions for the agent...\n`, await claimFor("fs_write", { path }));
       await refreshSkills();
       opts.openFile(path);
     } catch (e) {

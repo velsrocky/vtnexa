@@ -36,7 +36,7 @@ import {
   browserStart,
   browserType,
 } from "./browser";
-import { lspNeedsApproval } from "./approval";
+import { lspNeedsApproval, type Approval } from "./approval";
 import { isMcpToolName, mcpCallTool, resolveMcpQualified } from "./mcp";
 import { isGatedTool, isReadOnlyTool, toolsForMode } from "./toolDefs";
 
@@ -49,8 +49,11 @@ export interface ToolPolicy {
   /** Agent fs_write no longer writes directly: stage into Diff review gate.
    *  May be async - the UI fetches the on-disk original for a faithful diff. */
   onProposeWrite?: (path: string, content: string) => void | Promise<void>;
-  /** Return true to allow shell/browser side-effects, false to reject. Read-only tools bypass this. */
-  requestApproval?: (tool: string, args: Record<string, any>) => Promise<boolean>;
+  /** Return an Approval (native OS dialog confirmed) to allow
+   *  shell/browser/file side-effects, null to reject. Read-only tools bypass
+   *  this. The dialog lives outside page DOM so injected content and the model
+   *  cannot click it. */
+  requestApproval?: (tool: string, args: Record<string, any>) => Promise<Approval | null>;
   /** Agent wrote a Nexa note directly: mirror it into the sidebar state. */
   onNexaWrite?: (kind: NexaKind, content: string) => void;
   /** Plan mode: runTool refuses every non-read-only tool (fail-closed), and
@@ -811,46 +814,29 @@ export async function runTool(
     if (policy?.planMode && !isReadOnlyTool(name)) {
       return `error: plan mode is on - ${name} is disabled this turn (read-only tools only; switch to Build to act)`;
     }
-    // Frontend modal first, backend token second. The modal is UX; the token
-    // (single-use, window-bound, 5min) is enforcement — direct invoke without
-    // it fails backend-side. Unknown MCP tools fail before any popup/invoke.
-    let approvalToken: string | undefined;
+    // Native OS dialog first (page JS can trigger it but cannot click it),
+    // backend token second. Unknown MCP tools fail before any popup/invoke.
+    // No approval handler (headless/routine context) fails closed — no dialog.
+    let approval: Approval | undefined;
     if (isMcpToolName(name) && !resolveMcpQualified(name)) {
       return `error: unknown MCP tool ${name} - reload MCP tools first`;
     }
     const needsGate =
       isGatedTool(name) ||
       ((name === "lsp_diagnostics" || name === "lsp") && lspNeedsApproval(String(args.path ?? "")));
-    if (needsGate && policy?.requestApproval) {
-      const ok = await policy.requestApproval(name, args);
-      if (!ok) return `user rejected ${name} - do not retry without changing the plan`;
-      try {
-        const { approvalIssue } = await import("./approval");
-        approvalToken = await approvalIssue(
-          name === "lsp" ? "lsp_op" : name,
-          JSON.stringify(args).slice(0, 4000),
-        );
-      } catch (e) {
-        return `error: approval backend unavailable (${String(e)}) - cannot run ${name}`;
-      }
-    } else if (needsGate && !policy?.requestApproval) {
-      // No UI to approve (tests/routines without policy): try direct issue so
-      // backend tests still exercise the gate; fails closed without backend.
-      try {
-        const { approvalIssue } = await import("./approval");
-        approvalToken = await approvalIssue(
-          name === "lsp" ? "lsp_op" : name,
-          JSON.stringify(args).slice(0, 4000),
-        );
-      } catch {
+    if (needsGate) {
+      if (!policy?.requestApproval) {
         return `error: ${name} requires user approval (no approval handler in this context)`;
       }
+      const got = await policy.requestApproval(name, args);
+      if (!got) return `user rejected ${name} - do not retry without changing the plan`;
+      approval = got;
     }
     if (isMcpToolName(name)) {
       const parts = resolveMcpQualified(name);
       // Checked above, but re-resolve for TS narrowing.
       if (!parts) return `error: unknown MCP tool ${name} - reload MCP tools first`;
-      const out = await mcpCallTool(parts.server, parts.tool, args ?? {}, approvalToken);
+      const out = await mcpCallTool(parts.server, parts.tool, args ?? {}, approval);
       return out.slice(0, 30000);
     }
     switch (name) {
@@ -921,7 +907,7 @@ export async function runTool(
       case "fs_rename": {
         const oldP = String(args.old_path ?? "");
         const newP = String(args.new_path ?? "");
-        const out = await fsRename(oldP, newP, approvalToken);
+        const out = await fsRename(oldP, newP, approval);
         policy?.onUndoCapture?.({ kind: "rename", oldPath: oldP, newPath: newP });
         return out;
       }
@@ -937,7 +923,7 @@ export async function runTool(
             content = null;
           }
         }
-        await fsDelete(p, recursive, approvalToken);
+        await fsDelete(p, recursive, approval);
         if (content !== null) policy?.onUndoCapture?.({ kind: "delete", path: p, content });
         return `deleted ${args.path}${recursive ? " (directory - not undoable)" : ""}`;
       }
@@ -963,7 +949,7 @@ export async function runTool(
         if (!p) return "error: lsp_diagnostics path is required - e.g. {path: \"/ws/src/App.tsx\"}";
         if (!p.startsWith("/"))
           return `error: lsp_diagnostics path must be absolute inside the workspace (got ${JSON.stringify(p)}). Use fs_list/fs_glob to resolve the full path first.`;
-        return (await lspDiagnostics(p, approvalToken)).slice(0, 10000);
+        return (await lspDiagnostics(p, approval)).slice(0, 10000);
       }
       case "lsp": {
         const p = String(args.path ?? "");
@@ -978,7 +964,7 @@ export async function runTool(
             line: typeof args.line === "number" ? args.line : undefined,
             character: typeof args.character === "number" ? args.character : undefined,
             symbol: typeof args.symbol === "string" ? args.symbol : undefined,
-            approvalToken,
+            approval,
           })
         ).slice(0, 6000);
       }
@@ -997,13 +983,13 @@ export async function runTool(
       case "shell_run": {
         const cmd = String(args.cmd ?? "");
         if (cmd.length > 20000) return "error: cmd too long";
-        return JSON.stringify(await shellRun(args.cwd ?? ".", cmd, approvalToken));
+        return JSON.stringify(await shellRun(args.cwd ?? ".", cmd, approval));
       }
       case "shell_bg": {
         const cmd = String(args.cmd ?? "");
         if (!cmd) return "error: shell_bg cmd is required";
         if (cmd.length > 20000) return "error: cmd too long";
-        const id = await shellBg(args.cwd ?? ".", cmd, approvalToken);
+        const id = await shellBg(args.cwd ?? ".", cmd, approval);
         return `started background job ${id} - poll with shell_poll until status is done; do not start duplicates`;
       }
       case "shell_poll": {
@@ -1015,7 +1001,7 @@ export async function runTool(
       case "shell_kill": {
         const id = String(args.job_id ?? "");
         if (!id) return "error: shell_kill job_id is required";
-        return await shellKill(id);
+        return await shellKill(id, approval);
       }
       case "git_status":
         return JSON.stringify(await gitStatus(String(args.cwd ?? ".")));
@@ -1034,20 +1020,20 @@ export async function runTool(
       case "git_commit": {
         const files = Array.isArray(args.files) ? args.files.map((f: unknown) => String(f)) : undefined;
         return JSON.stringify(
-          await gitCommit(String(args.cwd ?? "."), String(args.message ?? ""), files, approvalToken),
+          await gitCommit(String(args.cwd ?? "."), String(args.message ?? ""), files, approval),
         );
       }
       case "browser_navigate":
         await browserStart().catch(() => {});
-        return JSON.stringify(await browserNavigate(args.url, approvalToken));
+        return JSON.stringify(await browserNavigate(args.url, approval));
       case "browser_snapshot":
         await browserStart().catch(() => {});
         return JSON.stringify(await browserSnapshot()).slice(0, 6000);
       case "browser_click":
-        return JSON.stringify(await browserClick(Number(args.target_ref), approvalToken));
+        return JSON.stringify(await browserClick(Number(args.target_ref), approval));
       case "browser_type":
         return JSON.stringify(
-          await browserType(Number(args.target_ref), args.text ?? "", !!args.submit, approvalToken),
+          await browserType(Number(args.target_ref), args.text ?? "", !!args.submit, approval),
         );
       case "browser_screenshot": {
         const s = await browserScreenshot();
@@ -1065,7 +1051,7 @@ export async function runTool(
         return JSON.stringify({ url: s.url, note: "screenshot came back empty" });
       }
       case "browser_back":
-        return JSON.stringify(await browserBack(approvalToken));
+        return JSON.stringify(await browserBack(approval));
       case "browser_scroll":
         return JSON.stringify(await browserScroll(Number(args.dx ?? 0), Number(args.dy ?? 600)));
       case "nexa_read": {

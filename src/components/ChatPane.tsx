@@ -3,7 +3,7 @@ import type { SkillInfo, SideTab, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
 import { useInputHistory } from "../hooks/useInputHistory";
 
-export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, showContinue, onContinue, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, pendingToolsCount, ratings, onRateMessage }: {
+export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, showContinue, onContinue, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, ratings, onRateMessage }: {
   ws: Workspace;
   busy: boolean;
   sideTab: SideTab;
@@ -32,7 +32,6 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
   nexaState: NexaState;
   auditNote: string;
   setAuditNote: (v: string) => void;
-  pendingToolsCount?: number;
   ratings?: Record<string, 1 | -1>;
   onRateMessage?: (messageId: string, rating: 1 | -1) => void;
 }) {
@@ -159,22 +158,15 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
             {busy && (
               <button
                 onClick={() => stopTurn(ws.id)}
-                title="Stop this turn: aborts the request and releases waiting approvals (applied side effects are not undone)"
+                title="Stop this turn: aborts the request (applied side effects are not undone; answer the native approval dialog if one is open)"
               >
                 ■ Stop
               </button>
             )}
             {busy && (
-              <span
-                className="agent-status"
-                title={
-                  (pendingToolsCount ?? 0) > 0
-                    ? "Waiting for approval"
-                    : "Agent is thinking..."
-                }
-              >
+              <span className="agent-status" title="Agent is thinking...">
                 <span className="spinner" />
-                {(pendingToolsCount ?? 0) > 0 ? "approval" : "thinking"}
+                thinking
               </span>
             )}
           </div>

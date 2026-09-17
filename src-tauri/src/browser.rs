@@ -393,11 +393,13 @@ pub async fn browser_navigate(
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     url: String,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<Value, String> {
     crate::approvals::approval_consume(
         &approvals,
         window.label(),
         "browser_navigate",
+        &approval_detail,
         &approval_token,
     )?;
     if url.len() > 4096 || !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -424,17 +426,20 @@ pub async fn browser_click(
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     target_ref: u32,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<Value, String> {
     crate::approvals::approval_consume(
         &approvals,
         window.label(),
         "browser_click",
+        &approval_detail,
         &approval_token,
     )?;
     post_path(&state, "/click", json!({ "ref": target_ref })).await
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn browser_type(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, BrowserState>,
@@ -443,11 +448,13 @@ pub async fn browser_type(
     text: String,
     submit: Option<bool>,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<Value, String> {
     crate::approvals::approval_consume(
         &approvals,
         window.label(),
         "browser_type",
+        &approval_detail,
         &approval_token,
     )?;
     if text.len() > 20000 {
@@ -483,11 +490,13 @@ pub async fn browser_back(
     state: tauri::State<'_, BrowserState>,
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<Value, String> {
     crate::approvals::approval_consume(
         &approvals,
         window.label(),
         "browser_back",
+        &approval_detail,
         &approval_token,
     )?;
     post_path(&state, "/back", json!({})).await

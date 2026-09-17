@@ -3,10 +3,21 @@
 ## Unreleased
 
 ### Security
-- Backend approval tokens (`approval_issue` → single-use, window+action bound,
-  5min TTL) enforced on `shell_*`, `git_commit`, `fs_rename/delete`,
-  `browser_*`, `mcp_call_tool`, `lsp_*` exec paths. Direct `invoke` without a
-  token now fails.
+- Native OS approval dialogs (`approval_issue`): page JS and model output can
+  trigger but cannot click them. Tokens are single-use and bound to window +
+  action + exact argument detail (5min TTL); argument swaps after approval are
+  refused. Direct user gestures (Diff Approve, commit buttons, tree ops,
+  manual browser driving) use dialog-free `approval_claim` — safe against
+  prompt injection, explicitly NOT against XSS (see SECURITY.md).
+- `fs_write` and `shell_kill` now require tokens (were UI-gated only); Diff
+  Approve, undo/redo, Git tab, tree ops, skill creation, and manual shell /
+  browser driving all thread claim tokens.
+- Retired the HTML ApprovalModal queue (programmatically clickable) and the
+  interim `workspaceStore`; shell escape warnings moved into the native
+  dialog text.
+- Backend approval tokens enforced on `shell_*`, `git_commit`,
+  `fs_write/rename/delete`, `browser_*`, `mcp_call_tool`, `lsp_*` exec paths.
+  Direct `invoke` without a token now fails.
 - Tightened CSP (drop `unsafe-eval`, `frame-src 'self'`, minimal `img/font`).
 - PTY ids validated and window-bound (`<label>:<lane>`); `create_window`
   capped at 10.

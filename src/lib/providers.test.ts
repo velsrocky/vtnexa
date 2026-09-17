@@ -11,6 +11,9 @@ function setInvokeImpl(fn: (cmd: string, args?: any) => Promise<any>) {
   (globalThis as any).__invokeImpl = fn;
 }
 
+// Policy stub: native dialog confirmed (see lib/approval approvalIssue).
+const TOK = { token: "tok-test", detail: "{}" };
+
 type FetchCalls = { url: string; init: any }[];
 
 function stubFetch(handler: (url: string, init: any, calls: FetchCalls) => Response | Promise<Response>) {
@@ -119,7 +122,7 @@ describe("runTool", () => {
       "shell_run",
       { cwd: "/w", cmd: "ls" },
       {
-        requestApproval: async () => false,
+        requestApproval: async () => null,
         // silence unused warnings if policy shape changes
       },
     );
@@ -129,7 +132,6 @@ describe("runTool", () => {
   });
   it("runs gated tools after approval and audits the decision", async () => {
     setInvokeImpl(async (cmd) => {
-      if (cmd === "approval_issue") return "tok-test";
       expect(cmd).toBe("shell_run");
       return { stdout: "hi\n", stderr: "", code: 0 };
     });
@@ -137,7 +139,7 @@ describe("runTool", () => {
     const out = await runTool(
       "shell_run",
       { cwd: "/w", cmd: "echo hi" },
-      { requestApproval: async () => true },
+      { requestApproval: async () => TOK },
     );
     expect(out).toContain("hi");
     void seen;
@@ -168,14 +170,13 @@ describe("runTool", () => {
   it("runs lsp_diagnostics with approval for ts (py stays free) and requires absolute paths", async () => {
     let approvals = 0;
     setInvokeImpl(async (cmd) => {
-      if (cmd === "approval_issue") return "tok-test";
       expect(cmd).toBe("lsp_diagnostics");
       return "clean: no diagnostics for /w/a.ts";
     });
     const out = await runTool(
       "lsp_diagnostics",
       { path: "/w/a.ts" },
-      { requestApproval: async () => { approvals++; return true; } },
+      { requestApproval: async () => { approvals++; return TOK; } },
     );
     expect(out).toContain("clean:");
     expect(approvals).toBe(1);
@@ -188,7 +189,7 @@ describe("runTool", () => {
     const pyOut = await runTool(
       "lsp_diagnostics",
       { path: "/w/a.py" },
-      { requestApproval: async () => { pyApprovals++; return true; } },
+      { requestApproval: async () => { pyApprovals++; return TOK; } },
     );
     expect(pyOut).toContain("clean:");
     expect(pyApprovals).toBe(0);
@@ -373,7 +374,7 @@ describe("chatWithTools", () => {
       [{ role: "user", content: "run ls" }],
       () => {},
       {
-        policy: { requestApproval: async () => false },
+        policy: { requestApproval: async () => null },
         onAudit: (e) => audits.push(e),
       },
     );
@@ -563,7 +564,7 @@ describe("chatWithTools narration repair", () => {
       [{ role: "user", content: "run it" }],
       (d) => events.push(d),
       {
-        policy: { requestApproval: async () => true },
+        policy: { requestApproval: async () => TOK },
         onRepair: (r) => repairs.push(r.kind),
       },
     );

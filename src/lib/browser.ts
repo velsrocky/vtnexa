@@ -1,4 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { Approval } from "./approval";
+
+function approvalArgs(a?: Approval): { approval_token: string | null; approval_detail: string | null } {
+  return { approval_token: a?.token ?? null, approval_detail: a?.detail ?? null };
+}
 
 export interface BrowserElement {
   ref: number;
@@ -48,25 +53,25 @@ export async function browserStatus(): Promise<{ running?: boolean; url?: string
   return invoke("browser_status", {});
 }
 
-export async function browserNavigate(url: string, approvalToken?: string): Promise<{ url?: string; title?: string }> {
-  return invoke("browser_navigate", { url, approval_token: approvalToken ?? null });
+export async function browserNavigate(url: string, approval?: Approval): Promise<{ url?: string; title?: string }> {
+  return invoke("browser_navigate", { url, ...approvalArgs(approval) });
 }
 
 export async function browserSnapshot(): Promise<BrowserSnapshot> {
   return invoke("browser_snapshot", {});
 }
 
-export async function browserClick(target_ref: number, approvalToken?: string): Promise<unknown> {
-  return invoke("browser_click", { target_ref, approval_token: approvalToken ?? null });
+export async function browserClick(target_ref: number, approval?: Approval): Promise<unknown> {
+  return invoke("browser_click", { target_ref, ...approvalArgs(approval) });
 }
 
 export async function browserType(
   target_ref: number,
   text: string,
   submit = false,
-  approvalToken?: string,
+  approval?: Approval,
 ): Promise<unknown> {
-  return invoke("browser_type", { target_ref, text, submit, approval_token: approvalToken ?? null });
+  return invoke("browser_type", { target_ref, text, submit, ...approvalArgs(approval) });
 }
 
 export async function browserScreenshot(): Promise<{
@@ -81,6 +86,6 @@ export async function browserScroll(dx = 0, dy = 600): Promise<unknown> {
   return invoke("browser_scroll", { dx, dy });
 }
 
-export async function browserBack(approvalToken?: string): Promise<unknown> {
-  return invoke("browser_back", { approval_token: approvalToken ?? null });
+export async function browserBack(approval?: Approval): Promise<unknown> {
+  return invoke("browser_back", { ...approvalArgs(approval) });
 }

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { Approval } from "./approval";
 import type { ToolDef } from "./providers";
 
 export interface McpServerStatus {
@@ -83,13 +84,14 @@ export async function mcpCallTool(
   server: string,
   tool: string,
   args: Record<string, unknown>,
-  approvalToken?: string,
+  approval?: Approval,
 ): Promise<string> {
   return invoke<string>("mcp_call_tool", {
     server,
     tool,
     args: args ?? {},
-    approval_token: approvalToken ?? null,
+    approval_token: approval?.token ?? null,
+    approval_detail: approval?.detail ?? null,
   });
 }
 

@@ -75,7 +75,6 @@ function setup(opts?: {
       setBusy: (v) => busy.push(v),
       logAudit: (e) => audits.push(e),
       rememberProvider: (c) => remembered.push(c),
-      setPendingTools: vi.fn(),
       setCenterTab: ((t: string) => centerTabs.push(t)) as any,
       setPadText: vi.fn(),
       setPlanText: vi.fn(),

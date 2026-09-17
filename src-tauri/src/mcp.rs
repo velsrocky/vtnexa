@@ -1198,6 +1198,7 @@ pub(crate) async fn mcp_list_tools(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn mcp_call_tool(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::WorkspaceRoots>,
@@ -1206,11 +1207,13 @@ pub(crate) async fn mcp_call_tool(
     tool: String,
     args: serde_json::Value,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<String, String> {
     crate::approvals::approval_consume(
         &approvals,
         window.label(),
         "mcp_call_tool",
+        &approval_detail,
         &approval_token,
     )?;
     if !valid_server_name(&server) {

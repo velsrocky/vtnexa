@@ -12,19 +12,22 @@ commands in `src-tauri/src/lib.rs` → OS / sidecar.
 - `lib/` — pure + backend seams:
   - `toolDefs.ts` — READONLY/GATED sets, `toolsForMode` (plan vs build).
   - `providers.ts` — agent loop (`chatWithTools`) + `runTool` gate
-    (modal → `approval_issue` token → backend command).
-  - `approval.ts` — `approvalIssue()` + `lspNeedsApproval()` (.py free).
-  - `workspaceStore.ts` — audit/approval queue store (App.tsx slimming).
+    (native dialog → `Approval` token → backend command).
+  - `approval.ts` — `approvalIssue()` (native dialog, agent path),
+    `approvalClaim()`/`claimFor()` (no dialog, direct-gesture paths),
+    `detailFor()`/`actionFor()` fingerprint helpers, `lspNeedsApproval()`.
   - `tauri.ts` / `browser.ts` / `mcp.ts` / `pty.ts` — typed `invoke` wrappers
-    (all privileged calls carry `approval_token`).
+    (all privileged calls carry `approval_token` + `approval_detail`).
 
 ## Backend (`src-tauri/src/`)
 
 - `lib.rs` — sandbox (`checked_path`, `ensure_within_root`), shell screening
   (`shell_deny_reason`), PTY (window-bound ids), git (argv-direct), skills.
-- `approvals.rs` — single-use capability tokens (window + action, 5min TTL).
-  Privileged: `shell_*`, `git_commit`, `fs_rename/delete`, `browser_*`,
-  `mcp_call_tool`, `lsp_*` (exec paths).
+- `approvals.rs` — native OS confirm (`approval_issue`, agent path) +
+  dialog-free claims (`approval_claim`, direct gestures); single-use tokens
+  bound to window + action + detail fingerprint, 5min TTL.
+  Privileged: `shell_*`, `git_commit`, `fs_write/rename/delete`,
+  `browser_*`, `mcp_call_tool`, `lsp_*` (exec paths).
 - `mcp.rs` — local allowlist (npx/node/python…; no sh/curl), workspace-only
   servers marked `untrusted` (no `{env:}` substitution), `mcp_workspace_trust`.
 - `lsp.rs` / `lsp_ops.rs` — `find_project_root` clamped to workspace;
@@ -36,6 +39,9 @@ commands in `src-tauri/src/lib.rs` → OS / sidecar.
 
 ## Security model
 
-Approval modal is UX; `ApprovalStore` is enforcement. CSP is tight
-(no `unsafe-eval`, `frame-src 'self'`). See `SECURITY.md` for the honest
-limits (approved commands run as you; PTY is your shell).
+Approval dialogs are native OS windows, not page DOM; `ApprovalStore` is the
+enforcement point and tokens bind the exact approved arguments. CSP is tight
+(no `unsafe-eval`, `frame-src 'self'`). Direct-gesture claims trust the
+renderer by design — the gate stops model output from self-approving, not
+XSS. See `SECURITY.md` for the honest limits (approved commands run as you;
+PTY is your shell).

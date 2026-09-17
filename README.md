@@ -110,7 +110,7 @@ This section documents exactly what is and isn't protected. Read it carefully.
 
 ### ✅ What IS protected
 
-- **Approval is the gate.** Side-effecting tools (shell, browser actions, rename/delete, commit) require your explicit click. Read-only tools run free.
+- **Approval is the gate.** Side-effecting agent tools (shell, browser actions, rename/delete, commit) pop a native OS dialog — page content cannot click it. Direct buttons (Diff Approve, Git commit) approve by the click itself. Read-only tools run free.
 - **Workspace confinement.** File tools are confined server-side to the workspace root you pick (per window), with symlink-safe checks and a sensitive-path deny list.
 - **Secrets.** API keys go to the OS keychain (per endpoint+model), never to session files or the workspace. Without a keychain daemon they fall back to app-local storage and the UI says so.
 - **Destruction patterns blocked.** The backend refuses obviously destructive shell patterns (`rm -rf /`, `mkfs`, `dd`, `curl | sh` pipe downloads to shell) and direct reads of credential material (`~/.ssh`, AWS creds, `/etc/shadow`).
@@ -120,13 +120,13 @@ This section documents exactly what is and isn't protected. Read it carefully.
 **This is the critical limitation: Approved commands run as your OS user with your full permissions.**
 
 - The interactive terminal (PTY) has NO screening - it's your shell.
-- `curl ... | sh` is allowed in the backend but WARNINGED in the approval modal - it's how many toolchains work.
+- `curl ... | sh` is allowed in the backend but WARNINGED in the native approval dialog - it's how many toolchains work.
 - The backend screening is a *backstop against blind clicking*, not a sandbox. It catches patterns, not obfuscation.
 - If you approve a command that does `curl | sh` or runs arbitrary code, that code runs with your permissions.
 
 ### Recommendation
 
-Treat every "Approve" click as a commitment to trust what the agent is doing. Read the approval dialog carefully. The agent should explain what it needs to run before asking for approval.
+Treat every "Approve" click as a commitment to trust what the agent is doing. Read the native dialog carefully (including sandbox-escape warnings). The agent should explain what it needs to run before asking for approval. Treat unexpected dialogs as hostile and reject them.
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md).
 

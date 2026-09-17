@@ -714,9 +714,19 @@ fn fs_read(
 fn fs_write(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, WorkspaceRoots>,
+    approvals: tauri::State<'_, approvals::ApprovalStore>,
     path: String,
     content: String,
+    approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<(), String> {
+    approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "fs_write",
+        &approval_detail,
+        &approval_token,
+    )?;
     if content.len() > MAX_WRITE_BYTES {
         return Err(format!(
             "refused: content too large ({} bytes, max {})",
@@ -1138,6 +1148,7 @@ pub struct GitCommitOut {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn git_commit(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, WorkspaceRoots>,
@@ -1146,8 +1157,15 @@ fn git_commit(
     message: String,
     files: Option<Vec<String>>,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<GitCommitOut, String> {
-    approvals::approval_consume(&approvals, window.label(), "git_commit", &approval_token)?;
+    approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "git_commit",
+        &approval_detail,
+        &approval_token,
+    )?;
     let message = message.trim().to_string();
     if message.is_empty() {
         return Err("git_commit: message required".to_string());
@@ -1267,8 +1285,15 @@ fn fs_rename(
     old_path: String,
     new_path: String,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<String, String> {
-    approvals::approval_consume(&approvals, window.label(), "fs_rename", &approval_token)?;
+    approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "fs_rename",
+        &approval_detail,
+        &approval_token,
+    )?;
     let from = checked_path(&state, window.label(), old_path, "fs_rename.from")?;
     let to = checked_path(&state, window.label(), new_path, "fs_rename.to")?;
     if !from.exists() {
@@ -1294,8 +1319,15 @@ fn fs_delete(
     path: String,
     recursive: Option<bool>,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<(), String> {
-    approvals::approval_consume(&approvals, window.label(), "fs_delete", &approval_token)?;
+    approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "fs_delete",
+        &approval_detail,
+        &approval_token,
+    )?;
     let safe = checked_path(&state, window.label(), path, "fs_delete")?;
     let root = root_snapshot(&state, window.label());
     if safe == root {
@@ -1843,8 +1875,15 @@ fn shell_run(
     cwd: String,
     cmd: String,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<ShellResult, String> {
-    approvals::approval_consume(&approvals, window.label(), "shell_run", &approval_token)?;
+    approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "shell_run",
+        &approval_detail,
+        &approval_token,
+    )?;
     if cmd.is_empty() || cmd.contains('\0') {
         return Err("shell_run: empty or invalid cmd".to_string());
     }
@@ -2281,7 +2320,8 @@ pub fn run() {
             mcp_oauth::mcp_oauth_logout,
             lsp::lsp_diagnostics,
             lsp_ops::lsp_op,
-            approvals::approval_issue
+            approvals::approval_issue,
+            approvals::approval_claim
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

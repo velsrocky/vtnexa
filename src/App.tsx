@@ -7,7 +7,6 @@ if (import.meta.env.MODE === "development") {
 }
 import "./App.css";
 import type { CenterTab, SideTab } from "./types";
-import ApprovalModal from "./components/ApprovalModal";
 import RoutinesModal from "./components/RoutinesModal";
 import McpModal from "./components/McpModal";
 import GitPane from "./components/GitPane";
@@ -53,9 +52,6 @@ export default function App() {
     turnAbort,
     stopTurnIdRef,
     streamRaf,
-    pendingTools,
-    setPendingTools,
-    resolveHead,
     updateWs,
     logAudit,
     stopTurn,
@@ -254,7 +250,6 @@ export default function App() {
     setBusy,
     logAudit,
     rememberProvider,
-    setPendingTools,
     setCenterTab,
     setPadText,
     setPlanText,
@@ -445,7 +440,6 @@ export default function App() {
           onClose={() => setShowMcp(false)}
         />
       )}
-      <ApprovalModal queue={pendingTools} onResolve={resolveHead} />
       <TopBar
         workspaceLabel={baseName(workspaceRoot)}
         windowLabel={windowLabel}
@@ -589,7 +583,6 @@ export default function App() {
           onTogglePlan={() => updateWs((w) => ({ ...w, planMode: !w.planMode }))}
           showContinue={didExhaustBudget(ws.messages)}
           onContinue={continueTurn}
-          pendingToolsCount={pendingTools.length}
           ratings={ratings}
           onRateMessage={(messageId, rating) => {
             const msgs = ws.messages;

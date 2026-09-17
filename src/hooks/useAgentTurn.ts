@@ -2,11 +2,11 @@ import { useRef } from "react";
 import type { MutableRefObject } from "react";
 import type { AuditInput, CenterTab, ChatMsg, ProviderConfig, SkillInfo, UndoEntry, Workspace } from "../types";
 import { fsRead, skillRead, type NexaKind } from "../lib/tauri";
+import { actionFor, approvalIssue, detailFor } from "../lib/approval";
 import { chatWithTools, asksAuthQuestion, type ToolDef } from "../lib/providers";
 import { isMcpEnabled, mcpListTools, setMcpToolCache, toMcpToolDefs } from "../lib/mcp";
 import { recordTurnRepairs, resolvePromptTier } from "../lib/modelBands";
 import { uid } from "../lib/utils";
-import type { PendingTool } from "../components/ApprovalModal";
 
 interface Deps {
   ws: Workspace;
@@ -33,7 +33,6 @@ interface Deps {
   setBusy: (v: boolean) => void;
   logAudit: (e: AuditInput) => void;
   rememberProvider: (used: ProviderConfig) => void;
-  setPendingTools: React.Dispatch<React.SetStateAction<PendingTool[]>>;
   setCenterTab: (t: CenterTab) => void;
   setPadText: (v: string) => void;
   setPlanText: (v: string) => void;
@@ -182,10 +181,16 @@ export function useAgentTurn(d: Deps) {
               d.updateWs((w) => ({ ...w, pendingDiff: { path, content, original } }));
               d.setCenterTab("diff");
             },
-            requestApproval: (tool, args) =>
-              new Promise<boolean>((resolve) => {
-                d.setPendingTools((q) => [...q, { tool, args, resolve }]);
-              }),
+            // Native OS dialog (outside page DOM): the model and injected
+            // content can trigger it but cannot click it. Rejection (or a
+            // closed dialog) maps to null = turn reports `user rejected …`.
+            requestApproval: async (tool, args) => {
+              try {
+                return await approvalIssue(actionFor(tool), detailFor(args));
+              } catch {
+                return null;
+              }
+            },
             onNexaWrite: (kind: NexaKind, content: string) => {
               d.lastSynced.current = { ...d.lastSynced.current, [kind]: content };
               if (kind === "pad") d.setPadText(content);

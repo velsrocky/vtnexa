@@ -192,6 +192,7 @@ describe("useFiles undo capture", () => {
     setInvokeImpl(async (cmd) => {
       if (cmd === "fs_read") return "body";
       if (cmd === "fs_delete") return {};
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     const h = setup();

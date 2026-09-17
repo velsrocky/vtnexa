@@ -14,6 +14,7 @@ import {
   setBrowserPort,
   type BrowserSnapshot,
 } from "../lib/browser";
+import { claimFor } from "../lib/approval";
 
 export default function BrowserPane() {
   const [running, setRunning] = useState(false);
@@ -91,7 +92,9 @@ export default function BrowserPane() {
   async function go() {
     setBusy(true);
     try {
-      await browserNavigate(urlInput);
+      // Manual driving: the typed URL + Go click is the intent (claimed, no
+      // extra dialog). The agent path goes through the native dialog instead.
+      await browserNavigate(urlInput, await claimFor("browser_navigate", { url: urlInput }));
       await refresh();
     } catch (e) {
       setNote(`navigate failed: ${e}`);
@@ -103,7 +106,7 @@ export default function BrowserPane() {
   async function clickRef(ref: number) {
     setBusy(true);
     try {
-      await browserClick(ref);
+      await browserClick(ref, await claimFor("browser_click", { target_ref: ref }));
       await refresh();
     } catch (e) {
       setNote(`click failed: ${e}`);
@@ -117,7 +120,7 @@ export default function BrowserPane() {
     if (!text) return;
     setBusy(true);
     try {
-      await browserType(ref, text, false);
+      await browserType(ref, text, false, await claimFor("browser_type", { target_ref: ref }));
       await refresh();
     } catch (e) {
       setNote(`type failed: ${e}`);
@@ -144,7 +147,7 @@ export default function BrowserPane() {
       <div className="row">
         <input value={urlInput} onChange={(e) => setUrlInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && go()} placeholder="https://…" className="grow" disabled={!running} />
         <button onClick={go} disabled={!running || busy}>Go</button>
-        <button onClick={async () => { await browserBack(); await refresh(); }} disabled={!running} title="Back">←</button>
+        <button onClick={async () => { await browserBack(await claimFor("browser_back", {})); await refresh(); }} disabled={!running} title="Back">←</button>
         <button onClick={async () => { await browserScroll(0, 600); await refresh(); }} disabled={!running} title="Scroll down">▼</button>
         <button onClick={async () => { await browserScroll(0, -600); await refresh(); }} disabled={!running} title="Scroll up">▲</button>
       </div>

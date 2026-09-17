@@ -26,7 +26,9 @@ afterEach(() => {
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke")));
 });
 
-const REJECT = { requestApproval: async () => false };
+// Policy stubs: TOK = native dialog confirmed, null = rejected/dismissed.
+const TOK = { token: "tok-test", detail: "{}" };
+const REJECT = { requestApproval: async () => null };
 
 describe("rejected side effects never reach the backend", () => {
   const gated: [string, Record<string, unknown>][] = [
@@ -68,23 +70,20 @@ describe("approved MCP forwards exact server/tool/args", () => {
     setMcpToolCache([
       { server: "demo", name: "get.Issue", qualified_name: "mcp_demo_get_issue", description: "", input_schema: {} },
     ]);
-    setInvokeImpl(async (cmd) => {
-      if (cmd === "approval_issue") return "tok-test";
-      return "42";
-    });
-    const out = await runTool("mcp_demo_get_issue", { a: 1 }, { requestApproval: async () => true });
+    setInvokeImpl(async () => "42");
+    const out = await runTool("mcp_demo_get_issue", { a: 1 }, { requestApproval: async () => TOK });
     expect(out).toBe("42");
-    // approval_issue + mcp_call_tool
-    expect(calls.map((c) => c.cmd)).toEqual(["approval_issue", "mcp_call_tool"]);
-    expect(calls[1].args).toEqual({
+    expect(calls.map((c) => c.cmd)).toEqual(["mcp_call_tool"]);
+    expect(calls[0].args).toEqual({
       server: "demo",
       tool: "get.Issue",
       args: { a: 1 },
       approval_token: "tok-test",
+      approval_detail: "{}",
     });
   });
   it("unknown MCP errors without invoking", async () => {
-    const out = await runTool("mcp_nope_x", {}, { requestApproval: async () => true });
+    const out = await runTool("mcp_nope_x", {}, { requestApproval: async () => TOK });
     expect(out).toMatch(/^error:/);
     expect(calls).toEqual([]);
   });
@@ -101,12 +100,9 @@ describe("read-only tools need no approval", () => {
   ];
   it.each(readable)("%s runs with zero prompts", async (name, args, backend) => {
     let approvals = 0;
-    setInvokeImpl(async (cmd) => {
-      if (cmd === "approval_issue") return "tok-test";
-      return backend;
-    });
+    setInvokeImpl(async () => backend);
     const out = await runTool(name, args, {
-      requestApproval: async () => { approvals++; return true; },
+      requestApproval: async () => { approvals++; return TOK; },
     });
     expect(out).not.toMatch(/^user rejected/);
     expect(approvals).toBe(0);
@@ -115,7 +111,7 @@ describe("read-only tools need no approval", () => {
 });
 
 describe("plan mode", () => {
-  const PLAN = { requestApproval: async () => true, planMode: true };
+  const PLAN = { requestApproval: async () => TOK, planMode: true };
   it.each([
     ["shell_run", { cwd: "/w", cmd: "ls" }],
     ["fs_write", { path: "/w/a", content: "x" }],
@@ -135,7 +131,7 @@ describe("plan mode", () => {
     let approvals = 0;
     setInvokeImpl(async () => "hello");
     const out = await runTool("fs_read", { path: "/w/a" }, {
-      requestApproval: async () => { approvals++; return true; },
+      requestApproval: async () => { approvals++; return TOK; },
       planMode: true,
     });
     expect(out).toBe("hello");
@@ -168,14 +164,13 @@ describe("undo capture for agent rename/delete", () => {
   it("captures renames after success", async () => {
     const captured: unknown[] = [];
     setInvokeImpl(async (cmd) => {
-      if (cmd === "approval_issue") return "tok-test";
       expect(cmd).toBe("fs_rename");
       return "renamed";
     });
     const out = await runTool(
       "fs_rename",
       { old_path: "/a", new_path: "/b" },
-      { requestApproval: async () => true, onUndoCapture: (e) => captured.push(e) },
+      { requestApproval: async () => TOK, onUndoCapture: (e) => captured.push(e) },
     );
     expect(out).toBe("renamed");
     expect(captured).toEqual([{ kind: "rename", oldPath: "/a", newPath: "/b" }]);
@@ -183,12 +178,11 @@ describe("undo capture for agent rename/delete", () => {
   it("captures file deletes with content, skips dirs and missing files", async () => {
     const captured: unknown[] = [];
     setInvokeImpl(async (cmd) => {
-      if (cmd === "approval_issue") return "tok-test";
       if (cmd === "fs_read") return "body";
       if (cmd === "fs_delete") return {};
       throw new Error(`unexpected ${cmd}`);
     });
-    const pol = { requestApproval: async () => true, onUndoCapture: (e: unknown) => captured.push(e) };
+    const pol = { requestApproval: async () => TOK, onUndoCapture: (e: unknown) => captured.push(e) };
     const out = await runTool("fs_delete", { path: "/w/a" }, pol);
     expect(out).toBe("deleted /w/a");
     expect(captured).toEqual([{ kind: "delete", path: "/w/a", content: "body" }]);
@@ -204,14 +198,13 @@ describe("lsp tool", () => {
   it("passes ops through with approval in Build, blocked in Plan", async () => {
     const seen: any[] = [];
     setInvokeImpl(async (cmd, args?: any) => {
-      if (cmd === "approval_issue") return "tok-test";
       expect(cmd).toBe("lsp_op");
       seen.push(args);
       return "mock-hover";
     });
     let approvals = 0;
     const pol = {
-      requestApproval: async () => { approvals++; return true; },
+      requestApproval: async () => { approvals++; return TOK; },
     };
     const out = await runTool("lsp", { op: "hover", path: "/w/a.ts", line: 3 }, pol);
     expect(out).toBe("mock-hover");
@@ -223,7 +216,7 @@ describe("lsp tool", () => {
     const planOut = await runTool(
       "lsp",
       { op: "hover", path: "/w/a.ts", line: 3 },
-      { requestApproval: async () => true, planMode: true },
+      { requestApproval: async () => TOK, planMode: true },
     );
     expect(planOut).toMatch(/^error: plan mode/);
   });
@@ -234,33 +227,32 @@ describe("background shell jobs", () => {
     const seen: string[] = [];
     setInvokeImpl(async (cmd) => {
       seen.push(cmd);
-      if (cmd === "approval_issue") return "tok-test";
       if (cmd === "shell_bg") return "job_abc";
       if (cmd === "shell_poll") return { status: "done", code: 0, stdout_tail: "ok", stderr_tail: "", elapsed_ms: 5 };
       if (cmd === "shell_kill") return "killed job_abc";
       throw new Error(`unexpected ${cmd}`);
     });
-    const APPROVE = { requestApproval: async () => true };
+    const APPROVE = { requestApproval: async () => TOK };
     expect(await runTool("shell_bg", { cwd: "/w", cmd: "sleep 60" }, APPROVE)).toMatch(/job_abc/);
     let approvals = 0;
     const poll = await runTool("shell_poll", { job_id: "job_abc" }, {
-      requestApproval: async () => { approvals++; return true; },
+      requestApproval: async () => { approvals++; return TOK; },
     });
     expect(poll).toContain("done");
     expect(approvals).toBe(0);
     expect(await runTool("shell_kill", { job_id: "job_abc" }, APPROVE)).toMatch(/killed/);
-    expect(seen).toEqual(["approval_issue", "shell_bg", "shell_poll", "approval_issue", "shell_kill"]);
+    expect(seen).toEqual(["shell_bg", "shell_poll", "shell_kill"]);
   });
   it("rejected start never spawns, empty args error", async () => {
     const out = await runTool("shell_bg", { cwd: "/w", cmd: "rm -rf ~" }, REJECT);
     expect(out).toMatch(/^user rejected/);
     expect(calls).toEqual([]);
-    await expect(runTool("shell_bg", { cmd: "" }, { requestApproval: async () => true })).resolves.toMatch(/^error:/);
-    await expect(runTool("shell_poll", {}, { requestApproval: async () => true })).resolves.toMatch(/^error:/);
+    await expect(runTool("shell_bg", { cmd: "" }, { requestApproval: async () => TOK })).resolves.toMatch(/^error:/);
+    await expect(runTool("shell_poll", {}, { requestApproval: async () => TOK })).resolves.toMatch(/^error:/);
   });
   it("plan mode blocks start/kill but allows poll", async () => {
     setInvokeImpl(async () => ({ status: "running", code: null, stdout_tail: "", stderr_tail: "", elapsed_ms: 1 }));
-    const PLAN = { requestApproval: async () => true, planMode: true };
+    const PLAN = { requestApproval: async () => TOK, planMode: true };
     await expect(runTool("shell_bg", { cmd: "make" }, PLAN)).resolves.toMatch(/^error: plan mode/);
     await expect(runTool("shell_kill", { job_id: "job_x" }, PLAN)).resolves.toMatch(/^error: plan mode/);
     expect(calls).toEqual([]);
@@ -296,7 +288,7 @@ describe("past sessions", () => {
       return JSON.stringify(metas);
     });
     const out = await runTool("sessions_list", {}, {
-      requestApproval: async () => { approvals++; return true; },
+      requestApproval: async () => { approvals++; return TOK; },
     });
     expect(out).toContain("Fresh scaffold");
     expect(approvals).toBe(0);
@@ -306,15 +298,15 @@ describe("past sessions", () => {
       expect(cmd).toBe("session_get");
       return JSON.stringify(file);
     });
-    const out = await runTool("session_read", { id: "s1" }, { requestApproval: async () => true });
+    const out = await runTool("session_read", { id: "s1" }, { requestApproval: async () => TOK });
     expect(out).toContain("scaffold fresh");
     expect(out).toContain("did it");
     expect(out).not.toContain("SECRET");
-    await expect(runTool("session_read", {}, { requestApproval: async () => true })).resolves.toMatch(/^error:/);
+    await expect(runTool("session_read", {}, { requestApproval: async () => TOK })).resolves.toMatch(/^error:/);
   });
   it("both work in plan mode", async () => {
     setInvokeImpl(async (cmd) => (cmd === "sessions_list" ? JSON.stringify(metas) : JSON.stringify(file)));
-    const PLAN = { requestApproval: async () => true, planMode: true };
+    const PLAN = { requestApproval: async () => TOK, planMode: true };
     expect(await runTool("sessions_list", {}, PLAN)).toContain("Fresh scaffold");
     expect(await runTool("session_read", { id: "s1" }, PLAN)).toContain("did it");
   });

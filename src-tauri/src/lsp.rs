@@ -256,6 +256,7 @@ pub(crate) fn lsp_diagnostics(
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     path: String,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<String, String> {
     let file = crate::checked_path(&state, window.label(), path, "lsp_diagnostics.path")?;
     if !file.is_file() {
@@ -280,6 +281,7 @@ pub(crate) fn lsp_diagnostics(
             &approvals,
             window.label(),
             "lsp_diagnostics",
+            &approval_detail,
             &approval_token,
         )?;
     }

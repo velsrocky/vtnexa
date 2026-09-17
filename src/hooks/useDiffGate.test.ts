@@ -109,13 +109,14 @@ describe("useDiffGate.approveDiff", () => {
         disk = args.content;
         return {};
       }
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     const h = setup(staged);
     await act(async () => {
       await h.result.current.approveDiff();
     });
-    expect(writes).toEqual([{ path: "/w/a.txt", content: "new" }]);
+    expect(writes).toMatchObject([{ path: "/w/a.txt", content: "new" }]);
     expect(h.wsOf().pendingDiff).toBeNull();
     expect(h.wsOf().shellOut).toMatch(/applied \/w\/a\.txt/);
     expect(h.wsOf().shellOut).not.toMatch(/verify/);
@@ -130,6 +131,7 @@ describe("useDiffGate.approveDiff", () => {
     setInvokeImpl(async (cmd) => {
       if (cmd === "fs_read") return "someone rewrote it";
       if (cmd === "fs_write") return {};
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     (window as any).confirm = vi.fn(() => true);
@@ -150,6 +152,7 @@ describe("useDiffGate.approveDiff", () => {
         writes++;
         return {};
       }
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     (window as any).confirm = vi.fn(() => false);
@@ -176,6 +179,7 @@ describe("useDiffGate.approveAndCommit", () => {
         commits.push(args);
         return { hash: "deadbeef1234" };
       }
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     const h = setup(staged);
@@ -207,6 +211,7 @@ describe("useDiffGate undo/redo", () => {
         deleted.push(args.path);
         return {};
       }
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     return {
@@ -295,6 +300,7 @@ describe("useDiffGate undo/redo", () => {
         gone = true;
         return {};
       }
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     const h = setup({

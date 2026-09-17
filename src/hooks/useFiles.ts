@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { UndoEntry, Workspace } from "../types";
 import { fsCreate, fsDelete, fsRead, fsRename } from "../lib/tauri";
+import { claimFor } from "../lib/approval";
 import { baseName, dirName } from "../lib/utils";
 
 export interface CreatingState {
@@ -57,7 +58,7 @@ export function useFiles(opts: {
     }
     const target = dirName(renaming.path) + "/" + name;
     try {
-      await fsRename(renaming.path, target);
+      await fsRename(renaming.path, target, await claimFor("fs_rename", { old_path: renaming.path, new_path: target }));
       opts.pushUndo({ kind: "rename", oldPath: renaming.path, newPath: target });
       opts.retargetTabs(renaming.path, target);
       setRenaming(null);
@@ -79,7 +80,7 @@ export function useFiles(opts: {
       }
     }
     try {
-      await fsDelete(path, isDir);
+      await fsDelete(path, isDir, await claimFor("fs_delete", { path }));
       if (content !== null) opts.pushUndo({ kind: "delete", path, content });
       opts.dropTabsUnder(path);
       opts.refreshFiles(opts.cwd);

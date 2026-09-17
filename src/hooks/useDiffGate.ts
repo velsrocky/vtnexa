@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { AuditInput, UndoEntry, Workspace } from "../types";
 import { undoEntryLabel } from "../types";
 import { fsDelete, fsRead, fsRename, fsWrite, gitCommit } from "../lib/tauri";
+import { claimFor } from "../lib/approval";
 import { baseName } from "../lib/utils";
 
 // Undo boundaries (v1): approved Diff-gate writes + file renames/deletes.
@@ -150,7 +151,9 @@ export function useDiffGate(opts: {
     if (!d) return;
     const drift = await driftRead(d);
     if (!drift.proceed) return;
-    await fsWrite(d.path, d.content);
+    // The Approve click is the review; the claim token binds this exact path
+    // backend-side so a compromised renderer cannot redirect the write.
+    await fsWrite(d.path, d.content, await claimFor("fs_write", { path: d.path }));
     markApplied(d.path, d.content);
     pushUndo({ kind: "write", path: d.path, before: drift.current, after: d.content, existedBefore: drift.existed });
     const verified = await verifyApplied(d.path, d.content);
@@ -173,7 +176,7 @@ export function useDiffGate(opts: {
     const drift = await driftRead(d);
     if (!drift.proceed) return;
 
-    await fsWrite(d.path, d.content);
+    await fsWrite(d.path, d.content, await claimFor("fs_write", { path: d.path }));
     markApplied(d.path, d.content);
     pushUndo({ kind: "write", path: d.path, before: drift.current, after: d.content, existedBefore: drift.existed });
     const verified = await verifyApplied(d.path, d.content);
@@ -181,7 +184,12 @@ export function useDiffGate(opts: {
     const msg = opts.commitMsg.trim() || `Update ${d.path.split("/").pop()}`;
     const t0 = Date.now();
     try {
-      const r = await gitCommit(ws.cwd || opts.cwd, msg, [d.path]);
+      const r = await gitCommit(
+        ws.cwd || opts.cwd,
+        msg,
+        [d.path],
+        await claimFor("git_commit", { cwd: ws.cwd || opts.cwd, message: msg, files: [d.path] }),
+      );
       updateWs((w) => ({
         ...w,
         pendingDiff: null,
@@ -233,7 +241,7 @@ export function useDiffGate(opts: {
       case "write": {
         const content = dir === "undo" ? e.before : e.after;
         if (dir === "undo" && !e.existedBefore) {
-          await fsDelete(e.path, false);
+          await fsDelete(e.path, false, await claimFor("fs_delete", { path: e.path }));
           setOriginals((o) => {
             const next = { ...o };
             delete next[e.path];
@@ -250,7 +258,7 @@ export function useDiffGate(opts: {
           }
           opts.closeTab(e.path);
         } else {
-          await fsWrite(e.path, content);
+          await fsWrite(e.path, content, await claimFor("fs_write", { path: e.path }));
           markApplied(e.path, content);
         }
         break;
@@ -258,16 +266,16 @@ export function useDiffGate(opts: {
       case "rename": {
         const from = dir === "undo" ? e.newPath : e.oldPath;
         const to = dir === "undo" ? e.oldPath : e.newPath;
-        await fsRename(from, to);
+        await fsRename(from, to, await claimFor("fs_rename", { old_path: from, new_path: to }));
         opts.retargetTabs(from, to);
         break;
       }
       case "delete": {
         if (dir === "undo") {
-          await fsWrite(e.path, e.content);
+          await fsWrite(e.path, e.content, await claimFor("fs_write", { path: e.path }));
           markApplied(e.path, e.content);
         } else {
-          await fsDelete(e.path, false);
+          await fsDelete(e.path, false, await claimFor("fs_delete", { path: e.path }));
           if (e.path === openPath) {
             setOriginalText("");
             setEditorText("");

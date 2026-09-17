@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { Approval } from "./approval";
 import type { FileEntry } from "../types";
+
+function approvalArgs(a?: Approval): { approval_token: string | null; approval_detail: string | null } {
+  return { approval_token: a?.token ?? null, approval_detail: a?.detail ?? null };
+}
 
 export async function fsList(path: string): Promise<FileEntry[]> {
   return invoke<FileEntry[]>("fs_list", { path });
@@ -9,35 +14,27 @@ export async function fsRead(path: string): Promise<string> {
   return invoke<string>("fs_read", { path });
 }
 
-export async function fsWrite(path: string, content: string): Promise<void> {
-  return invoke<void>("fs_write", { path, content });
+export async function fsWrite(path: string, content: string, approval?: Approval): Promise<void> {
+  return invoke<void>("fs_write", { path, content, ...approvalArgs(approval) });
 }
 
 export async function fsCreate(path: string, isDir?: boolean): Promise<string> {
   return invoke<string>("fs_create", { path, is_dir: isDir ?? false });
 }
 
-export async function fsRename(
-  oldPath: string,
-  newPath: string,
-  approvalToken?: string,
-): Promise<string> {
+export async function fsRename(oldPath: string, newPath: string, approval?: Approval): Promise<string> {
   return invoke<string>("fs_rename", {
     old_path: oldPath,
     new_path: newPath,
-    approval_token: approvalToken ?? null,
+    ...approvalArgs(approval),
   });
 }
 
-export async function fsDelete(
-  path: string,
-  recursive?: boolean,
-  approvalToken?: string,
-): Promise<void> {
+export async function fsDelete(path: string, recursive?: boolean, approval?: Approval): Promise<void> {
   return invoke<void>("fs_delete", {
     path,
     recursive: recursive ?? false,
-    approval_token: approvalToken ?? null,
+    ...approvalArgs(approval),
   });
 }
 
@@ -101,13 +98,13 @@ export async function gitCommit(
   cwd: string,
   message: string,
   files?: string[],
-  approvalToken?: string,
+  approval?: Approval,
 ): Promise<GitCommitOut> {
   return invoke<GitCommitOut>("git_commit", {
     cwd,
     message,
     files: files ?? null,
-    approval_token: approvalToken ?? null,
+    ...approvalArgs(approval),
   });
 }
 
@@ -150,8 +147,8 @@ export interface ShellResult {
   code: number;
 }
 
-export async function shellRun(cwd: string, cmd: string, approvalToken?: string): Promise<ShellResult> {
-  return invoke<ShellResult>("shell_run", { cwd, cmd, approval_token: approvalToken ?? null });
+export async function shellRun(cwd: string, cmd: string, approval?: Approval): Promise<ShellResult> {
+  return invoke<ShellResult>("shell_run", { cwd, cmd, ...approvalArgs(approval) });
 }
 
 export interface ShellPoll {
@@ -162,20 +159,20 @@ export interface ShellPoll {
   elapsed_ms: number;
 }
 
-export async function shellBg(cwd: string, cmd: string, approvalToken?: string): Promise<string> {
-  return invoke<string>("shell_bg", { cwd, cmd, approval_token: approvalToken ?? null });
+export async function shellBg(cwd: string, cmd: string, approval?: Approval): Promise<string> {
+  return invoke<string>("shell_bg", { cwd, cmd, ...approvalArgs(approval) });
 }
 
 export async function shellPoll(id: string): Promise<ShellPoll> {
   return invoke<ShellPoll>("shell_poll", { id });
 }
 
-export async function shellKill(id: string): Promise<string> {
-  return invoke<string>("shell_kill", { id });
+export async function shellKill(id: string, approval?: Approval): Promise<string> {
+  return invoke<string>("shell_kill", { id, ...approvalArgs(approval) });
 }
 
-export async function lspDiagnostics(path: string, approvalToken?: string): Promise<string> {
-  return invoke<string>("lsp_diagnostics", { path, approval_token: approvalToken ?? null });
+export async function lspDiagnostics(path: string, approval?: Approval): Promise<string> {
+  return invoke<string>("lsp_diagnostics", { path, ...approvalArgs(approval) });
 }
 
 export interface LspOpArgs {
@@ -184,7 +181,7 @@ export interface LspOpArgs {
   line?: number;
   character?: number;
   symbol?: string;
-  approvalToken?: string;
+  approval?: Approval;
 }
 
 export async function lspOp(args: LspOpArgs): Promise<string> {
@@ -194,7 +191,7 @@ export async function lspOp(args: LspOpArgs): Promise<string> {
     line: args.line ?? null,
     character: args.character ?? null,
     symbol: args.symbol ?? null,
-    approval_token: args.approvalToken ?? null,
+    ...approvalArgs(args.approval),
   });
 }
 

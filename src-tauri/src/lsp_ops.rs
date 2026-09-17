@@ -539,6 +539,7 @@ pub(crate) fn lsp_op(
     character: Option<i64>,
     symbol: Option<String>,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<String, String> {
     let file = crate::checked_path(&state, window.label(), path, "lsp.path")?;
     if !file.is_file() {
@@ -584,7 +585,13 @@ pub(crate) fn lsp_op(
     // Exec gate: workspace-local language servers are attacker-plantable.
     // PATH-installed servers stay auto-approved; local .bin needs a token.
     if server_is_workspace_local(&program, &ws_root) {
-        crate::approvals::approval_consume(&approvals, window.label(), "lsp_op", &approval_token)?;
+        crate::approvals::approval_consume(
+            &approvals,
+            window.label(),
+            "lsp_op",
+            &approval_detail,
+            &approval_token,
+        )?;
     }
     let disk_text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
     if disk_text.len() > 1024 * 1024 {

@@ -1,20 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createWorkspaceStore } from "./workspaceStore";
 import { isGatedTool, isReadOnlyTool, toolsForMode } from "./toolDefs";
-import { lspNeedsApproval } from "./approval";
-
-describe("workspaceStore", () => {
-  it("caps audit at 100 and resolves approvals FIFO", () => {
-    const s = createWorkspaceStore();
-    for (let i = 0; i < 150; i++) s.log({ tool: "fs_read", decision: "auto", ok: true, ms: 1 });
-    expect(s.snapshot().audit).toHaveLength(100);
-    s.enqueue("shell_run", { cmd: "ls" });
-    s.enqueue("git_commit", { message: "m" });
-    expect(s.snapshot().pending).toHaveLength(2);
-    expect(s.resolveHead(true)?.tool).toBe("shell_run");
-    expect(s.snapshot().pending).toHaveLength(1);
-  });
-});
+import { actionFor, detailFor, lspNeedsApproval } from "./approval";
 
 describe("toolDefs", () => {
   it("gates side-effects + MCP, keeps reads free", () => {
@@ -43,5 +29,17 @@ describe("lspNeedsApproval", () => {
     expect(lspNeedsApproval("/w/a.pyi")).toBe(false);
     expect(lspNeedsApproval("/w/a.ts")).toBe(true);
     expect(lspNeedsApproval("/w/main.rs")).toBe(true);
+  });
+});
+
+describe("approval detail + action mapping", () => {
+  it("details are stable JSON capped at 4000 chars", () => {
+    expect(detailFor({ cwd: "/w", cmd: "ls" })).toBe('{"cwd":"/w","cmd":"ls"}');
+    expect(detailFor(null)).toBe("{}");
+    expect(detailFor("x".repeat(9000)).length).toBe(4000);
+  });
+  it("lsp maps to the lsp_op backend action", () => {
+    expect(actionFor("lsp")).toBe("lsp_op");
+    expect(actionFor("shell_run")).toBe("shell_run");
   });
 });

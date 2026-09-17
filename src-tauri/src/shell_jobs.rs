@@ -93,6 +93,7 @@ fn kill_job(job: &mut ShellJob) {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn shell_bg(
     window: tauri::WebviewWindow,
     jobs: tauri::State<'_, ShellJobs>,
@@ -101,8 +102,15 @@ pub(crate) fn shell_bg(
     cwd: String,
     cmd: String,
     approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<String, String> {
-    crate::approvals::approval_consume(&approvals, window.label(), "shell_bg", &approval_token)?;
+    crate::approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "shell_bg",
+        &approval_detail,
+        &approval_token,
+    )?;
     if cmd.is_empty() || cmd.contains('\0') {
         return Err("shell_bg: empty or invalid cmd".to_string());
     }
@@ -231,7 +239,21 @@ pub(crate) fn shell_poll(
 }
 
 #[tauri::command]
-pub(crate) fn shell_kill(jobs: tauri::State<'_, ShellJobs>, id: String) -> Result<String, String> {
+pub(crate) fn shell_kill(
+    window: tauri::WebviewWindow,
+    jobs: tauri::State<'_, ShellJobs>,
+    approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
+    id: String,
+    approval_token: Option<String>,
+    approval_detail: Option<String>,
+) -> Result<String, String> {
+    crate::approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "shell_kill",
+        &approval_detail,
+        &approval_token,
+    )?;
     if !valid_job_id(&id) {
         return Err("shell_kill: invalid job id".to_string());
     }
