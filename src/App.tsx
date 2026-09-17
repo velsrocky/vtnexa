@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { loader } from "@monaco-editor/react";
-// Monaco served from local static files (public/vs, copied from
-// node_modules/monaco-editor/min/vs by the predev/prebuild script) instead of
-// the default jsdelivr CDN. Required for offline use and the Tauri CSP
-// (script-src 'self', no CDN host). Workers load same-origin via getWorkerUrl.
-loader.config({ paths: { vs: "/vs" } });
+if (import.meta.env.MODE === "development") {
+  loader.config({ paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.56.0/min/vs" } });
+} else {
+  loader.config({ paths: { vs: "/vs" } });
+}
 import "./App.css";
 import type { CenterTab, SideTab } from "./types";
 import ApprovalModal from "./components/ApprovalModal";

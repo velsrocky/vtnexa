@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "sync-monaco": "rm -rf public/vs && mkdir -p public && cp -r node_modules/monaco-editor/min/vs public/vs",
-    "sync-skills": "rm -rf src-tauri/.vtnexa/skills && mkdir -p src-tauri/.vtnexa/skills && cp .vtnexa/skills/*.md src-tauri/.vtnexa/skills/",
+    "sync-skills": "rm -rf src-tauri/.vtnexa/skills && mkdir -p src-tauri/.vtnexa/skills && cp .vtnexa/skills/*.md src-tauri/.vtnexa/skills/ 2>/dev/null || true",
     "stage-sidecar": "rm -rf src-tauri/sidecar-stage && mkdir -p src-tauri/sidecar-stage/browser && cp sidecar/browser/server.js sidecar/browser/package.json src-tauri/sidecar-stage/browser/ && cp -rL sidecar/browser/node_modules src-tauri/sidecar-stage/browser/node_modules",
     "pretauri": "pnpm run stage-sidecar && pnpm run sync-skills",
-    "predev": "pnpm run sync-monaco && pnpm run sync-skills",
+    "predev": "pnpm run sync-skills",
     "dev": "vite",
     "prebuild": "pnpm run sync-monaco && pnpm run sync-skills",
     "build": "tsc && vite build",

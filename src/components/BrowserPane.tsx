@@ -10,6 +10,8 @@ import {
   browserStatus,
   browserStop,
   browserType,
+  getBrowserPort,
+  setBrowserPort,
   type BrowserSnapshot,
 } from "../lib/browser";
 
@@ -43,7 +45,12 @@ export default function BrowserPane() {
     try {
       const st = await browserStatus();
       setRunning(!!st.running);
-      if (st.running) refresh();
+      if (st.running) {
+        if (st.url) {
+          setBrowserPort(parseInt(st.url.split(':')[2] || '39317', 10));
+        }
+        refresh();
+      }
       return !!st.running;
     } catch {
       setRunning(false);
@@ -58,12 +65,14 @@ export default function BrowserPane() {
   async function start() {
     setBusy(true);
     try {
-      // browser_start resolves (does not reject) with {ok:false,...} when the
-      // sidecar fails to become ready - treat that as a failure, not "running".
-      const r = (await browserStart(39317, headless)) as { ok?: boolean; error?: string } | null;
+      const r = (await browserStart(headless)) as { ok?: boolean; baseUrl?: string; error?: string } | null;
       if (!r || r.ok === false) throw new Error(r?.error || "sidecar did not become ready");
       setRunning(true);
-      setNote("browser running (profile ~/.config/vtai-browser-profile)");
+      setNote(`browser running (profile ~/.config/vtai-browser-profile)`);
+      if (r.baseUrl) {
+        const parsed = parseInt(r.baseUrl.split(':')[2], 10);
+        if (!Number.isNaN(parsed)) setBrowserPort(parsed);
+      }
       await refresh();
     } catch (e) {
       setRunning(false);
@@ -121,6 +130,7 @@ export default function BrowserPane() {
     <div className="browser-col">
       <div className="row">
         <span className={running ? "pill on" : "pill"}>{running ? "● running" : "○ stopped"}</span>
+        <span className="muted small">port: {getBrowserPort()}</span>
         <label className="muted small">
           <input type="checkbox" checked={headless} onChange={(e) => setHeadless(e.target.checked)} /> headless
         </label>
