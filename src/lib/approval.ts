@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** Review-gate protocol version. Bumped whenever the issue/claim/consume
+ *  shapes change. The backend rejects mismatched versions LOUDLY so a stale
+ *  window (zombie pre-restart renderer against a fresh backend, or vice
+ *  versa) can never fail as a confusing "approval required" — it says
+ *  restart. Shown in the TopBar as `gate vN`. */
+export const APPROVAL_PROTO = 3;
+
 /** Backend capability: single-use token + the exact detail it was issued for. */
 export interface Approval {
   token: string;
@@ -25,7 +32,7 @@ export function actionFor(tool: string): string {
  *  click it. */
 export async function approvalIssue(action: string, detail?: string): Promise<Approval> {
   const d = (detail ?? "").slice(0, 4000);
-  const token = await invoke<string>("approval_issue", { action, detail: d });
+  const token = await invoke<string>("approval_issue", { action, detail: d, proto: APPROVAL_PROTO });
   return { token, detail: d };
 }
 
@@ -34,7 +41,7 @@ export async function approvalIssue(action: string, detail?: string): Promise<Ap
  *  The agent turn pipeline must never call this — runTool uses issue only. */
 export async function approvalClaim(action: string, detail?: string): Promise<Approval> {
   const d = (detail ?? "").slice(0, 4000);
-  const token = await invoke<string>("approval_claim", { action, detail: d });
+  const token = await invoke<string>("approval_claim", { action, detail: d, proto: APPROVAL_PROTO });
   return { token, detail: d };
 }
 

@@ -25,6 +25,21 @@ const MAX_DETAIL_LEN: usize = 20_000;
 const DETAIL_STORE_LEN: usize = 4000;
 const DIALOG_DETAIL_LEN: usize = 1000;
 
+/// Review-gate protocol version. Must match the frontend's APPROVAL_PROTO
+/// (shown as `gate vN` in the TopBar). Mismatches fail LOUDLY on issue/claim
+/// so mixed-version windows can never die as a confusing backend error.
+pub(crate) const APPROVAL_PROTO: i32 = 3;
+
+pub(crate) fn check_proto(proto: &Option<i32>) -> Result<(), String> {
+    if proto != &Some(APPROVAL_PROTO) {
+        return Err(format!(
+            "stale app build (approval protocol mismatch, want v{}) — quit ALL VTNexa windows/processes and restart",
+            APPROVAL_PROTO
+        ));
+    }
+    Ok(())
+}
+
 /// Privileged actions that must go through issue/claim -> token -> consume.
 pub(crate) const PRIVILEGED_ACTIONS: &[&str] = &[
     "shell_run",
@@ -196,7 +211,9 @@ pub(crate) async fn approval_issue(
     store: tauri::State<'_, ApprovalStore>,
     action: String,
     detail: Option<String>,
+    proto: Option<i32>,
 ) -> Result<String, String> {
+    check_proto(&proto)?;
     let (action, normed) = validate_issue(&action, &detail)?;
     let (tx, rx) = std::sync::mpsc::channel::<bool>();
     window
@@ -229,7 +246,9 @@ pub(crate) fn approval_claim(
     store: tauri::State<'_, ApprovalStore>,
     action: String,
     detail: Option<String>,
+    proto: Option<i32>,
 ) -> Result<String, String> {
+    check_proto(&proto)?;
     let (action, normed) = validate_issue(&action, &detail)?;
     mint(&store, window.label(), action, normed)
 }
@@ -333,5 +352,14 @@ mod tests {
         let t = dialog_text("shell_run", &"y".repeat(5000));
         assert!(t.contains("…[truncated]"));
         assert!(t.len() < 3000);
+    }
+
+    #[test]
+    fn proto_mismatch_is_loud() {
+        assert!(check_proto(&Some(APPROVAL_PROTO)).is_ok());
+        assert!(check_proto(&None).unwrap_err().contains("stale app build"));
+        assert!(check_proto(&Some(APPROVAL_PROTO - 1))
+            .unwrap_err()
+            .contains("restart"));
     }
 }

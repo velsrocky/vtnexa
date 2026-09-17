@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { THEMES, asThemeId, type ThemeId } from "../lib/theme";
+import { APPROVAL_PROTO } from "../lib/approval";
 
 export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mcpOn, mcpTools, themeId, onOpenRoutines, onOpenMcp, onThemeChange }: {
   workspaceLabel: string;
@@ -16,6 +17,12 @@ export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mc
     <header className="topbar">
       <strong>VTNexa</strong>
       <span className="muted">private agent workspace</span>
+      <span
+        className="muted small"
+        title={`Review-gate protocol v${APPROVAL_PROTO} (native OS dialogs + bound tokens). If agent approvals misbehave, check this matches the latest commit — a stale window serves old gate code.`}
+      >
+        gate v{APPROVAL_PROTO}
+      </span>
       <div className="lanes">
         <span className="muted small" title={`Window: ${windowLabel}`}>
           {workspaceLabel || "(no workspace)"}
