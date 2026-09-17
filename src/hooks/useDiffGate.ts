@@ -169,7 +169,7 @@ export function useDiffGate(opts: {
   }
 
   // Approve + immediately commit that file. User-initiated (the click IS the
-  // approval), so no popup - but it is recorded in this window's audit trail.
+  // approval), so no extra dialog - but it is recorded in this window's audit trail.
   async function approveAndCommit() {
     const d = ws.pendingDiff;
     if (!d) return;

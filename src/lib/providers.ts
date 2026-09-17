@@ -598,7 +598,7 @@ function toTextToolCall(item: unknown): ToolCall | null {
  * ("...thanks!\n{\"name\":\"nexa_read\",...}") or fenced JSON after
  * explanation. Stricter than it looks: every candidate must be balanced,
  * valid JSON whose `name` is a real tool. Destructive tools stay safe -
- * they still go through the approval popup, writes still stage to the
+ * they still go through the native approval dialog, writes still stage to the
  * Diff gate. Capped so a pasted doc can't fan out into many calls.
  */
 const MAX_EMBEDDED_CALLS = 3;
@@ -810,12 +810,12 @@ export async function runTool(
   try {
     // Plan-mode backstop (covers prose-recovered calls too): the defs are
     // already withheld above, so anything arriving here is a violation.
-    // Fail-closed, before any approval popup.
+    // Fail-closed, before any approval dialog.
     if (policy?.planMode && !isReadOnlyTool(name)) {
       return `error: plan mode is on - ${name} is disabled this turn (read-only tools only; switch to Build to act)`;
     }
     // Native OS dialog first (page JS can trigger it but cannot click it),
-    // backend token second. Unknown MCP tools fail before any popup/invoke.
+    // backend token second. Unknown MCP tools fail before any dialog/invoke.
     // No approval handler (headless/routine context) fails closed — no dialog.
     let approval: Approval | undefined;
     if (isMcpToolName(name) && !resolveMcpQualified(name)) {
@@ -1820,7 +1820,7 @@ export async function chatWithTools(
             content:
               `You DO have that capability: shell_run runs commands, ` +
               `fs_list/fs_read read files - side effects just need the user's ` +
-              `popup approval. Never claim to be text-only or unable. Either ` +
+              `native OS dialog approval. Never claim to be text-only or unable. Either ` +
               `emit the real tool call NOW or explain the next approved step.`,
           });
           continue;
@@ -1839,7 +1839,7 @@ export async function chatWithTools(
           role: "user",
           content:
             `You asked for direction instead of acting, and no tool has run yet this turn. ` +
-            `Authorization is already handled by approval popups - you never need to ask for it in text. ` +
+            `Authorization is already handled by a native OS dialog - you never need to ask for it in text. ` +
             `Emit the real tool call NOW via tool_calls, or write the final answer if there is nothing to do. ` +
             `Do not ask another question.`,
         });
