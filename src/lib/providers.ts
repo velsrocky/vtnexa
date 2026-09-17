@@ -830,7 +830,14 @@ export async function runTool(
       }
       const got = await policy.requestApproval(name, args);
       if (!got) return `user rejected ${name} - do not retry without changing the plan`;
-      approval = got;
+      // Shape-check the Approval: a stale renderer module (zombie window from
+      // before a restart) can hand back a bare boolean instead of {token,
+      // detail}. Sending that on would die backend-side with a confusing
+      // "approval required" — fail here, loudly, instead.
+      if (typeof got.token !== "string" || !got.token || typeof got.detail !== "string") {
+        return `error: approval handshake broken for ${name} (stale app window? quit ALL VTNexa windows/processes and restart the app)`;
+      }
+      approval = { token: got.token, detail: got.detail };
     }
     if (isMcpToolName(name)) {
       const parts = resolveMcpQualified(name);

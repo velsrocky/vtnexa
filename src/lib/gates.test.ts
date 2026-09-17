@@ -54,6 +54,23 @@ describe("rejected side effects never reach the backend", () => {
   });
 });
 
+describe("stale renderer modules fail loudly, never silently", () => {
+  it("a bare-boolean policy (pre-restart window) is refused before any invoke", async () => {
+    setInvokeImpl(async () => {
+      throw new Error("must not reach backend");
+    });
+    // Simulates a zombie window whose useAgentTurn still resolves booleans:
+    // truthy, but with no token to send. Must NOT surface as a backend
+    // "approval required" — the turn must say restart.
+    const out = await runTool("shell_run", { cwd: "/w", cmd: "ls" }, {
+      requestApproval: async () => true as unknown as { token: string; detail: string },
+    });
+    expect(out).toMatch(/handshake broken/);
+    expect(out).toMatch(/restart/);
+    expect(calls).toEqual([]);
+  });
+});
+
 describe("rejected MCP never spawns its server", () => {
   it("resolves from cache but still stops at the gate", async () => {
     setMcpToolCache([
