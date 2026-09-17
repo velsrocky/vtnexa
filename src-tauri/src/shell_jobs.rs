@@ -97,9 +97,12 @@ pub(crate) fn shell_bg(
     window: tauri::WebviewWindow,
     jobs: tauri::State<'_, ShellJobs>,
     ws: tauri::State<'_, crate::WorkspaceRoots>,
+    approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     cwd: String,
     cmd: String,
+    approval_token: Option<String>,
 ) -> Result<String, String> {
+    crate::approvals::approval_consume(&approvals, window.label(), "shell_bg", &approval_token)?;
     if cmd.is_empty() || cmd.contains('\0') {
         return Err("shell_bg: empty or invalid cmd".to_string());
     }

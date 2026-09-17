@@ -42,7 +42,12 @@ describe("rejected side effects never reach the backend", () => {
   ];
   it.each(gated)("%s rejected -> no invoke", async (name, args) => {
     const out = await runTool(name, args, REJECT);
-    expect(out).toMatch(/^user rejected/);
+    // Unknown MCP tools fail before the gate (still zero invokes — the property).
+    if (name.startsWith("mcp_")) {
+      expect(out).toMatch(/^error: unknown MCP tool/);
+    } else {
+      expect(out).toMatch(/^user rejected/);
+    }
     expect(calls).toEqual([]);
   });
 });
@@ -63,12 +68,20 @@ describe("approved MCP forwards exact server/tool/args", () => {
     setMcpToolCache([
       { server: "demo", name: "get.Issue", qualified_name: "mcp_demo_get_issue", description: "", input_schema: {} },
     ]);
-    setInvokeImpl(async () => "42");
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_issue") return "tok-test";
+      return "42";
+    });
     const out = await runTool("mcp_demo_get_issue", { a: 1 }, { requestApproval: async () => true });
     expect(out).toBe("42");
-    expect(calls).toHaveLength(1);
-    expect(calls[0].cmd).toBe("mcp_call_tool");
-    expect(calls[0].args).toEqual({ server: "demo", tool: "get.Issue", args: { a: 1 } });
+    // approval_issue + mcp_call_tool
+    expect(calls.map((c) => c.cmd)).toEqual(["approval_issue", "mcp_call_tool"]);
+    expect(calls[1].args).toEqual({
+      server: "demo",
+      tool: "get.Issue",
+      args: { a: 1 },
+      approval_token: "tok-test",
+    });
   });
   it("unknown MCP errors without invoking", async () => {
     const out = await runTool("mcp_nope_x", {}, { requestApproval: async () => true });
@@ -81,13 +94,17 @@ describe("read-only tools need no approval", () => {
   const readable: [string, Record<string, unknown>, unknown][] = [
     ["fs_list", { path: "/w" }, [{ name: "a", path: "/w/a", is_dir: false }]],
     ["fs_read", { path: "/w/a" }, "hello"],
-    ["lsp_diagnostics", { path: "/w/a.ts" }, "clean: no diagnostics for /w/a.ts"],
+    // Python diagnostics stay approval-free (pure py_compile).
+    ["lsp_diagnostics", { path: "/w/a.py" }, "clean: no diagnostics for /w/a.py"],
     ["git_status", { cwd: "/w" }, { branch: "main", root: "/w", files: [] }],
     ["nexa_read", { kind: "pad" }, ""],
   ];
   it.each(readable)("%s runs with zero prompts", async (name, args, backend) => {
     let approvals = 0;
-    setInvokeImpl(async () => backend);
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_issue") return "tok-test";
+      return backend;
+    });
     const out = await runTool(name, args, {
       requestApproval: async () => { approvals++; return true; },
     });
@@ -151,6 +168,7 @@ describe("undo capture for agent rename/delete", () => {
   it("captures renames after success", async () => {
     const captured: unknown[] = [];
     setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_issue") return "tok-test";
       expect(cmd).toBe("fs_rename");
       return "renamed";
     });
@@ -165,6 +183,7 @@ describe("undo capture for agent rename/delete", () => {
   it("captures file deletes with content, skips dirs and missing files", async () => {
     const captured: unknown[] = [];
     setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_issue") return "tok-test";
       if (cmd === "fs_read") return "body";
       if (cmd === "fs_delete") return {};
       throw new Error(`unexpected ${cmd}`);
@@ -182,9 +201,10 @@ describe("undo capture for agent rename/delete", () => {
 });
 
 describe("lsp tool", () => {
-  it("passes ops through, validates paths, stays read-only in plan", async () => {
+  it("passes ops through with approval in Build, blocked in Plan", async () => {
     const seen: any[] = [];
     setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "approval_issue") return "tok-test";
       expect(cmd).toBe("lsp_op");
       seen.push(args);
       return "mock-hover";
@@ -192,14 +212,20 @@ describe("lsp tool", () => {
     let approvals = 0;
     const pol = {
       requestApproval: async () => { approvals++; return true; },
-      planMode: true,
     };
     const out = await runTool("lsp", { op: "hover", path: "/w/a.ts", line: 3 }, pol);
     expect(out).toBe("mock-hover");
-    expect(approvals).toBe(0);
+    expect(approvals).toBe(1);
     expect(seen[0]).toMatchObject({ op: "hover", path: "/w/a.ts", line: 3 });
     await expect(runTool("lsp", { op: "hover", path: "rel/a.ts" }, pol)).resolves.toMatch(/^error:/);
     await expect(runTool("lsp", { path: "/w/a.ts" }, pol)).resolves.toMatch(/^error:/);
+    // Plan mode withholds lsp entirely (executes workspace code).
+    const planOut = await runTool(
+      "lsp",
+      { op: "hover", path: "/w/a.ts", line: 3 },
+      { requestApproval: async () => true, planMode: true },
+    );
+    expect(planOut).toMatch(/^error: plan mode/);
   });
 });
 
@@ -208,6 +234,7 @@ describe("background shell jobs", () => {
     const seen: string[] = [];
     setInvokeImpl(async (cmd) => {
       seen.push(cmd);
+      if (cmd === "approval_issue") return "tok-test";
       if (cmd === "shell_bg") return "job_abc";
       if (cmd === "shell_poll") return { status: "done", code: 0, stdout_tail: "ok", stderr_tail: "", elapsed_ms: 5 };
       if (cmd === "shell_kill") return "killed job_abc";
@@ -222,7 +249,7 @@ describe("background shell jobs", () => {
     expect(poll).toContain("done");
     expect(approvals).toBe(0);
     expect(await runTool("shell_kill", { job_id: "job_abc" }, APPROVE)).toMatch(/killed/);
-    expect(seen).toEqual(["shell_bg", "shell_poll", "shell_kill"]);
+    expect(seen).toEqual(["approval_issue", "shell_bg", "shell_poll", "approval_issue", "shell_kill"]);
   });
   it("rejected start never spawns, empty args error", async () => {
     const out = await runTool("shell_bg", { cwd: "/w", cmd: "rm -rf ~" }, REJECT);

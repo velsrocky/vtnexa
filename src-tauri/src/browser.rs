@@ -115,22 +115,100 @@ fn resolve_server_js(app: &tauri::AppHandle) -> Option<String> {
         );
         candidates.push(res.join("sidecar").join("browser").join("server.js"));
     }
-    // 2. relative to cwd (dev: cwd == src-tauri -> ../sidecar; or app root -> sidecar)
-    candidates.push(std::path::PathBuf::from("../sidecar/browser/server.js"));
-    candidates.push(std::path::PathBuf::from("sidecar/browser/server.js"));
-    // 3. relative to current exe (target/debug/vtaitool -> ../../sidecar/...)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("../../sidecar/browser/server.js"));
-            candidates.push(dir.join("../sidecar/browser/server.js"));
+    // In release builds, ONLY trust the bundled resource dir. CWD/exe-relative
+    // fallbacks are a hijack vector (attacker plants sidecar/browser/server.js
+    // in a workspace and gets code exec as the user).
+    #[cfg(not(debug_assertions))]
+    {
+        for c in &candidates {
+            if c.exists() {
+                return Some(c.to_string_lossy().to_string());
+            }
         }
+        return None;
     }
+    #[cfg(debug_assertions)]
+    {
+        // 2. relative to cwd (dev: cwd == src-tauri -> ../sidecar; or app root -> sidecar)
+        candidates.push(std::path::PathBuf::from("../sidecar/browser/server.js"));
+        candidates.push(std::path::PathBuf::from("sidecar/browser/server.js"));
+        // 3. relative to current exe (target/debug/vtaitool -> ../../sidecar/...)
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join("../../sidecar/browser/server.js"));
+                candidates.push(dir.join("../sidecar/browser/server.js"));
+            }
+        }
 
-    for c in candidates {
-        if c.exists() {
-            return Some(c.to_string_lossy().to_string());
+        for c in candidates {
+            if c.exists() {
+                return Some(c.to_string_lossy().to_string());
+            }
         }
+        None
     }
+}
+
+/// SSRF guard: block loopback/link-local/private navigation by default.
+/// The agent drives a signed-in browser — IMDS (169.254.169.254) and LAN
+/// hosts must not be reachable without an explicit user decision.
+pub(crate) fn navigation_host_blocked(url: &str) -> bool {
+    let host = url
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(url)
+        .split(['/', '?', '#', ':'])
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if host.is_empty() {
+        return true;
+    }
+    if host == "localhost" || host.ends_with(".local") || host == "0.0.0.0" {
+        return true;
+    }
+    // IPv4 literal?
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
+        let oct: Vec<u8> = parts.iter().map(|p| p.parse().unwrap_or(0)).collect();
+        // loopback 127/8, private 10/8, 172.16/12, 192.168/16, link-local 169.254/16
+        if oct[0] == 127 || oct[0] == 10 {
+            return true;
+        }
+        if oct[0] == 172 && (16..=31).contains(&oct[1]) {
+            return true;
+        }
+        if oct[0] == 192 && oct[1] == 168 {
+            return true;
+        }
+        if oct[0] == 169 && oct[1] == 254 {
+            return true;
+        }
+        // 0/8
+        if oct[0] == 0 {
+            return true;
+        }
+        return false;
+    }
+    if host == "::1" || host == "[::1]" {
+        return true;
+    }
+    false
+}
+
+#[cfg(unix)]
+fn write_token_file(port: u16, token: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::temp_dir().join(format!("vtnexa-browser-{}.token", port));
+    if std::fs::write(&path, token).is_err() {
+        return None;
+    }
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    Some(path)
+}
+
+#[cfg(not(unix))]
+fn write_token_file(_port: u16, _token: &str) -> Option<std::path::PathBuf> {
     None
 }
 
@@ -190,6 +268,10 @@ pub async fn browser_start(
             Ok(())
         });
     }
+    // Token via 0600 file (preferred) + env for back-compat. /proc environ
+    // leaks env to same-user processes; the file is root-only-readable and
+    // the sidecar prefers it.
+    let token_file = write_token_file(port, &token);
     cmd.arg(&script)
         .arg("--port")
         .arg(port.to_string())
@@ -199,6 +281,14 @@ pub async fn browser_start(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .stdin(Stdio::null());
+    if let Some(p) = &token_file {
+        cmd.arg("--token-file").arg(p);
+    }
+    // Sandbox: Chromium --no-sandbox is now opt-in only
+    // (VTAI_BROWSER_NO_SANDBOX=1). Default runs sandboxed.
+    if std::env::var("VTAI_BROWSER_NO_SANDBOX").as_deref() == Ok("1") {
+        cmd.env("VTAI_BROWSER_NO_SANDBOX", "1");
+    }
 
     // inherit profile/chrome overrides if the user exported them
     for key in ["VTAI_BROWSER_PROFILE", "VTAI_BROWSER_CHROME"] {
@@ -298,11 +388,26 @@ pub async fn browser_status(state: tauri::State<'_, BrowserState>) -> Result<Val
 
 #[tauri::command]
 pub async fn browser_navigate(
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, BrowserState>,
+    approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     url: String,
+    approval_token: Option<String>,
 ) -> Result<Value, String> {
+    crate::approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "browser_navigate",
+        &approval_token,
+    )?;
     if url.len() > 4096 || !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("browser_navigate: http(s) URL required".to_string());
+    }
+    if navigation_host_blocked(&url) {
+        return Err(
+            "browser_navigate: refused (loopback/private/link-local target — visit manually if you really need it)"
+                .to_string(),
+        );
     }
     post_path(&state, "/navigate", json!({ "url": url })).await
 }
@@ -314,19 +419,37 @@ pub async fn browser_snapshot(state: tauri::State<'_, BrowserState>) -> Result<V
 
 #[tauri::command]
 pub async fn browser_click(
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, BrowserState>,
+    approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     target_ref: u32,
+    approval_token: Option<String>,
 ) -> Result<Value, String> {
+    crate::approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "browser_click",
+        &approval_token,
+    )?;
     post_path(&state, "/click", json!({ "ref": target_ref })).await
 }
 
 #[tauri::command]
 pub async fn browser_type(
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, BrowserState>,
+    approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     target_ref: u32,
     text: String,
     submit: Option<bool>,
+    approval_token: Option<String>,
 ) -> Result<Value, String> {
+    crate::approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "browser_type",
+        &approval_token,
+    )?;
     if text.len() > 20000 {
         return Err("browser_type: text too long".to_string());
     }
@@ -355,6 +478,41 @@ pub async fn browser_scroll(
 }
 
 #[tauri::command]
-pub async fn browser_back(state: tauri::State<'_, BrowserState>) -> Result<Value, String> {
+pub async fn browser_back(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, BrowserState>,
+    approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
+    approval_token: Option<String>,
+) -> Result<Value, String> {
+    crate::approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "browser_back",
+        &approval_token,
+    )?;
     post_path(&state, "/back", json!({})).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssrf_guard_blocks_private_targets() {
+        for u in [
+            "http://localhost:3000/",
+            "http://127.0.0.1/",
+            "http://10.0.0.5/",
+            "http://172.16.4.1/",
+            "http://192.168.1.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://0.0.0.0/",
+            "http://myhost.local/",
+        ] {
+            assert!(navigation_host_blocked(u), "should block {}", u);
+        }
+        for u in ["https://example.com/", "https://mcp.example.com/mcp"] {
+            assert!(!navigation_host_blocked(u), "should allow {}", u);
+        }
+    }
 }

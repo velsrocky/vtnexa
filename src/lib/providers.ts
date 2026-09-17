@@ -36,7 +36,9 @@ import {
   browserStart,
   browserType,
 } from "./browser";
+import { lspNeedsApproval } from "./approval";
 import { isMcpToolName, mcpCallTool, resolveMcpQualified } from "./mcp";
+import { isGatedTool, isReadOnlyTool, toolsForMode } from "./toolDefs";
 
 export interface ToolDef {
   type: "function";
@@ -58,39 +60,14 @@ export interface ToolPolicy {
   onUndoCapture?: (e: UndoEntry) => void;
 }
 
-/** Plan-mode allowlist: everything else is withheld from the model and
- *  refused by runTool. Writes are out entirely - even staged ones. */
-export const READONLY_TOOLS: ReadonlySet<string> = new Set([
-  "fs_list",
-  "fs_read",
-  "fs_search",
-  "fs_glob",
-  "skill_list",
-  "skill_read",
-  "sessions_list",
-  "session_read",
-  "git_status",
-  "git_diff",
-  "git_log",
-  "nexa_read",
-  "browser_snapshot",
-  "browser_screenshot",
-  "browser_scroll",
-  "shell_poll",
-  "lsp_diagnostics",
-  "lsp",
-]);
-
-export function isReadOnlyTool(name: string): boolean {
-  return READONLY_TOOLS.has(name);
-}
-
-/** Turn tool list for the mode. Plan drops MCP extras (unknown side effects)
- *  and every non-read-only built-in. Capped: tools cost context per round. */
-export function toolsForMode(base: ToolDef[], extra: ToolDef[], plan: boolean): ToolDef[] {
-  if (!plan) return [...base, ...extra.slice(0, 50)];
-  return base.filter((t) => READONLY_TOOLS.has(t.function.name));
-}
+/** Plan-mode allowlist and gating live in ./toolDefs (split from this file).
+ *  Re-exported here so existing imports keep working. */
+export {
+  READONLY_TOOLS,
+  isReadOnlyTool,
+  isGatedTool,
+  toolsForMode,
+} from "./toolDefs";
 
 export const TOOL_DEFS: ToolDef[] = [
   {
@@ -819,25 +796,8 @@ function stashImage(b64: string): string {
   return id;
 }
 
-// Side-effecting tools require explicit user approval. Read-only tools run
-// directly. Shared with chatWithTools so audit events record the decision.
-const GATED_TOOLS = new Set([
-  "shell_run",
-  "shell_bg",
-  "shell_kill",
-  "browser_navigate",
-  "browser_click",
-  "browser_type",
-  "browser_back",
-  "git_commit",
-  "fs_rename",
-  "fs_delete",
-]);
-
-/** MCP tools (`mcp_*`) always require approval — OpenCode `mcp_* ask` default. */
-export function isGatedTool(name: string): boolean {
-  return GATED_TOOLS.has(name) || isMcpToolName(name);
-}
+// Gating helpers live in ./toolDefs (isGatedTool covers MCP too).
+// runTool adds dynamic lsp gating (ts/rs need approval; py is pure).
 
 export async function runTool(
   name: string,
@@ -851,14 +811,46 @@ export async function runTool(
     if (policy?.planMode && !isReadOnlyTool(name)) {
       return `error: plan mode is on - ${name} is disabled this turn (read-only tools only; switch to Build to act)`;
     }
-    if (isGatedTool(name) && policy?.requestApproval) {
+    // Frontend modal first, backend token second. The modal is UX; the token
+    // (single-use, window-bound, 5min) is enforcement — direct invoke without
+    // it fails backend-side. Unknown MCP tools fail before any popup/invoke.
+    let approvalToken: string | undefined;
+    if (isMcpToolName(name) && !resolveMcpQualified(name)) {
+      return `error: unknown MCP tool ${name} - reload MCP tools first`;
+    }
+    const needsGate =
+      isGatedTool(name) ||
+      ((name === "lsp_diagnostics" || name === "lsp") && lspNeedsApproval(String(args.path ?? "")));
+    if (needsGate && policy?.requestApproval) {
       const ok = await policy.requestApproval(name, args);
       if (!ok) return `user rejected ${name} - do not retry without changing the plan`;
+      try {
+        const { approvalIssue } = await import("./approval");
+        approvalToken = await approvalIssue(
+          name === "lsp" ? "lsp_op" : name,
+          JSON.stringify(args).slice(0, 4000),
+        );
+      } catch (e) {
+        return `error: approval backend unavailable (${String(e)}) - cannot run ${name}`;
+      }
+    } else if (needsGate && !policy?.requestApproval) {
+      // No UI to approve (tests/routines without policy): try direct issue so
+      // backend tests still exercise the gate; fails closed without backend.
+      try {
+        const { approvalIssue } = await import("./approval");
+        approvalToken = await approvalIssue(
+          name === "lsp" ? "lsp_op" : name,
+          JSON.stringify(args).slice(0, 4000),
+        );
+      } catch {
+        return `error: ${name} requires user approval (no approval handler in this context)`;
+      }
     }
     if (isMcpToolName(name)) {
       const parts = resolveMcpQualified(name);
+      // Checked above, but re-resolve for TS narrowing.
       if (!parts) return `error: unknown MCP tool ${name} - reload MCP tools first`;
-      const out = await mcpCallTool(parts.server, parts.tool, args ?? {});
+      const out = await mcpCallTool(parts.server, parts.tool, args ?? {}, approvalToken);
       return out.slice(0, 30000);
     }
     switch (name) {
@@ -929,7 +921,7 @@ export async function runTool(
       case "fs_rename": {
         const oldP = String(args.old_path ?? "");
         const newP = String(args.new_path ?? "");
-        const out = await fsRename(oldP, newP);
+        const out = await fsRename(oldP, newP, approvalToken);
         policy?.onUndoCapture?.({ kind: "rename", oldPath: oldP, newPath: newP });
         return out;
       }
@@ -945,7 +937,7 @@ export async function runTool(
             content = null;
           }
         }
-        await fsDelete(p, recursive);
+        await fsDelete(p, recursive, approvalToken);
         if (content !== null) policy?.onUndoCapture?.({ kind: "delete", path: p, content });
         return `deleted ${args.path}${recursive ? " (directory - not undoable)" : ""}`;
       }
@@ -971,7 +963,7 @@ export async function runTool(
         if (!p) return "error: lsp_diagnostics path is required - e.g. {path: \"/ws/src/App.tsx\"}";
         if (!p.startsWith("/"))
           return `error: lsp_diagnostics path must be absolute inside the workspace (got ${JSON.stringify(p)}). Use fs_list/fs_glob to resolve the full path first.`;
-        return (await lspDiagnostics(p)).slice(0, 10000);
+        return (await lspDiagnostics(p, approvalToken)).slice(0, 10000);
       }
       case "lsp": {
         const p = String(args.path ?? "");
@@ -986,6 +978,7 @@ export async function runTool(
             line: typeof args.line === "number" ? args.line : undefined,
             character: typeof args.character === "number" ? args.character : undefined,
             symbol: typeof args.symbol === "string" ? args.symbol : undefined,
+            approvalToken,
           })
         ).slice(0, 6000);
       }
@@ -1004,13 +997,13 @@ export async function runTool(
       case "shell_run": {
         const cmd = String(args.cmd ?? "");
         if (cmd.length > 20000) return "error: cmd too long";
-        return JSON.stringify(await shellRun(args.cwd ?? ".", cmd));
+        return JSON.stringify(await shellRun(args.cwd ?? ".", cmd, approvalToken));
       }
       case "shell_bg": {
         const cmd = String(args.cmd ?? "");
         if (!cmd) return "error: shell_bg cmd is required";
         if (cmd.length > 20000) return "error: cmd too long";
-        const id = await shellBg(args.cwd ?? ".", cmd);
+        const id = await shellBg(args.cwd ?? ".", cmd, approvalToken);
         return `started background job ${id} - poll with shell_poll until status is done; do not start duplicates`;
       }
       case "shell_poll": {
@@ -1041,19 +1034,21 @@ export async function runTool(
       case "git_commit": {
         const files = Array.isArray(args.files) ? args.files.map((f: unknown) => String(f)) : undefined;
         return JSON.stringify(
-          await gitCommit(String(args.cwd ?? "."), String(args.message ?? ""), files),
+          await gitCommit(String(args.cwd ?? "."), String(args.message ?? ""), files, approvalToken),
         );
       }
       case "browser_navigate":
-        await browserStart(39317, false).catch(() => {});
-        return JSON.stringify(await browserNavigate(args.url));
+        await browserStart().catch(() => {});
+        return JSON.stringify(await browserNavigate(args.url, approvalToken));
       case "browser_snapshot":
-        await browserStart(39317, false).catch(() => {});
+        await browserStart().catch(() => {});
         return JSON.stringify(await browserSnapshot()).slice(0, 6000);
       case "browser_click":
-        return JSON.stringify(await browserClick(Number(args.target_ref)));
+        return JSON.stringify(await browserClick(Number(args.target_ref), approvalToken));
       case "browser_type":
-        return JSON.stringify(await browserType(Number(args.target_ref), args.text ?? "", !!args.submit));
+        return JSON.stringify(
+          await browserType(Number(args.target_ref), args.text ?? "", !!args.submit, approvalToken),
+        );
       case "browser_screenshot": {
         const s = await browserScreenshot();
         const b64 = s.imageBase64 ?? "";
@@ -1070,7 +1065,7 @@ export async function runTool(
         return JSON.stringify({ url: s.url, note: "screenshot came back empty" });
       }
       case "browser_back":
-        return JSON.stringify(await browserBack());
+        return JSON.stringify(await browserBack(approvalToken));
       case "browser_scroll":
         return JSON.stringify(await browserScroll(Number(args.dx ?? 0), Number(args.dy ?? 600)));
       case "nexa_read": {

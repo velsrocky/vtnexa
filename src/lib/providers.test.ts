@@ -129,6 +129,7 @@ describe("runTool", () => {
   });
   it("runs gated tools after approval and audits the decision", async () => {
     setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_issue") return "tok-test";
       expect(cmd).toBe("shell_run");
       return { stdout: "hi\n", stderr: "", code: 0 };
     });
@@ -164,9 +165,10 @@ describe("runTool", () => {
   it("reports unknown tools instead of throwing", async () => {
     await expect(runTool("teleport", {})).resolves.toMatch(/unknown tool/);
   });
-  it("runs lsp_diagnostics without approval and requires absolute paths", async () => {
+  it("runs lsp_diagnostics with approval for ts (py stays free) and requires absolute paths", async () => {
     let approvals = 0;
     setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_issue") return "tok-test";
       expect(cmd).toBe("lsp_diagnostics");
       return "clean: no diagnostics for /w/a.ts";
     });
@@ -176,7 +178,20 @@ describe("runTool", () => {
       { requestApproval: async () => { approvals++; return true; } },
     );
     expect(out).toContain("clean:");
-    expect(approvals).toBe(0);
+    expect(approvals).toBe(1);
+    // Python stays approval-free.
+    let pyApprovals = 0;
+    setInvokeImpl(async (cmd) => {
+      expect(cmd).toBe("lsp_diagnostics");
+      return "clean: no diagnostics for /w/a.py";
+    });
+    const pyOut = await runTool(
+      "lsp_diagnostics",
+      { path: "/w/a.py" },
+      { requestApproval: async () => { pyApprovals++; return true; } },
+    );
+    expect(pyOut).toContain("clean:");
+    expect(pyApprovals).toBe(0);
     await expect(runTool("lsp_diagnostics", { path: "relative/a.ts" })).resolves.toMatch(/^error:/);
     await expect(runTool("lsp_diagnostics", {})).resolves.toMatch(/^error:/);
   });

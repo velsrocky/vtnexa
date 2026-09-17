@@ -17,9 +17,17 @@ const PORT = parseInt(arg("--port", process.env.VTAI_BROWSER_PORT || "39317"), 1
 const PROFILE = arg("--profile", process.env.VTAI_BROWSER_PROFILE || path.join(os.homedir(), ".config", "vtai-browser-profile"));
 const CHROME = arg("--chrome", process.env.VTAI_BROWSER_CHROME || "/usr/bin/google-chrome");
 const HEADLESS = (arg("--headless", process.env.VTAI_BROWSER_HEADLESS || "0") === "1");
-// Per-run bearer token: Rust spawns us with VTAI_BROWSER_TOKEN. Any local
-// process could otherwise drive the signed-in browser via localhost HTTP.
-const TOKEN = process.env.VTAI_BROWSER_TOKEN || "";
+// Per-run bearer token: Rust spawns us with VTAI_BROWSER_TOKEN and a 0600
+// --token-file (preferred; env leaks via /proc). Empty token = deny all.
+let TOKEN = process.env.VTAI_BROWSER_TOKEN || "";
+const TOKEN_FILE = arg("--token-file", process.env.VTAI_BROWSER_TOKEN_FILE || "");
+try {
+  if (TOKEN_FILE && fs.existsSync(TOKEN_FILE)) {
+    const t = fs.readFileSync(TOKEN_FILE, "utf8").trim();
+    if (t) TOKEN = t;
+  }
+} catch {}
+const NO_SANDBOX = process.env.VTAI_BROWSER_NO_SANDBOX === "1";
 
 let context = null;
 let page = null;
@@ -42,11 +50,13 @@ async function ensurePage() {
 async function launch() {
   fs.mkdirSync(PROFILE, { recursive: true });
   const execPath = fs.existsSync(CHROME) ? CHROME : undefined; // undefined => playwright default chromium
+  const args = ["--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage"];
+  if (NO_SANDBOX) args.push("--no-sandbox");
   context = await chromium.launchPersistentContext(PROFILE, {
     executablePath: execPath,
     headless: HEADLESS,
     viewport: { width: 1280, height: 800 },
-    args: ["--no-first-run", "--no-default-browser-check", "--no-sandbox", "--disable-dev-shm-usage"],
+    args,
   });
   page = context.pages()[0] || (await context.newPage());
   console.log(`browser ready headless=${HEADLESS} profile=${PROFILE}`);
@@ -75,9 +85,30 @@ function send(res, code, obj) {
 }
 
 function authorized(req) {
-  if (!TOKEN) return true; // dev without token (old launcher) — Rust always sets one
+  if (!TOKEN) return false; // fail-closed: Rust always sets one
   const got = req.headers["x-vtai-token"];
   return typeof got === "string" && got.length > 0 && got === TOKEN;
+}
+
+function navigationBlocked(target) {
+  try {
+    const u = new URL(target);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return true;
+    const h = u.hostname.toLowerCase();
+    if (h === "localhost" || h.endsWith(".local") || h === "0.0.0.0" || h === "::1") return true;
+    const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (m) {
+      const o = m.slice(1).map(Number);
+      if (o[0] === 127 || o[0] === 10) return true;
+      if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true;
+      if (o[0] === 192 && o[1] === 168) return true;
+      if (o[0] === 169 && o[1] === 254) return true;
+      if (o[0] === 0) return true;
+    }
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 async function snapshotImpl() {
@@ -133,6 +164,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && u.pathname === "/navigate") {
       const body = await readBody(req);
       if (!body.url) return send(res, 400, { ok: false, error: "url required" });
+      if (navigationBlocked(body.url)) return send(res, 403, { ok: false, error: "refused (private/loopback target)" });
       const r = await serial(async () => {
         const p = await ensurePage();
         await p.goto(body.url, { waitUntil: "domcontentloaded", timeout: 25000 });

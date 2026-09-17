@@ -33,18 +33,16 @@ Most coding agents either (a) ask for permission on every keystroke or
 ## Features
 
 - **Commander** — tool-calling agent: list/read/search files, propose diffs,
-  run shell commands, typecheck edited files (`lsp_diagnostics`: tsc, cargo
-  check, py_compile) and query language servers (`lsp`: hover, definition,
-  references, symbols — read-only, auto-approved), drive a real Chromium
-  browser (navigate, click, type, screenshot with vision), and commit to
-  git — all behind the review gate. Long shell work (installs, builds, test
-  suites) runs as background jobs (`shell_bg` + `shell_poll`, same screening
-  as foreground); turns that run out of budget offer a ▶ Continue button
-  over full history. **Plan mode** (◔ toggle or per-turn)
-  browser (navigate, click, type, screenshot with vision), and commit to
-  git — all behind the review gate. **Plan mode** (◔ toggle or per-turn)
-  restricts it to read-only tools for investigation-first flows; routines
-  always run Build.
+  run shell commands, typecheck edited files (`lsp_diagnostics`: tsc/cargo need
+  approval, py_compile is free) and query language servers (`lsp`: hover,
+  definition, references, symbols — PATH servers auto-approved, workspace-local
+  servers need approval), drive a real Chromium browser (navigate, click, type,
+  screenshot with vision), and commit to git — all behind the review gate
+  (frontend modal + backend single-use tokens). Long shell work (installs,
+  builds, test suites) runs as background jobs (`shell_bg` + `shell_poll`, same
+  screening as foreground); turns that run out of budget offer a ▶ Continue
+  button over full history. **Plan mode** (◔ toggle or per-turn) restricts it
+  to read-only tools for investigation-first flows; routines always run Build.
 - **Undo** — approved writes, renames and file deletes are captured
   (↩/↪ buttons, `/undo` `/redo` in chat). Shell/terminal, directory deletes
   and files over 256KB are out of scope; the stack resets on reload.
@@ -108,23 +106,27 @@ that handles tool calling well (`qwen2.5:7b-instruct`, `llama3.1:8b`,
 
 ## Security model (honest version)
 
-- **Approval is the gate.** Side-effecting tools (shell, browser actions,
-  rename/delete, commit) require your click. Read-only tools run free.
-- **Defense in depth.** The backend additionally *refuses* obviously
-  destructive shell patterns (`rm -rf /`, `mkfs`, `dd` to devices, fork
-  bombs) and direct reads of credential material (`~/.ssh`, AWS creds,
-  `/etc/shadow`). This is a backstop against blind clicking — **not a
-  sandbox**. Approved commands run as you, with your permissions. The
-  interactive terminal is deliberately unscreened: it's your shell.
-- **Workspace confinement.** File tools are confined server-side to the
-  workspace root you pick (per window), with symlink-safe checks and a
-  sensitive-path deny list.
-- **Secrets.** API keys go to the OS keychain (per endpoint+model), never to
-  session files or the workspace. Without a keychain daemon they fall back to
-  app-local storage and the UI says so.
-- **Prompt injection.** Browser/page content and file contents enter the
-  model's context. Treat agent-suggested commands accordingly — read the
-  approval dialog.
+This section documents exactly what is and isn't protected. Read it carefully.
+
+### ✅ What IS protected
+
+- **Approval is the gate.** Side-effecting tools (shell, browser actions, rename/delete, commit) require your explicit click. Read-only tools run free.
+- **Workspace confinement.** File tools are confined server-side to the workspace root you pick (per window), with symlink-safe checks and a sensitive-path deny list.
+- **Secrets.** API keys go to the OS keychain (per endpoint+model), never to session files or the workspace. Without a keychain daemon they fall back to app-local storage and the UI says so.
+- **Destruction patterns blocked.** The backend refuses obviously destructive shell patterns (`rm -rf /`, `mkfs`, `dd`, `curl | sh` pipe downloads to shell) and direct reads of credential material (`~/.ssh`, AWS creds, `/etc/shadow`).
+
+### ⚠️ What is NOT sandboxed
+
+**This is the critical limitation: Approved commands run as your OS user with your full permissions.**
+
+- The interactive terminal (PTY) has NO screening - it's your shell.
+- `curl ... | sh` is allowed in the backend but WARNINGED in the approval modal - it's how many toolchains work.
+- The backend screening is a *backstop against blind clicking*, not a sandbox. It catches patterns, not obfuscation.
+- If you approve a command that does `curl | sh` or runs arbitrary code, that code runs with your permissions.
+
+### Recommendation
+
+Treat every "Approve" click as a commitment to trust what the agent is doing. Read the approval dialog carefully. The agent should explain what it needs to run before asking for approval.
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
@@ -139,15 +141,16 @@ vtnexa --uninstall   remove a per-user install
 ## Development
 
 ```sh
-pnpm test            # 188 vitest tests (jsdom)
+pnpm test            # ~285 vitest tests (jsdom) + coverage via vitest.config.ts
 pnpm build           # tsc + vite
-cargo test --manifest-path src-tauri/Cargo.toml --lib   # Rust
+cargo test --manifest-path src-tauri/Cargo.toml --lib   # 56 Rust tests
 pnpm install-local   # build .deb + install per-user (no sudo)
 ```
 
-Architecture in one line: thin React components → domain hooks (lanes are
-gone — one window = one workspace) → Tauri commands in `src-tauri/src/lib.rs`
-(sandbox, git, shell, PTY, keychain) → a Playwright sidecar for Browser Use.
+Architecture: thin React components → domain hooks (one window = one
+workspace) → Tauri commands in `src-tauri/src/lib.rs` (sandbox, approvals,
+git, shell, PTY, keychain) → Playwright sidecar for Browser Use. Details in
+`docs/architecture.md`; changes in `CHANGELOG.md`.
 
 ## Contributing
 

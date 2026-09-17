@@ -17,12 +17,28 @@ export async function fsCreate(path: string, isDir?: boolean): Promise<string> {
   return invoke<string>("fs_create", { path, is_dir: isDir ?? false });
 }
 
-export async function fsRename(oldPath: string, newPath: string): Promise<string> {
-  return invoke<string>("fs_rename", { old_path: oldPath, new_path: newPath });
+export async function fsRename(
+  oldPath: string,
+  newPath: string,
+  approvalToken?: string,
+): Promise<string> {
+  return invoke<string>("fs_rename", {
+    old_path: oldPath,
+    new_path: newPath,
+    approval_token: approvalToken ?? null,
+  });
 }
 
-export async function fsDelete(path: string, recursive?: boolean): Promise<void> {
-  return invoke<void>("fs_delete", { path, recursive: recursive ?? false });
+export async function fsDelete(
+  path: string,
+  recursive?: boolean,
+  approvalToken?: string,
+): Promise<void> {
+  return invoke<void>("fs_delete", {
+    path,
+    recursive: recursive ?? false,
+    approval_token: approvalToken ?? null,
+  });
 }
 
 export interface SearchMatch {
@@ -81,8 +97,18 @@ export async function gitDiff(cwd: string, path?: string, staged?: boolean): Pro
   return invoke<string>("git_diff", { cwd, path: path ?? null, staged: staged ?? false });
 }
 
-export async function gitCommit(cwd: string, message: string, files?: string[]): Promise<GitCommitOut> {
-  return invoke<GitCommitOut>("git_commit", { cwd, message, files: files ?? null });
+export async function gitCommit(
+  cwd: string,
+  message: string,
+  files?: string[],
+  approvalToken?: string,
+): Promise<GitCommitOut> {
+  return invoke<GitCommitOut>("git_commit", {
+    cwd,
+    message,
+    files: files ?? null,
+    approval_token: approvalToken ?? null,
+  });
 }
 
 export async function gitLog(cwd: string, limit?: number): Promise<GitLogEntry[]> {
@@ -124,8 +150,8 @@ export interface ShellResult {
   code: number;
 }
 
-export async function shellRun(cwd: string, cmd: string): Promise<ShellResult> {
-  return invoke<ShellResult>("shell_run", { cwd, cmd });
+export async function shellRun(cwd: string, cmd: string, approvalToken?: string): Promise<ShellResult> {
+  return invoke<ShellResult>("shell_run", { cwd, cmd, approval_token: approvalToken ?? null });
 }
 
 export interface ShellPoll {
@@ -136,8 +162,8 @@ export interface ShellPoll {
   elapsed_ms: number;
 }
 
-export async function shellBg(cwd: string, cmd: string): Promise<string> {
-  return invoke<string>("shell_bg", { cwd, cmd });
+export async function shellBg(cwd: string, cmd: string, approvalToken?: string): Promise<string> {
+  return invoke<string>("shell_bg", { cwd, cmd, approval_token: approvalToken ?? null });
 }
 
 export async function shellPoll(id: string): Promise<ShellPoll> {
@@ -148,8 +174,8 @@ export async function shellKill(id: string): Promise<string> {
   return invoke<string>("shell_kill", { id });
 }
 
-export async function lspDiagnostics(path: string): Promise<string> {
-  return invoke<string>("lsp_diagnostics", { path });
+export async function lspDiagnostics(path: string, approvalToken?: string): Promise<string> {
+  return invoke<string>("lsp_diagnostics", { path, approval_token: approvalToken ?? null });
 }
 
 export interface LspOpArgs {
@@ -158,6 +184,7 @@ export interface LspOpArgs {
   line?: number;
   character?: number;
   symbol?: string;
+  approvalToken?: string;
 }
 
 export async function lspOp(args: LspOpArgs): Promise<string> {
@@ -167,6 +194,7 @@ export async function lspOp(args: LspOpArgs): Promise<string> {
     line: args.line ?? null,
     character: args.character ?? null,
     symbol: args.symbol ?? null,
+    approval_token: args.approvalToken ?? null,
   });
 }
 
@@ -174,8 +202,8 @@ export async function workspaceRoot(): Promise<string> {
   return invoke<string>("workspace_root");
 }
 
-export async function setWorkspaceRoot(path: string): Promise<string> {
-  return invoke<string>("set_workspace_root", { path });
+export async function setWorkspaceRoot(path: string, confirmDangerous?: boolean): Promise<string> {
+  return invoke<string>("set_workspace_root", { path, confirm_dangerous: confirmDangerous ?? null });
 }
 
 export type NexaKind = "pad" | "plan" | "memory";

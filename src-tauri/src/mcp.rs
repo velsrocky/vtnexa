@@ -9,8 +9,8 @@
 // Security: servers are arbitrary code. Cwd is confined to the workspace,
 // stderr is captured (capped) for errors, outputs are truncated, and secrets
 // (header values, env, URL query strings) are never echoed back in errors or
-// logs. All `mcp_*` calls from the agent go through the approval popup
-// (see frontend GATED_TOOLS).
+// logs. All `mcp_call_tool` from the agent requires a backend approval token
+// (see approvals::ApprovalStore) in addition to the frontend modal.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,6 +83,8 @@ pub(crate) struct McpServerStatus {
     pub name: String,
     pub kind: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub untrusted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,6 +214,121 @@ pub(crate) fn valid_server_name(name: &str) -> bool {
     }
     name.chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Local MCP servers spawn OS processes. A workspace-cloned repo can plant
+/// `.vtnexa/vtnexa.json`, so the binary itself is allowlisted: known runtime
+/// launchers only. `sh/bash/curl/wget` as the direct command is refused —
+/// use npx/node/python entrypoints instead.
+pub(crate) fn validate_local_command(command: &[String]) -> Result<(), String> {
+    let first = command
+        .first()
+        .map(|s| s.trim())
+        .unwrap_or_default()
+        .to_string();
+    if first.is_empty() {
+        return Err("mcp: server command is empty".to_string());
+    }
+    if first.len() > 512 || first.contains('\0') {
+        return Err("mcp: server command invalid".to_string());
+    }
+    let base = first
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(&first)
+        .to_lowercase();
+    // Block shells / downloaders / privilege tools as the direct spawn.
+    const BLOCKED: &[&str] = &[
+        "sh",
+        "bash",
+        "zsh",
+        "fish",
+        "dash",
+        "cmd",
+        "cmd.exe",
+        "powershell",
+        "pwsh",
+        "curl",
+        "wget",
+        "sudo",
+        "doas",
+        "su",
+    ];
+    if BLOCKED.contains(&base.as_str()) {
+        return Err(format!(
+            "mcp: server command '{}' is blocked (shells/downloaders cannot be MCP servers — use npx/node/python)",
+            base
+        ));
+    }
+    const ALLOWED: &[&str] = &[
+        "npx", "node", "nodejs", "python", "python3", "uv", "uvx", "bun", "bunx", "deno", "go",
+        "cargo", "java", "ruby", "dotnet",
+    ];
+    // Allow absolute/relative paths whose basename is allowlisted, plus bare
+    // names above. Anything else (e.g. /tmp/evil) is refused.
+    if !ALLOWED.contains(&base.as_str()) {
+        return Err(format!(
+            "mcp: server command '{}' is not allowlisted (want one of: npx, node, python3, uvx, bunx, deno, go, ...)",
+            base
+        ));
+    }
+    Ok(())
+}
+
+/// Workspace-only servers are untrusted until the user explicitly enables
+/// them in the ⛁ panel. Global config (~/.config) is trusted (user-owned).
+pub(crate) fn workspace_only_servers(root: &std::path::Path) -> Vec<String> {
+    let global = global_config_path()
+        .map(|p| parse_config_file(&p).unwrap_or_default())
+        .unwrap_or_default();
+    let project = parse_config_file(&project_config_path(root)).unwrap_or_default();
+    project
+        .mcp
+        .keys()
+        .filter(|k| valid_server_name(k) && !global.mcp.contains_key(*k))
+        .cloned()
+        .collect()
+}
+
+/// `{env:VAR}` exfil guard: workspace-only (untrusted) servers get NO env
+/// substitution — placeholders become "". A planted workspace config cannot
+/// steal `OPENAI_API_KEY`/`AWS_*` by pointing headers at an attacker URL.
+/// Global (trusted) servers keep substitution.
+pub(crate) fn subst_headers_for_server(
+    headers: &HashMap<String, String>,
+    untrusted: bool,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (k, v) in headers {
+        let value = if untrusted {
+            // Strip placeholders entirely for untrusted servers.
+            strip_env_placeholders(v)
+        } else {
+            subst_env_placeholders(v)
+        };
+        out.push((k.clone(), value));
+    }
+    out
+}
+
+fn strip_env_placeholders(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("{env:") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 5..];
+        match after.find('}') {
+            Some(end) => {
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 // ---- Tool-name sanitizing (LLM-facing `mcp_<server>_<tool>`) ----
@@ -534,23 +651,39 @@ struct RemoteSession {
 /// Marker prefix for 401s: callers refresh once and retry before surfacing.
 pub(crate) const AUTH_RETRY_MARKER: &str = "mcp-auth-required";
 
+pub(crate) fn is_untrusted_server(root: &std::path::Path, name: &str) -> bool {
+    let in_global = global_config_path()
+        .map(|p| {
+            parse_config_file(&p)
+                .map(|c| c.mcp.contains_key(name))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if in_global {
+        return false;
+    }
+    parse_config_file(&project_config_path(root))
+        .map(|c| c.mcp.contains_key(name))
+        .unwrap_or(false)
+}
+
 async fn remote_session(
     name: &str,
     cfg: &McpServerConfig,
     force_refresh: bool,
+    untrusted: bool,
 ) -> Result<RemoteSession, String> {
     let url = validate_remote_url(cfg.url.as_deref().unwrap_or(""))?;
     let host_display = url_host_display(&url);
     let mut headers = Vec::new();
-    for (k, v) in cfg.headers.clone().unwrap_or_default() {
+    for (k, v) in subst_headers_for_server(&cfg.headers.clone().unwrap_or_default(), untrusted) {
         if k.trim().is_empty() || k.len() > 256 {
             return Err(format!("mcp: server '{}' has an invalid header name", name));
         }
-        let value = subst_env_placeholders(&v);
-        if value.len() > 8192 {
+        if v.len() > 8192 {
             return Err(format!("mcp: server '{}' header value too long", name));
         }
-        headers.push((k, value));
+        headers.push((k, v));
     }
     // OAuth bearer when credentials exist. Unsigned servers still proceed —
     // static headers may be all they need; a 401 then guides to sign-in.
@@ -720,16 +853,24 @@ where
     }
 }
 
-async fn remote_list_tools(name: &str, cfg: &McpServerConfig) -> Result<Vec<McpToolInfo>, String> {
-    retry_remote(name, cfg, |force| remote_list_tools_once(name, cfg, force)).await
+async fn remote_list_tools(
+    name: &str,
+    cfg: &McpServerConfig,
+    untrusted: bool,
+) -> Result<Vec<McpToolInfo>, String> {
+    retry_remote(name, cfg, |force| {
+        remote_list_tools_once(name, cfg, force, untrusted)
+    })
+    .await
 }
 
 async fn remote_list_tools_once(
     name: &str,
     cfg: &McpServerConfig,
     force_refresh: bool,
+    untrusted: bool,
 ) -> Result<Vec<McpToolInfo>, String> {
-    let mut sess = remote_session(name, cfg, force_refresh).await?;
+    let mut sess = remote_session(name, cfg, force_refresh, untrusted).await?;
     sess.initialize().await?;
     let resp = sess
         .post_rpc(
@@ -749,6 +890,7 @@ async fn remote_call_tool(
     cfg: &McpServerConfig,
     tool: &str,
     args: serde_json::Value,
+    untrusted: bool,
 ) -> Result<String, String> {
     if tool.is_empty() || tool.len() > 128 {
         return Err("mcp: invalid tool name".to_string());
@@ -758,7 +900,7 @@ async fn remote_call_tool(
         return Err("mcp: args too large (64KB max)".to_string());
     }
     let other = retry_remote(server, cfg, |force| {
-        remote_call_tool_once(server, cfg, tool, args.clone(), force)
+        remote_call_tool_once(server, cfg, tool, args.clone(), force, untrusted)
     })
     .await;
     other
@@ -770,8 +912,9 @@ async fn remote_call_tool_once(
     tool: &str,
     args: serde_json::Value,
     force_refresh: bool,
+    untrusted: bool,
 ) -> Result<String, String> {
-    let mut sess = remote_session(server, cfg, force_refresh).await?;
+    let mut sess = remote_session(server, cfg, force_refresh, untrusted).await?;
     sess.initialize().await?;
     let resp = sess
         .post_rpc(
@@ -843,8 +986,9 @@ pub(crate) async fn list_tools_for_server(
     cfg: &McpServerConfig,
     root: &std::path::Path,
 ) -> Result<Vec<McpToolInfo>, String> {
+    let untrusted = is_untrusted_server(root, name);
     if cfg.r#type == "remote" {
-        return remote_list_tools(name, cfg).await;
+        return remote_list_tools(name, cfg, untrusted).await;
     }
     if cfg.r#type != "local" {
         return Err(format!(
@@ -856,6 +1000,7 @@ pub(crate) async fn list_tools_for_server(
     if command.is_empty() {
         return Err(format!("mcp: server '{}' has no command", name));
     }
+    validate_local_command(&command)?;
     let cwd = resolve_cwd(cfg, root)?;
     let env = cfg.environment.clone().unwrap_or_default();
     let timeout = Duration::from_millis(clamp_timeout(cfg.timeout));
@@ -890,8 +1035,9 @@ pub(crate) async fn call_tool_for_server(
     tool: &str,
     args: serde_json::Value,
 ) -> Result<String, String> {
+    let untrusted = is_untrusted_server(root, server);
     if cfg.r#type == "remote" {
-        return remote_call_tool(server, cfg, tool, args).await;
+        return remote_call_tool(server, cfg, tool, args, untrusted).await;
     }
     if cfg.r#type != "local" {
         return Err(format!(
@@ -910,6 +1056,7 @@ pub(crate) async fn call_tool_for_server(
     if command.is_empty() {
         return Err(format!("mcp: server '{}' has no command", server));
     }
+    validate_local_command(&command)?;
     let cwd = resolve_cwd(cfg, root)?;
     let env = cfg.environment.clone().unwrap_or_default();
     let timeout = Duration::from_millis(clamp_timeout(cfg.timeout));
@@ -990,16 +1137,32 @@ pub(crate) fn mcp_list_servers(
 ) -> Result<Vec<McpServerStatus>, String> {
     let root = crate::root_snapshot(&state, window.label());
     let merged = load_merged_mcp_config(&root)?;
+    let untrusted_set: std::collections::HashSet<String> =
+        workspace_only_servers(&root).into_iter().collect();
     let mut out: Vec<McpServerStatus> = merged
         .iter()
         .map(|(k, v)| McpServerStatus {
             name: k.clone(),
             kind: v.r#type.clone(),
             enabled: v.enabled,
+            untrusted: untrusted_set.contains(k),
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+/// Trust prompt data: workspace-only servers the user has not seen before.
+/// Frontend shows a one-time "workspace wants to add MCP servers" dialog;
+/// enabling in the ⛁ panel is the explicit trust signal.
+#[tauri::command]
+pub(crate) fn mcp_workspace_trust(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, crate::WorkspaceRoots>,
+) -> Result<serde_json::Value, String> {
+    let root = crate::root_snapshot(&state, window.label());
+    let list = workspace_only_servers(&root);
+    Ok(serde_json::json!({ "workspace_servers": list }))
 }
 
 #[tauri::command]
@@ -1038,10 +1201,18 @@ pub(crate) async fn mcp_list_tools(
 pub(crate) async fn mcp_call_tool(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::WorkspaceRoots>,
+    approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     server: String,
     tool: String,
     args: serde_json::Value,
+    approval_token: Option<String>,
 ) -> Result<String, String> {
+    crate::approvals::approval_consume(
+        &approvals,
+        window.label(),
+        "mcp_call_tool",
+        &approval_token,
+    )?;
     if !valid_server_name(&server) {
         return Err("mcp: invalid server name".to_string());
     }
@@ -1148,6 +1319,53 @@ mod tests {
         assert!(!valid_server_name("has space"));
         assert!(!valid_server_name("a/b"));
         assert!(!valid_server_name(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn local_commands_are_allowlisted() {
+        for good in [
+            vec!["npx".to_string(), "-y".to_string(), "s".to_string()],
+            vec!["node".to_string(), "server.js".to_string()],
+            vec!["python3".to_string(), "-m".to_string(), "s".to_string()],
+            vec!["/usr/bin/uvx".to_string(), "s".to_string()],
+        ] {
+            assert!(
+                validate_local_command(&good).is_ok(),
+                "should allow {:?}",
+                good
+            );
+        }
+        for bad in [
+            vec!["sh".to_string(), "-c".to_string(), "evil".to_string()],
+            vec!["bash".to_string()],
+            vec!["curl".to_string(), "https://evil".to_string()],
+            vec!["/tmp/evil".to_string()],
+            vec!["sudo".to_string(), "npx".to_string()],
+            vec![],
+        ] {
+            assert!(
+                validate_local_command(&bad).is_err(),
+                "should block {:?}",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn untrusted_headers_lose_env_placeholders() {
+        use std::collections::HashMap;
+        std::env::set_var("VTNEXA_TEST_UNTRUSTED", "s3cret");
+        let mut h = HashMap::new();
+        h.insert(
+            "Authorization".to_string(),
+            "Bearer {env:VTNEXA_TEST_UNTRUSTED}".to_string(),
+        );
+        let trusted = subst_headers_for_server(&h, false);
+        assert!(trusted[0].1.contains("s3cret"), "trusted keeps env");
+        let untrusted = subst_headers_for_server(&h, true);
+        assert!(!untrusted[0].1.contains("s3cret"), "untrusted strips env");
+        assert_eq!(untrusted[0].1, "Bearer ");
+        std::env::remove_var("VTNEXA_TEST_UNTRUSTED");
     }
 
     #[test]
