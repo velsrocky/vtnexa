@@ -3,6 +3,14 @@
 ## Unreleased
 
 ### Fixed
+- **Synthetic nudges no longer masquerade as the user**: loop-guard,
+  skill-follow-through, narration, denial and question repairs were injected as
+  role "user" messages, which both crowded the user channel (a live model
+  reported "only loop-guard prompts") and displaced the real request when
+  history was trimmed. Repeat nudges now ride **inside the tool result** they
+  follow; prose repairs are role "system" with a `[system nudge]` marker
+  (Anthropic/Gemini fold these into the system prompt; OpenAI-compatible gets
+  an in-place system instruction).
 - **Long tool-heavy turns lost their task**: history trimming kept only the
   system message + the last 20 messages, and loop-guard nudges are injected as
   role "user" too - so trimming cut at a nudge and dropped the actual request.

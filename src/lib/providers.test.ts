@@ -753,10 +753,10 @@ describe("chatWithTools narration repair", () => {
         return openAIText("Please approve the fs_write to create check_ffmpeg.py.");
       }
       if (prev.length === 2) {
-        // The repair nudge is a user message demanding the real call.
+        // The repair nudge is a system message demanding the real call.
         const body = JSON.parse(_init.body);
         const last = body.messages[body.messages.length - 1];
-        expect(last.role).toBe("user");
+        expect(last.role).toBe("system");
         expect(last.content).toMatch(/NO tool call/);
         return openAITools([
           { id: "w1", name: "fs_write", args: { path: "/w/check_ffmpeg.py", content: "print(1)" } },
@@ -818,7 +818,7 @@ describe("chatWithTools narration repair", () => {
       if (prev.length === 2) {
         const body = JSON.parse(_init.body);
         const last = body.messages[body.messages.length - 1];
-        expect(last.role).toBe("user");
+        expect(last.role).toBe("system");
         expect(last.content).toMatch(/You DO have that capability/);
         return openAITools([{ id: "s1", name: "shell_run", args: { cwd: "/w", cmd: "python3 check_ffmpeg.py" } }]);
       }
@@ -945,7 +945,7 @@ describe("chatWithTools question repair", () => {
       if (prev.length === 2) {
         const body = JSON.parse(_init.body);
         const last = body.messages[body.messages.length - 1];
-        expect(last.role).toBe("user");
+        expect(last.role).toBe("system");
         expect(last.content).toMatch(/instead of acting/);
         return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
       }
@@ -994,6 +994,27 @@ describe("chatWithTools question repair", () => {
     expect(res).toBe("Done. Should I proceed with the delete?");
     expect(events.join("")).not.toMatch(/asked for direction/);
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe("nudge channels", () => {
+  it("attaches the repeat nudge to the tool result, never as a user turn", async () => {
+    setInvokeImpl(async () => []);
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length <= 3) {
+        return openAITools([{ id: `c${prev.length}`, name: "fs_list", args: { path: "/w" } }]);
+      }
+      return openAIText("done");
+    });
+    await chatWithTools(CFG, [{ role: "user", content: "list" }], () => {});
+    const sent = calls.map((c) => JSON.parse(c.init.body).messages as any[]);
+    const nudges = sent.flat().filter((m) => typeof m.content === "string" && m.content.includes("You repeated"));
+    expect(nudges.length).toBeGreaterThan(0);
+    // The hint rides inside the tool result it follows...
+    expect(nudges.every((m) => m.role === "tool")).toBe(true);
+    // ...and never masquerades as something the user said.
+    const userTurns = sent.flat().filter((m) => m.role === "user");
+    expect(userTurns.some((m) => typeof m.content === "string" && m.content.includes("You repeated"))).toBe(false);
   });
 });
 

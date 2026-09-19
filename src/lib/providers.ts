@@ -2005,9 +2005,9 @@ export async function chatWithTools(
           );
           convo.push({ role: "assistant", content });
           convo.push({
-            role: "user",
+            role: "system",
             content:
-              `You invoked the /${prescribed.name} skill and produced its answer without running ANY of ` +
+              `[system nudge] You invoked the /${prescribed.name} skill and produced its answer without running ANY of ` +
               `the inspection tools it prescribes: ${prescribed.tools.join(", ")}. Run those tools NOW with ` +
               `real tool_calls against the target, then rebuild the answer from what you actually observed. ` +
               `Note: skill_read does NOT count — re-reading the skill is not inspecting the target. ` +
@@ -2031,9 +2031,9 @@ export async function chatWithTools(
           onEvent(`\n[note: announced ${announced} but made no tool call - asking for the real call]\n`);
           convo.push({ role: "assistant", content });
           convo.push({
-            role: "user",
+            role: "system",
             content:
-              `You announced a ${announced} action but made NO tool call. ` +
+              `[system nudge] You announced a ${announced} action but made NO tool call. ` +
               `Talking about a tool does nothing. Emit the actual ${announced} ` +
               `tool call NOW via tool_calls - no prose, no asking for permission.`,
           });
@@ -2047,9 +2047,9 @@ export async function chatWithTools(
           onEvent(`\n[note: false capability denial - reminding of available tools]\n`);
           convo.push({ role: "assistant", content });
           convo.push({
-            role: "user",
+            role: "system",
             content:
-              `You DO have that capability: shell_run runs commands, ` +
+              `[system nudge] You DO have that capability: shell_run runs commands, ` +
               `fs_list/fs_read read files - side effects just need the user's ` +
               `native OS dialog approval. Never claim to be text-only or unable. Either ` +
               `emit the real tool call NOW or explain the next approved step.`,
@@ -2067,9 +2067,9 @@ export async function chatWithTools(
         onEvent(`\n[note: asked for direction instead of acting - redirecting to the tools]\n`);
         convo.push({ role: "assistant", content });
         convo.push({
-          role: "user",
+          role: "system",
           content:
-            `You asked for direction instead of acting, and no tool has run yet this turn. ` +
+            `[system nudge] You asked for direction instead of acting, and no tool has run yet this turn. ` +
             `Authorization is already handled by a native OS dialog - you never need to ask for it in text. ` +
             `Emit the real tool call NOW via tool_calls, or write the final answer if there is nothing to do. ` +
             `Do not ask another question.`,
@@ -2136,7 +2136,18 @@ export async function chatWithTools(
           explicitPaths.length > 0
             ? ` You repeated \`${tc.function.name}\` with identical arguments twice. The user gave explicit path(s) this turn: ${explicitPaths.join(", ")} — use EXACTLY that path on the next call, do not substitute the workspace root. If a path is outside the workspace, say so instead of retrying.`
             : ` You repeated \`${tc.function.name}\` with identical arguments twice. Vary the arguments (different path/subdir) or summarize what you already learned — do not emit the identical call a third time.`;
-        convo.push({ role: "user", content: `[loop-guard]${hint}` });
+        // Attach the nudge to the tool result it follows instead of injecting a
+        // synthetic user turn: a role:"user" nudge can be mistaken for (or, when
+        // trimming, displace) the real request - observed live as a model
+        // reporting "only loop-guard prompts". The tool result is what the model
+        // reads immediately before deciding its next call, so the hint lands
+        // exactly where it is needed and stays out of the user channel.
+        const lastMsg = convo[convo.length - 1];
+        if (lastMsg?.role === "tool" && typeof lastMsg.content === "string") {
+          lastMsg.content += `\n\n[system nudge]${hint}`;
+        } else {
+          convo.push({ role: "system", content: `[system nudge]${hint}` });
+        }
         onEvent(`\n[note: repeated ${tc.function.name} twice — nudging to vary args]\n`);
       }
       if (repeatCount >= 3) {
