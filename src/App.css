@@ -200,6 +200,25 @@ button:disabled { opacity: 0.5; }
 .msg { background: var(--deep); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 13px; min-width: 0; }
 .msg pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; font-size: 12px; }
 .msg.user { border-color: var(--accent); }
+.msg-head { display: flex; align-items: center; gap: 6px; }
+.msg-head b { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+.msg.user .msg-head b { color: var(--accent); }
+.msg.assistant .msg-head b { color: var(--ok); }
+.msg.system .msg-head b, .msg.tool .msg-head b { color: var(--warn); }
+.msg-head .rate { margin-left: auto; float: none; }
+.turn-sep { height: 1px; flex: none; background: var(--border3); margin: 3px 10px; }
+/* Markdown body inside finalized Commander replies. */
+.msg .md { white-space: normal; overflow-wrap: anywhere; font-size: 12.5px; line-height: 1.45; }
+.msg .md p { margin: 3px 0; }
+.msg .md p:first-child { margin-top: 0; }
+.msg .md p:last-child { margin-bottom: 0; }
+.msg .md ul, .msg .md ol { margin: 3px 0; padding-left: 20px; }
+.msg .md li { margin: 1px 0; }
+.msg .md code { background: var(--deeper); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; font-size: 11.5px; }
+.msg .md pre { background: var(--deeper); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; margin: 4px 0; overflow: auto; }
+.msg .md pre code { background: none; border: none; padding: 0; font-size: 11.5px; }
+.msg .md h1, .msg .md h2, .msg .md h3, .msg .md h4 { font-size: 13px; margin: 6px 0 3px; }
+.msg .md strong { color: var(--text-dim); }
 .chat input { background: var(--deep); color: var(--text-dim); border: 1px solid var(--border2); border-radius: 6px; padding: 6px 8px; }
 .pad { flex: 1; background: var(--deep); color: var(--text-dim); border: 1px solid var(--border2); border-radius: 8px; padding: 8px; font-family: monospace; }
 .git-col { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 240px; overflow: auto; padding: 8px; }
