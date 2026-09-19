@@ -68,6 +68,10 @@
   verified to inject its own backticks into the block or add an empty `<pre>`.
 - **Render-level tests** for the transcript: markdown body, streaming body,
   thinking tail, inert links (the pieces originally shipped unverified).
+- **Playwright agent-turn e2e**: a real Commander turn in the production
+  webview with a scripted OpenAI-compatible provider (route interception) and
+  a browser-only Tauri stub for the workspace-boot path - asserts transcript
+  markdown, tool-card trail, audit entry, provider task retention, and rating.
 - Agent replies render as **markdown** (sanitized via DOMPurify; links become
   inert `text (url)`; event handlers stripped) — only finalized replies, so
   live streaming never flickers partial markup.
