@@ -58,6 +58,16 @@
   commands, no callers).
 
 ### Commander legibility
+- **Streaming markdown**: the in-flight reply now renders as markdown
+  (throttled to ~8 updates/s, with a guaranteed final flush) instead of raw
+  text, and the reasoning tail moved into a muted `⏺ thinking` block backed by
+  its own `thinking` field - display-only, never persisted (session restore
+  keeps id/role/content/tools only). Measured against marked: partial markdown
+  (unterminated ```/~~~ fences, half-written tables, unclosed emphasis) renders
+  safely, so no fence auto-closing is applied - appending a closing fence was
+  verified to inject its own backticks into the block or add an empty `<pre>`.
+- **Render-level tests** for the transcript: markdown body, streaming body,
+  thinking tail, inert links (the pieces originally shipped unverified).
 - Agent replies render as **markdown** (sanitized via DOMPurify; links become
   inert `text (url)`; event handlers stripped) — only finalized replies, so
   live streaming never flickers partial markup.

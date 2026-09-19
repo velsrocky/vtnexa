@@ -2,10 +2,16 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 
 /**
- * Render a finalized assistant chat message to sanitized HTML for the
- * Commander transcript. Same sanitizer posture as preview.ts, plus <a>
- * removed: a clicked link would navigate the whole app webview, so URLs
- * stay visible as plain text instead of becoming clickable.
+ * Render an assistant chat message to sanitized HTML for the Commander
+ * transcript. Same sanitizer posture as preview.ts, plus <a> removed: a
+ * clicked link would navigate the whole app webview, so URLs stay visible as
+ * plain text instead of becoming clickable.
+ *
+ * Safe to call on partial text while an answer streams: measured against
+ * marked, an unterminated fence (```/~~~), a half-written table and unclosed
+ * emphasis all render acceptably and never surface raw delimiters - so no
+ * fence auto-closing is applied (it would inject the closing fence's own
+ * backticks into the block, or append an empty <pre></pre>).
  */
 export function renderChatMarkdown(md: string): string {
   // Unwrap markdown links to "text (url)" first: <a> is dropped by the

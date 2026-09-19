@@ -471,13 +471,13 @@ describe("useAgentTurn stall escalation", () => {
 describe("useAgentTurn reasoning stream", () => {
   it("renders a live thinking frame and keeps it out of the final answer", async () => {
     let holder: ReturnType<typeof setup> | null = null;
-    const frames: string[] = [];
+    const frames: { thinking: string; content: string }[] = [];
     // Synchronous rAF that records each published stream frame.
     vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
       cb();
       const msgs = holder?.wsOf().messages ?? [];
       const last = msgs[msgs.length - 1];
-      if (last?.id === "stream") frames.push(last.content);
+      if (last?.id === "stream") frames.push({ thinking: last.thinking ?? "", content: last.content });
       return 1;
     });
     vi.stubGlobal("cancelAnimationFrame", () => {});
@@ -497,7 +497,7 @@ describe("useAgentTurn reasoning stream", () => {
     });
     // A frame is published during the reasoning phase - before any answer
     // text exists. Without that, the transcript sits frozen (the live bug).
-    expect(frames.some((f) => f.includes("⏺ thinking") && !f.includes("answer"))).toBe(true);
+    expect(frames.some((f) => f.thinking.length > 0 && !f.content.includes("answer"))).toBe(true);
     // ...and the persisted answer is content-only, with no thinking tail.
     expect(h.wsOf().messages.map((m) => [m.role, m.content])).toEqual([
       ["user", "go"],
@@ -542,13 +542,13 @@ describe("useAgentTurn long-turn integration", () => {
       }
       return sse([{ choices: [{ delta: { content: FINAL } }] }, { usage: { prompt_tokens: 1, completion_tokens: 1 } }]);
     });
-    const frames: string[] = [];
+    const frames: { thinking: string; content: string }[] = [];
     let holder: ReturnType<typeof setup> | null = null;
     vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
       cb();
       const msgs = holder?.wsOf().messages ?? [];
       const last = msgs[msgs.length - 1];
-      if (last?.id === "stream") frames.push(last.content);
+      if (last?.id === "stream") frames.push({ thinking: last.thinking ?? "", content: last.content });
       return 1;
     });
     vi.stubGlobal("cancelAnimationFrame", () => {});
@@ -594,7 +594,7 @@ describe("useAgentTurn long-turn integration", () => {
     expect(bodies.length).toBe(12);
 
     // 7. Reasoning streamed live during its phase, before the answer existed.
-    expect(frames.some((f) => f.includes("⏺ thinking") && !f.includes(FINAL))).toBe(true);
+    expect(frames.some((f) => f.thinking.length > 0 && !f.content.includes(FINAL))).toBe(true);
 
     // 8. Audit complete and the turn closed cleanly.
     expect(h.audits).toHaveLength(20);

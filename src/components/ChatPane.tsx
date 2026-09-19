@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import type { SkillInfo, SideTab, ToolEvent, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
@@ -6,8 +6,10 @@ import { useInputHistory } from "../hooks/useInputHistory";
 import { renderChatMarkdown } from "../lib/chatMarkdown";
 import { toolArgsSummary } from "../lib/toolCard";
 
-/** Finalized assistant replies render as sanitized markdown; the streaming
- *  message stays plain <pre> so partial markup never flickers mid-frame. */
+/** Assistant replies render as sanitized markdown: the finalized message
+ *  directly, the in-flight one through StreamingBody (throttled, with an
+ *  auto-closed code fence so partial markup never shows raw backticks) plus a
+ *  muted reasoning tail. */
 /** Compact, expandable trail of the tool calls behind an assistant reply. */
 function ToolCards({ tools }: { tools: ToolEvent[] }) {
   const [open, setOpen] = useState(false);
@@ -41,12 +43,55 @@ function ToolCards({ tools }: { tools: ToolEvent[] }) {
   );
 }
 
-function MarkdownBody({ content }: { content: string }) {
+/** Leading+trailing throttle: at most ~one update per `ms` while text streams
+ *  in, plus a guaranteed final flush. Keeps markdown parsing off the rAF path. */
+function useThrottledValue<T>(value: T, ms: number): T {
+  const [shown, setShown] = useState(value);
+  const latest = useRef(value);
+  const lastAt = useRef(0);
+  const timer = useRef<number | null>(null);
+  latest.current = value;
+  useEffect(() => {
+    const flush = () => {
+      timer.current = null;
+      lastAt.current = Date.now();
+      setShown(latest.current);
+    };
+    const since = Date.now() - lastAt.current;
+    if (since >= ms) flush();
+    else if (timer.current == null) timer.current = window.setTimeout(flush, ms - since);
+    return () => {
+      if (timer.current != null) {
+        window.clearTimeout(timer.current);
+        timer.current = null;
+      }
+    };
+  }, [value, ms]);
+  return shown;
+}
+
+export function MarkdownBody({ content }: { content: string }) {
   const [html, setHtml] = useState(() => renderChatMarkdown(content));
   useEffect(() => {
     setHtml(renderChatMarkdown(content));
   }, [content]);
   return <div className="md" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+/** In-flight assistant message: muted reasoning tail + markdown answer
+ *  (throttled - partial markdown is safe to render, see chatMarkdown.ts). */
+export function StreamingBody({ content, thinking }: { content: string; thinking?: string }) {
+  const shown = useThrottledValue(content, 120);
+  return (
+    <>
+      {thinking ? (
+        <pre className="thinking-tail" title="Live reasoning - display only, never saved">
+          {`⏺ thinking\n${thinking}`}
+        </pre>
+      ) : null}
+      <MarkdownBody content={shown} />
+    </>
+  );
 }
 
 export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, showContinue, onContinue, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, ratings, onRateMessage }: {
@@ -168,8 +213,12 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
                       </span>
                     )}
                   </div>
-                  {m.role === "assistant" && m.id !== "stream" ? (
-                    <MarkdownBody content={m.content} />
+                  {m.role === "assistant" ? (
+                    m.id === "stream" ? (
+                      <StreamingBody content={m.content} thinking={m.thinking} />
+                    ) : (
+                      <MarkdownBody content={m.content} />
+                    )
                   ) : (
                     <pre>{m.content}</pre>
                   )}

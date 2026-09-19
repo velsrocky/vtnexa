@@ -28,3 +28,27 @@ describe("renderChatMarkdown", () => {
     expect(html).not.toContain("onerror");
   });
 });
+
+describe("closeOpenFence", () => {
+  it("marked already tolerates unterminated fences - no auto-close needed", () => {
+    // Measured behavior (see renderChatMarkdown docs): appending a closing
+    // fence injects its own backticks into the block or adds an empty <pre>,
+    // so the renderer deliberately does not do it.
+    const partial = renderChatMarkdown("Here:\n```bash\npnpm test");
+    expect(partial).toContain("<pre>");
+    expect(partial).toContain("pnpm test");
+    expect(partial).not.toContain("```");
+    const tilde = renderChatMarkdown("Result:\n~~~js\nlet a = 1");
+    expect(tilde).toContain("<pre>");
+    expect(tilde).toContain("let a = 1");
+    expect(tilde).not.toContain("~~~");
+  });
+
+  it("half-written tables and emphasis render without raw delimiters", () => {
+    const mid = renderChatMarkdown("| a | b |\n|---|---|\n| 1 |");
+    expect(mid).toContain("<table>");
+    expect(mid).not.toContain("|");
+    const bold = renderChatMarkdown("partial **bold");
+    expect(bold).toContain("partial");
+  });
+});

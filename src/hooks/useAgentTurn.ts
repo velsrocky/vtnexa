@@ -93,18 +93,25 @@ export function useAgentTurn(d: Deps) {
     // One shared frame publisher: content deltas AND reasoning deltas both
     // need it, otherwise a reasoning phase (which emits reasoning_content but
     // no content) leaves the transcript frozen until the answer starts.
+    // Thinking rides in its own field (not concatenated into content) so the
+    // UI can render it as a muted block and markdown-parse the answer alone.
     const publishStream = () => {
       if (d.streamRaf.current != null) return;
       d.streamRaf.current = requestAnimationFrame(() => {
         d.streamRaf.current = null;
-        const snapshot = (thinkingAcc ? `⏺ thinking\n${thinkingAcc}\n\n` : "") + acc;
         d.updateWs((w) => {
           const msgs = [...w.messages];
           const last = msgs[msgs.length - 1];
+          const streamMsg: ChatMsg = {
+            id: "stream",
+            role: "assistant",
+            content: acc,
+            ...(thinkingAcc ? { thinking: thinkingAcc } : {}),
+          };
           if (last && last.role === "assistant" && last.id === "stream") {
-            msgs[msgs.length - 1] = { ...last, content: snapshot };
+            msgs[msgs.length - 1] = streamMsg;
           } else {
-            msgs.push({ id: "stream", role: "assistant", content: snapshot });
+            msgs.push(streamMsg);
           }
           return { ...w, messages: msgs };
         });

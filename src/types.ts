@@ -10,6 +10,12 @@ export interface ChatMsg {
   content: string;
   /** Tool calls executed during the turn that produced this assistant message. */
   tools?: ToolEvent[];
+  /**
+   * Live reasoning tail (OpenAI-compat reasoning_content) for the in-flight
+   * stream message only. Never persisted: session restore keeps id/role/
+   * content/tools, so this stays a display-only field.
+   */
+  thinking?: string;
 }
 
 /** One agent tool call, mirroring AuditEvent minus hook-assigned id/ts. */
