@@ -95,7 +95,7 @@ export function useInit(opts: {
         console.warn("workspace init failed", e);
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- boot-once: opts identity changes every render, effect must run a single time
   }, []);
 
   return { changeWorkspace, browseWorkspace };

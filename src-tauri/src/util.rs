@@ -19,7 +19,13 @@ pub(crate) fn write_atomic(path: &std::path::Path, content: &[u8]) -> Result<(),
         .unwrap_or(0);
     let tmp = path.with_file_name(format!(".{}.tmp-{}-{}", name, std::process::id(), nonce));
     let res = (|| -> Result<(), String> {
-        let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        // create_new (O_EXCL): fail rather than truncate/follow a pre-planted
+        // symlink at the temp path.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|e| e.to_string())?;
         f.write_all(content).map_err(|e| e.to_string())?;
         f.flush().map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;

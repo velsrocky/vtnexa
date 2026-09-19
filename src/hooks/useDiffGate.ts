@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { AuditInput, UndoEntry, Workspace } from "../types";
-import { undoEntryLabel } from "../types";
+import { undoEntryLabel, undoEntrySize } from "../types";
 import { fsDelete, fsRead, fsRename, fsWrite, gitCommit } from "../lib/tauri";
 import { claimFor } from "../lib/approval";
 import { trimUndoStack } from "../lib/sessionStore";
 import { baseName } from "../lib/utils";
+import { useConfirm } from "../context/ConfirmContext";
 
 // Undo boundaries (v1): approved Diff-gate writes + file renames/deletes.
 // Shell/terminal side effects, directory deletes and binaries are NOT
@@ -12,16 +13,7 @@ import { baseName } from "../lib/utils";
 const MAX_UNDO_ENTRIES = 20;
 const MAX_UNDO_BYTES = 256 * 1024;
 
-function entrySize(e: UndoEntry): number {
-  switch (e.kind) {
-    case "write":
-      return e.before.length + e.after.length;
-    case "delete":
-      return e.content.length;
-    case "rename":
-      return 0;
-  }
-}
+// Single source of truth lives in types.ts (undoEntrySize) — do not duplicate.
 
 // Diff review gate: stage user edits as a pending diff (never direct
 // writes), approve with drift guard, optionally commit. Composes on the
@@ -45,10 +37,11 @@ export function useDiffGate(opts: {
   setCommitMsg: (v: string) => void;
   logAudit: (e: AuditInput) => void;
   retargetTabs: (oldP: string, newP: string) => void;
-  closeTab: (path: string) => void;
+  closeTab: (path: string) => void | Promise<void>;
 }) {
   const { ws, updateWs, openPath, editorText, originalText } = opts;
   const { setOriginals, setBuffers, setOriginalText, setEditorText } = opts;
+  const confirm = useConfirm();
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
 
@@ -86,7 +79,7 @@ export function useDiffGate(opts: {
 
   /** External capture (agent rename/delete via runTool, tree ops). */
   function pushUndo(e: UndoEntry) {
-    if (entrySize(e) > MAX_UNDO_BYTES) {
+    if (undoEntrySize(e) > MAX_UNDO_BYTES) {
       note(`\n↩ undo skipped ${undoEntryLabel(e)} (over 256KB - too large to snapshot)`);
       return;
     }
@@ -136,14 +129,14 @@ export function useDiffGate(opts: {
       if (msg.includes("No such file or directory") || msg.includes("not exist")) {
         return { proceed: true, current: "", existed: false };
       }
-      const ok = window.confirm(
+      const ok = await confirm(
         `${baseName(d.path)} could not be read (${msg}) — likely locked or permission-denied. Apply anyway and overwrite?`,
       );
       // Blind overwrite: best-effort undo seed (may be empty).
       return { proceed: ok, current: d.original, existed: d.original !== "" || existed };
     }
     if (current === d.original) return { proceed: true, current, existed: true };
-    const ok = window.confirm(
+    const ok = await confirm(
       `${baseName(d.path)} changed on disk since this diff was staged (another window, the agent, or an external editor).\n\nApply anyway and overwrite those changes?`,
     );
     return { proceed: ok, current, existed: true };
@@ -343,7 +336,7 @@ export function useDiffGate(opts: {
             setOriginalText("");
             setEditorText("");
           }
-          opts.closeTab(e.path);
+          void opts.closeTab(e.path);
         } else {
           await fsWrite(e.path, content, await claimFor("fs_write", { path: e.path }));
           markApplied(e.path, content);
@@ -367,7 +360,7 @@ export function useDiffGate(opts: {
             setOriginalText("");
             setEditorText("");
           }
-          opts.closeTab(e.path);
+          void opts.closeTab(e.path);
         }
         break;
       }

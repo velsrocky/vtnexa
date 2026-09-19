@@ -101,11 +101,11 @@ export function useMcp({ workspaceRoot }: { workspaceRoot: string }) {
     }
   }, []);
 
-  // Refresh when the workspace changes or the panel opens.
+  // Refresh when the workspace changes or the panel opens. refresh is a
+  // useCallback([]) — referentially stable, so listing it is loop-safe.
   useEffect(() => {
     if (showMcp) void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showMcp, workspaceRoot]);
+  }, [showMcp, workspaceRoot, refresh]);
 
   async function setOn(on: boolean) {
     setMcpEnabled(on);

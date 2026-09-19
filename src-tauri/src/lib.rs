@@ -1,8 +1,7 @@
 pub(crate) mod approvals;
-mod browser;
+pub(crate) mod browser;
 pub(crate) mod fsops;
 mod git;
-pub(crate) mod health;
 mod keys;
 pub(crate) mod lsp;
 pub(crate) mod lsp_ops;
@@ -58,7 +57,6 @@ pub fn run() {
         .manage(shell_jobs::ShellJobs::default())
         .manage(approvals::ApprovalStore::default())
         .manage(rate_limiter::RateLimiter::default())
-        .manage(health::HealthMonitor::default())
         // Stop the browser sidecar only when the LAST window closes - other
         // windows would lose a running browser otherwise. kill_on_drop (set
         // at spawn) is the backstop for abnormal exits; this is the clean path.

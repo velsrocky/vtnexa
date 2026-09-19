@@ -133,6 +133,61 @@
 - MCP panel shows `untrusted` badge + workspace trust warning.
 - `vitest.config.ts` with coverage; 285+ frontend tests green.
 
+### Security hardening (review pass)
+- **Trusted paths matched on substrings**: `docs` also matched `mydocs`,
+  and any value (including `/`) was accepted with no validation — a planted
+  entry could silently bypass `fs_write` gates. Patterns are now normalized
+  relative fragments matched on path-component boundaries, with escapes
+  (`..`, `~`, `/`) refused server-side and mirrored in the Settings UI.
+- **Background shell jobs skipped the sandbox**: `shell_bg` spawned bare
+  `sh` while `shell_run` went through firejail. New
+  `sandbox::exec_bg_command` gives bg jobs identical confinement (time bound
+  stays the 30min poll-kill), and job output files use `O_EXCL`.
+- **MCP remote had no SSRF guard**: workspace-planted servers could point at
+  IMDS/loopback/LAN. Untrusted servers now reuse the browser host blocklist;
+  trusted (global/explicitly enabled) servers keep full access for local dev.
+- **Approval detail truncation hole**: tokens fingerprinted only the 4k
+  truncated prefix, so bytes past it were mutable without re-approval. Tokens
+  now bind full length + hash alongside the prefix.
+- **Unbounded session/routine reads**: `session_load`/`session_get`/
+  `routines_load` read without caps (saves were capped). All loads now go
+  through a metadata-gated `read_capped`.
+- **Rate limiter was minute-only**: the advertised 500/day cap was a dead
+  constant, and only `shell_run` was checked. Daily cap implemented, wait-time
+  math fixed, coverage extended to `shell_bg`, `mcp_call_tool` and gated
+  browser ops. Dead `health.rs` stub removed; approval-token fallback entropy
+  hardened; `write_atomic` temp files use `O_EXCL`.
+- PTY documented as user-gesture-only (absent from `TOOL_DEFS` by design) with
+  a backend test pinning `pty_*` off the approval surface.
+
+### Frontend hygiene + structure
+- **`window.confirm` eliminated** (5 sites): new `ConfirmContext` with a
+  non-blocking in-window modal (mounted above App); hooks fall back to the
+  old blocking confirm only without a provider, so existing tests were
+  unaffected. `closeTab` is async now; callers updated.
+- **`providers.ts` split, phase 2**: `toolDefs.ts` owns the tool types
+  (circular import with providers gone), new `toolCatalog.ts` owns `TOOL_DEFS`;
+  `providers.ts` 2263 → ~1850 lines with compat re-exports.
+- **Prop-drilling cleanup, phase 1**: new `AppContext` feeds TopBar /
+  ProviderBar / WorkspaceBar / SessionBar (~30 props gone, memoized slices +
+  `memo()` so stream tokens skip the bars); `updateWs`/`logAudit`/`stopTurn`
+  stabilized with `useCallback`. Heavy panes stay on props pending
+  selector-shaped stores (documented in context module).
+- `useDiffGate` deduplicated onto `types.ts:undoEntrySize`; one
+  `exhaustive-deps` disable removed (`useMcp.refresh` is a stable
+  `useCallback`), the other 8 documented with loop/timing rationale; dead
+  0-byte `src/config` + `src/__tests__` removed.
+
+### Tests
+- Turn-digest test repaired (it exercised the early-exit path, never the
+  exhaustion path it claimed) plus its `process.env` typing break; digest
+  suite green with the suite: 349 vitest + 69 Rust + clippy clean + 5 e2e.
+- New: bar component tests (context rendering, interactions, fail-loud
+  wiring), `ConfirmContext` modal tests, rate-limiter minute/daily tests,
+  approval suffix-mutation test, trusted-pattern boundary tests, MCP SSRF
+  test, sandbox bg-command test; new `settings.spec.ts` e2e pins trusted-path
+  validation in the real webview.
+
 ## 0.3.0
 - Review-gated Commander, Monaco/Diff, PTY, Git tab, routines, browser use,
   MCP (opt-in), skills, per-window isolation, audit log.

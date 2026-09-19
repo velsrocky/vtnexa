@@ -59,6 +59,27 @@ pub(crate) fn exec_command(cmd: &str, timeout_secs: u64, cwd: &std::path::Path) 
     }
 }
 
+/// Background-job execution path: same firejail confinement as
+/// `exec_command`, but WITHOUT the short `timeout` wrapper. Bg jobs are
+/// long-lived by design (installs, builds, test suites); the 30-minute
+/// `MAX_JOB_AGE` poll-kill in shell_jobs.rs is the time bound instead.
+/// Callers must use this (never bare `sh`) so bg jobs get identical
+/// OS-level confinement to foreground `shell_run`.
+pub(crate) fn exec_bg_command(cmd: &str, cwd: &std::path::Path) -> Command {
+    if firejail_available() {
+        let mut c = Command::new(FIREJAIL_PATH);
+        for flag in FLAGS {
+            c.arg(flag);
+        }
+        c.current_dir(cwd).arg("--").arg("sh").arg("-c").arg(cmd);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(cmd).current_dir(cwd);
+        c
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +102,15 @@ mod tests {
         let joined = format!("{c:?}");
         assert!(joined.contains("echo hi"));
         assert!(joined.contains("-c"));
+    }
+
+    #[test]
+    fn bg_command_carries_payload_without_short_timeout() {
+        let c = exec_bg_command("sleep 60", std::path::Path::new("."));
+        let joined = format!("{c:?}");
+        assert!(joined.contains("sleep 60"));
+        assert!(joined.contains("-c"));
+        // Bg jobs are bounded by the 30min poll-kill, not `timeout 30s`.
+        assert!(!joined.contains("\"30s\""));
     }
 }

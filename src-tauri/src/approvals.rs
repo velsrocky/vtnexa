@@ -62,6 +62,8 @@ pub(crate) struct Approval {
     pub label: String,
     pub action: String,
     pub detail: String,
+    pub detail_len: usize,
+    pub detail_hash: u64,
     pub expires: Instant,
 }
 
@@ -75,16 +77,20 @@ fn gen_token() -> String {
             return bytes.iter().map(|b| format!("{:02x}", b)).collect();
         }
     }
+    // /dev/urandom missing (essentially never on Linux): hash time + pid +
+    // thread + stack address so the fallback is not a pure time counter.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!(
-        "fallback-{:x}-{}-{}",
-        nanos,
-        std::process::id(),
-        nanos.wrapping_mul(0x9E3779B97F4A7C15)
-    )
+    let mut h = DefaultHasher::new();
+    nanos.hash(&mut h);
+    std::process::id().hash(&mut h);
+    std::thread::current().id().hash(&mut h);
+    (&h as *const _ as usize).hash(&mut h);
+    format!("fallback-{:x}-{:x}", nanos, h.finish())
 }
 
 fn prune(map: &mut HashMap<String, Approval>) {
@@ -98,11 +104,26 @@ pub(crate) fn is_privileged(action: &str) -> bool {
 
 /// Canonical detail fingerprint: trim + truncate. Both issue and consume run
 /// this, so the frontend just echoes one opaque string through.
+/// NOTE: truncation alone is not the security boundary — `mint`/`consume`
+/// additionally bind the FULL detail length + hash (see below), so mutating
+/// bytes past DETAIL_STORE_LEN is detected instead of silently allowed.
 pub(crate) fn norm_detail(raw: &str) -> String {
     raw.trim().chars().take(DETAIL_STORE_LEN).collect()
 }
 
-fn validate_issue(action: &str, detail: &Option<String>) -> Result<(String, String), String> {
+/// Full-detail binding: length + non-cryptographic hash over the complete
+/// trimmed detail. Stored at mint, rechecked at consume — a suffix past the
+/// 4k truncated prefix cannot be swapped without re-approval.
+pub(crate) fn full_detail_binding(raw: &str) -> (usize, u64) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let t = raw.trim();
+    let mut h = DefaultHasher::new();
+    t.hash(&mut h);
+    (t.len(), h.finish())
+}
+
+fn validate_issue(action: &str, detail: &Option<String>) -> Result<(String, String, usize, u64), String> {
     let action = action.trim().to_string();
     if action.is_empty() || action.len() > MAX_ACTION_LEN {
         return Err("approval: invalid action".to_string());
@@ -114,7 +135,8 @@ fn validate_issue(action: &str, detail: &Option<String>) -> Result<(String, Stri
     if detail.len() > MAX_DETAIL_LEN || detail.contains('\0') {
         return Err("approval: invalid detail".to_string());
     }
-    Ok((action, norm_detail(detail)))
+    let (full_len, full_hash) = full_detail_binding(detail);
+    Ok((action, norm_detail(detail), full_len, full_hash))
 }
 
 fn mint(
@@ -122,6 +144,8 @@ fn mint(
     label: &str,
     action: String,
     detail: String,
+    detail_len: usize,
+    detail_hash: u64,
 ) -> Result<String, String> {
     let token = gen_token();
     let mut map = store.0.lock().map_err(|e| e.to_string())?;
@@ -132,6 +156,8 @@ fn mint(
             label: label.to_string(),
             action,
             detail,
+            detail_len,
+            detail_hash,
             expires: Instant::now() + APPROVAL_TTL,
         },
     );
@@ -214,7 +240,7 @@ pub(crate) async fn approval_issue(
     proto: Option<i32>,
 ) -> Result<String, String> {
     check_proto(&proto)?;
-    let (action, normed) = validate_issue(&action, &detail)?;
+    let (action, normed, full_len, full_hash) = validate_issue(&action, &detail)?;
     let (tx, rx) = std::sync::mpsc::channel::<bool>();
     window
         .dialog()
@@ -234,7 +260,7 @@ pub(crate) async fn approval_issue(
     if !confirmed {
         return Err(format!("user rejected {}", action));
     }
-    mint(&store, window.label(), action, normed)
+    mint(&store, window.label(), action, normed, full_len, full_hash)
 }
 
 /// Direct-gesture path: no dialog. Only for handlers that fire on real user
@@ -249,8 +275,8 @@ pub(crate) fn approval_claim(
     proto: Option<i32>,
 ) -> Result<String, String> {
     check_proto(&proto)?;
-    let (action, normed) = validate_issue(&action, &detail)?;
-    mint(&store, window.label(), action, normed)
+    let (action, normed, full_len, full_hash) = validate_issue(&action, &detail)?;
+    mint(&store, window.label(), action, normed, full_len, full_hash)
 }
 
 /// Single-use consume: validates window + action + detail fingerprint, expiry,
@@ -273,6 +299,7 @@ pub(crate) fn approval_consume(
         return Err(format!("{}: invalid approval token", action));
     }
     let want = norm_detail(detail.as_deref().unwrap_or(""));
+    let (want_len, want_hash) = full_detail_binding(detail.as_deref().unwrap_or(""));
     let mut map = store.0.lock().map_err(|e| e.to_string())?;
     prune(&mut map);
     let entry = map.remove(&t).ok_or_else(|| {
@@ -293,7 +320,7 @@ pub(crate) fn approval_consume(
             action, entry.action
         ));
     }
-    if entry.detail != want {
+    if entry.detail != want || entry.detail_len != want_len || entry.detail_hash != want_hash {
         return Err(format!(
             "{}: approval detail mismatch (arguments changed after approval — re-approve)",
             action
@@ -334,6 +361,18 @@ mod tests {
         assert_eq!(norm_detail("").as_str(), "");
         let long = "x".repeat(9000);
         assert_eq!(norm_detail(&long).len(), DETAIL_STORE_LEN);
+    }
+
+    #[test]
+    fn full_binding_detects_suffix_mutation_past_truncation() {
+        // Same 4k prefix, different tail: norm_detail collides, but the
+        // full length+hash binding must differ.
+        let prefix = "x".repeat(DETAIL_STORE_LEN);
+        let a = format!("{}{}", prefix, "AAAA-tail");
+        let b = format!("{}{}", prefix, "BBBB-tail");
+        assert_eq!(norm_detail(&a), norm_detail(&b));
+        assert_ne!(full_detail_binding(&a), full_detail_binding(&b));
+        assert_eq!(full_detail_binding(&a), full_detail_binding(&a));
     }
 
     #[test]

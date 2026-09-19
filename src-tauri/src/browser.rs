@@ -391,6 +391,7 @@ pub async fn browser_navigate(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, BrowserState>,
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
+    rate_limiter: tauri::State<'_, crate::rate_limiter::RateLimiter>,
     url: String,
     approval_token: Option<String>,
     approval_detail: Option<String>,
@@ -402,6 +403,7 @@ pub async fn browser_navigate(
         &approval_detail,
         &approval_token,
     )?;
+    rate_limiter.check_turn(window.label())?;
     if url.len() > 4096 || !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err("browser_navigate: http(s) URL required".to_string());
     }
@@ -424,6 +426,7 @@ pub async fn browser_click(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, BrowserState>,
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
+    rate_limiter: tauri::State<'_, crate::rate_limiter::RateLimiter>,
     target_ref: u32,
     approval_token: Option<String>,
     approval_detail: Option<String>,
@@ -435,6 +438,7 @@ pub async fn browser_click(
         &approval_detail,
         &approval_token,
     )?;
+    rate_limiter.check_turn(window.label())?;
     post_path(&state, "/click", json!({ "ref": target_ref })).await
 }
 
@@ -444,6 +448,7 @@ pub async fn browser_type(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, BrowserState>,
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
+    rate_limiter: tauri::State<'_, crate::rate_limiter::RateLimiter>,
     target_ref: u32,
     text: String,
     submit: Option<bool>,
@@ -457,6 +462,7 @@ pub async fn browser_type(
         &approval_detail,
         &approval_token,
     )?;
+    rate_limiter.check_turn(window.label())?;
     if text.len() > 20000 {
         return Err("browser_type: text too long".to_string());
     }
@@ -489,6 +495,7 @@ pub async fn browser_back(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, BrowserState>,
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
+    rate_limiter: tauri::State<'_, crate::rate_limiter::RateLimiter>,
     approval_token: Option<String>,
     approval_detail: Option<String>,
 ) -> Result<Value, String> {
@@ -499,6 +506,7 @@ pub async fn browser_back(
         &approval_detail,
         &approval_token,
     )?;
+    rate_limiter.check_turn(window.label())?;
     post_path(&state, "/back", json!({})).await
 }
 

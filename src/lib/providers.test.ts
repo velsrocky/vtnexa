@@ -997,6 +997,60 @@ describe("chatWithTools question repair", () => {
   });
 });
 
+describe("synthesis turn digest", () => {
+  it("injects a citable outcome line for every executed call", async () => {
+    setInvokeImpl(async (cmd, a) => {
+      if (cmd === "fs_list") {
+        return a?.path?.includes("sub")
+          ? [{ name: "alpha", path: "/w/early/alpha", is_dir: true }]
+          : [{ name: "beta", path: "/w/early/beta", is_dir: false }];
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const bodies: any[] = [];
+    stubFetch((_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      const n = bodies.length;
+      if (n === 1) {
+        return openAITools([{ id: "a1", name: "fs_list", args: { path: "/w/early" } }]);
+      }
+      if (n <= 10) {
+        // Keep emitting distinct calls so the loop guard (3× identical)
+        // doesn't fire: the digest path under test is budget exhaustion
+        // after MAX_ROUNDS, where the trimmed tail would otherwise drop
+        // the early calls.
+        return openAITools([{ id: `b${n}`, name: "fs_list", args: { path: `/w/early/sub${n}` } }]);
+      }
+      return openAIText("done");
+    });
+    await chatWithTools(CFG, [{ role: "user", content: "go" }], () => {});
+    const digest = bodies[bodies.length - 1].messages.find(
+      (m: any) => m.role === "system" && typeof m.content === "string" && m.content.includes("Turn digest"),
+    );
+    expect(digest).toBeTruthy();
+    expect(digest.content).toMatch(/fs_list.*"\/w\/early"/);
+    expect(digest.content).toMatch(/fs_list.*"\/w\/early\/sub2"/);
+    // The digest rides one round only as synthesis context: no user-turn text.
+    const users = bodies[bodies.length - 1].messages.filter((m: any) => m.role === "user");
+    expect(users.some((u: any) => /Turn digest/.test(u.content ?? ""))).toBe(false);
+  });
+
+  it("stays silent when no tools ran this turn", async () => {
+    setInvokeImpl(async () => []);
+    const bodies: any[] = [];
+    stubFetch((_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return openAIText("plain answer");
+    });
+    await chatWithTools(CFG, [{ role: "user", content: "hi" }], () => {});
+    expect(
+      bodies.some((b) =>
+        (b.messages as any[]).some((m) => typeof m.content === "string" && m.content.includes("Turn digest")),
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("nudge channels", () => {
   it("attaches the repeat nudge to the tool result, never as a user turn", async () => {
     setInvokeImpl(async () => []);
@@ -1010,8 +1064,13 @@ describe("nudge channels", () => {
     const sent = calls.map((c) => JSON.parse(c.init.body).messages as any[]);
     const nudges = sent.flat().filter((m) => typeof m.content === "string" && m.content.includes("You repeated"));
     expect(nudges.length).toBeGreaterThan(0);
-    // The hint rides inside the tool result it follows...
-    expect(nudges.every((m) => m.role === "tool")).toBe(true);
+    // The hint rides inside the tool result it follows - or inside the system
+    // turn-digest that quotes every executed call for the synthesis round...
+    expect(
+      nudges.every(
+        (m) => m.role === "tool" || (m.role === "system" && m.content.includes("Turn digest")),
+      ),
+    ).toBe(true);
     // ...and never masquerades as something the user said.
     const userTurns = sent.flat().filter((m) => m.role === "user");
     expect(userTurns.some((m) => typeof m.content === "string" && m.content.includes("You repeated"))).toBe(false);

@@ -167,7 +167,7 @@ export function useProvider(opts: {
       }
     }, 500);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounced endpoint probe: deps intentionally limited to baseUrl/model so typing other fields doesn't refire discovery
   }, [baseUrl, model]);
 
   // "Correct" = the provider answered without throwing. Most-recent first.

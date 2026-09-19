@@ -99,6 +99,7 @@ pub(crate) fn shell_bg(
     jobs: tauri::State<'_, ShellJobs>,
     ws: tauri::State<'_, crate::WorkspaceRoots>,
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
+    rate_limiter: tauri::State<'_, crate::rate_limiter::RateLimiter>,
     cwd: String,
     cmd: String,
     approval_token: Option<String>,
@@ -111,6 +112,7 @@ pub(crate) fn shell_bg(
         &approval_detail,
         &approval_token,
     )?;
+    rate_limiter.check_turn(window.label())?;
     if cmd.is_empty() || cmd.contains('\0') {
         return Err("shell_bg: empty or invalid cmd".to_string());
     }
@@ -145,12 +147,20 @@ pub(crate) fn shell_bg(
     let id = new_job_id();
     let out_path = jobs_dir().join(format!("{}.out", id));
     let err_path = jobs_dir().join(format!("{}.err", id));
-    let out_file = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
-    let err_file = std::fs::File::create(&err_path).map_err(|e| e.to_string())?;
-    let child = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .current_dir(&dir)
+    // create_new (O_EXCL): fail rather than follow a pre-planted symlink.
+    let out_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&out_path)
+        .map_err(|e| e.to_string())?;
+    let err_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&err_path)
+        .map_err(|e| e.to_string())?;
+    // Same OS-level confinement as foreground shell_run (firejail when
+    // installed). Time bound is the 30min poll-kill below, not `timeout 30s`.
+    let child = crate::sandbox::exec_bg_command(&cmd, &dir)
         .stdout(std::process::Stdio::from(out_file))
         .stderr(std::process::Stdio::from(err_file))
         .spawn()

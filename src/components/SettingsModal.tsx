@@ -6,17 +6,33 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const { paths, addPath, removePath } = useTrustedPaths();
   const [pattern, setPattern] = useState("");
   const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (pattern) {
-      addPath(pattern, reason);
-      invoke("update_trusted_paths", {
-        newPaths: paths.concat({ pattern, reason }),
-      }).catch(console.error);
-      setPattern("");
-      setReason("");
+    if (!pattern.trim()) return;
+    const err = addPath(pattern, reason);
+    if (err) {
+      setError(err);
+      return;
     }
+    setError(null);
+    // Sync the normalized list (addPath already normalized/deduped).
+    const norm = pattern.trim().replace(/\\/g, "/").split("/").map((s) => s.trim()).filter(Boolean).join("/");
+    const next = paths.some((p) => p.pattern.toLowerCase() === norm.toLowerCase())
+      ? paths
+      : paths.concat({ pattern: norm, reason: reason.slice(0, 256) });
+    invoke("update_trusted_paths", {
+      newPaths: next,
+    }).catch((ex) => setError(String(ex)));
+    setPattern("");
+    setReason("");
+  }
+
+  function handleRemove(i: number) {
+    const next = paths.filter((_, j) => j !== i);
+    removePath(i);
+    invoke("update_trusted_paths", { newPaths: next }).catch((ex) => setError(String(ex)));
   }
 
   return (
@@ -30,10 +46,11 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
         {paths.map((p, i) => (
           <li key={i}>
             <code>{p.pattern}</code> — {p.reason}
-            <button onClick={() => removePath(i)}>×</button>
+            <button onClick={() => handleRemove(i)}>×</button>
           </li>
         ))}
       </ul>
+      {error && <p style={{ color: "var(--danger, #c00)" }}>{error}</p>}
       <form onSubmit={handleSubmit}>
         <input
           type="text"

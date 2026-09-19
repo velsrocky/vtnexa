@@ -264,6 +264,11 @@ pub(crate) fn validate_local_command(command: &[String]) -> Result<(), String> {
         "npx", "node", "nodejs", "python", "python3", "uv", "uvx", "bun", "bunx", "deno", "go",
         "cargo", "java", "ruby", "dotnet",
     ];
+    // NOTE: `cargo`/`go` run workspace code at startup (build.rs, go:generate)
+    // — that is why workspace-only servers stay UNTRUSTED until the user
+    // enables them in the ⛁ panel, and why every mcp_call_tool needs an
+    // approval token. The allowlist keeps out shells/downloaders; the trust
+    // signal + approval gate cover what the allowlist cannot.
     // Allow absolute/relative paths whose basename is allowlisted, plus bare
     // names above. Anything else (e.g. /tmp/evil) is refused.
     if !ALLOWED.contains(&base.as_str()) {
@@ -674,6 +679,18 @@ async fn remote_session(
     untrusted: bool,
 ) -> Result<RemoteSession, String> {
     let url = validate_remote_url(cfg.url.as_deref().unwrap_or(""))?;
+    // SSRF guard for workspace-planted (untrusted) servers: a cloned repo can
+    // point `.vtnexa/vtnexa.json` at IMDS (169.254.169.254), loopback, or LAN
+    // hosts and exfiltrate cloud credentials or probe the local network.
+    // Trusted servers (global config, or explicitly enabled) keep full access
+    // — local HTTP MCP servers on 127.0.0.1 are a legit dev setup.
+    if untrusted && crate::browser::navigation_host_blocked(&url) {
+        return Err(format!(
+            "mcp: untrusted workspace server '{}' points at a loopback/private/link-local host ({}) — enable it in the ⛁ panel only if you trust it, or move it to the global config",
+            name,
+            url_host_display(&url)
+        ));
+    }
     let host_display = url_host_display(&url);
     let mut headers = Vec::new();
     for (k, v) in subst_headers_for_server(&cfg.headers.clone().unwrap_or_default(), untrusted) {
@@ -1203,6 +1220,7 @@ pub(crate) async fn mcp_call_tool(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::WorkspaceRoots>,
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
+    rate_limiter: tauri::State<'_, crate::rate_limiter::RateLimiter>,
     server: String,
     tool: String,
     args: serde_json::Value,
@@ -1216,6 +1234,7 @@ pub(crate) async fn mcp_call_tool(
         &approval_detail,
         &approval_token,
     )?;
+    rate_limiter.check_turn(window.label())?;
     if !valid_server_name(&server) {
         return Err("mcp: invalid server name".to_string());
     }
@@ -1481,6 +1500,24 @@ mod tests {
         assert!(validate_remote_url("https://example.com/a b")
             .unwrap_err()
             .contains("whitespace"));
+    }
+
+    #[test]
+    fn untrusted_remote_hosts_hit_ssrf_guard() {
+        // Same classifier as the browser gate: loopback / private / IMDS are
+        // blocked for workspace-planted servers, open internet is allowed.
+        assert!(crate::browser::navigation_host_blocked(
+            "http://127.0.0.1:3000/mcp"
+        ));
+        assert!(crate::browser::navigation_host_blocked(
+            "http://169.254.169.254/latest/meta-data/"
+        ));
+        assert!(crate::browser::navigation_host_blocked(
+            "http://192.168.1.10/mcp"
+        ));
+        assert!(!crate::browser::navigation_host_blocked(
+            "https://mcp.example.com/mcp"
+        ));
     }
 
     #[test]

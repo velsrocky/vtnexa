@@ -1,19 +1,22 @@
+import { memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { THEMES, asThemeId, type ThemeId } from "../lib/theme";
 import { APPROVAL_PROTO } from "../lib/approval";
+import { useTopBar } from "../context/AppContext";
 
-export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mcpOn, mcpTools, themeId, onOpenRoutines, onOpenMcp, onThemeChange, onOpenSettings }: {
-  workspaceLabel: string;
-  windowLabel: string;
-  scheduledCount: number;
-  mcpOn: boolean;
-  mcpTools: number;
-  themeId: ThemeId;
-  onOpenRoutines: () => void;
-  onOpenMcp: () => void;
-  onThemeChange: (id: ThemeId) => void;
-  onOpenSettings: () => void;
-}) {
+function TopBarInner() {
+  const {
+    workspaceLabel,
+    windowLabel,
+    scheduledCount,
+    mcpOn,
+    mcpTools,
+    themeId,
+    onOpenRoutines,
+    onOpenMcp,
+    onThemeChange,
+    onOpenSettings,
+  } = useTopBar();
   return (
     <header className="topbar">
       <strong>VTNexa</strong>
@@ -77,3 +80,7 @@ export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mc
     </header>
   );
 }
+
+// Memoized: props are gone (context slices) and App's useMemo keeps the slice
+// identities stable, so stream-token renders skip this bar entirely.
+export default memo(TopBarInner);

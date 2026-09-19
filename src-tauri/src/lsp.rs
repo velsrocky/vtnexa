@@ -55,11 +55,15 @@ pub(crate) fn find_project_root(
                 if !canon.starts_with(ws) {
                     break;
                 }
-            } else {
-                // Non-existing ancestor: lexical check.
-                if !dir.starts_with(workspace_root.unwrap()) {
+            } else if let Some(wroot) = workspace_root {
+                // Non-existing ancestor: lexical check (no unwrap — ws_canon
+                // being Some implies workspace_root was Some, but don't rely
+                // on that coupling).
+                if !dir.starts_with(wroot) {
                     break;
                 }
+            } else {
+                break;
             }
         }
         if markers.iter().any(|m| dir.join(m).is_file()) {

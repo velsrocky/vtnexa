@@ -8,6 +8,13 @@ use std::time::{Duration, Instant};
 use tauri::Emitter;
 
 // ---- Real PTY lanes ----
+// Interactive terminal: USER-gesture only, never agent-callable.
+// The agent's tool surface (TOOL_DEFS / runTool) has no pty_* entry, so the
+// model cannot drive this shell — only keystrokes from TerminalPane reach
+// pty_write. That is why there is no approval token here: an approval modal
+// per keystroke would be unusable, and the threat model is "your shell, your
+// responsibility" (same as any terminal emulator). Confinement is limited to
+// workspace-root cwd + per-window id ownership below.
 pub(crate) struct PtySession {
     pub(crate) master: Box<dyn MasterPty + Send>,
     pub(crate) writer: Box<dyn Write + Send>,
@@ -226,5 +233,14 @@ mod tests {
         assert!(check_pty_owner("main", "main-2:pty").is_err());
         assert!(check_pty_owner("main", "../../etc").is_err());
         assert!(check_pty_owner("main", "").is_err());
+    }
+
+    #[test]
+    fn pty_stays_outside_the_agent_approval_surface() {
+        // pty_* is user-gesture only: the agent gate must never claim it,
+        // otherwise a future refactor could route agent output into a shell.
+        for a in ["pty_spawn", "pty_write", "pty_resize", "pty_kill"] {
+            assert!(!crate::approvals::is_privileged(a), "{} must stay user-only", a);
+        }
     }
 }

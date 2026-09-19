@@ -1,17 +1,19 @@
-import type { ProviderConfig } from "../types";
+import { memo } from "react";
 import Combo from "./Combo";
-import { asKind, type ProviderEntry } from "../lib/providerHistory";
+import { asKind } from "../lib/providerHistory";
+import { useProviderBar } from "../context/AppContext";
 
-export default function ProviderBar({ windowLabel, editCfg, provHist, provModels, modelsNote, keychainOk, setEditCfg, refreshModels }: {
-  windowLabel: string;
-  editCfg: ProviderConfig;
-  provHist: ProviderEntry[];
-  provModels: string[];
-  modelsNote: string;
-  keychainOk: boolean | null;
-  setEditCfg: (patch: Partial<ProviderConfig>) => void;
-  refreshModels: () => void;
-}) {
+function ProviderBarInner() {
+  const {
+    windowLabel,
+    editCfg,
+    provHist,
+    provModels,
+    modelsNote,
+    keychainOk,
+    setEditCfg,
+    refreshModels,
+  } = useProviderBar();
   return (
     <div className="configbar">
       <span className="muted small" title="Every window has its own provider - this edits this window's">
@@ -77,3 +79,5 @@ export default function ProviderBar({ windowLabel, editCfg, provHist, provModels
     </div>
   );
 }
+
+export default memo(ProviderBarInner);

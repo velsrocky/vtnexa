@@ -24,10 +24,83 @@ pub(crate) struct WorkspaceRoots(pub(crate) Mutex<HashMap<String, std::path::Pat
 #[derive(Default)]
 pub(crate) struct AppSettings(pub(crate) Mutex<AppConfig>);
 
+pub(crate) const MAX_TRUSTED_PATHS: usize = 50;
+pub(crate) const MAX_TRUSTED_PATTERN_LEN: usize = 256;
+pub(crate) const MAX_TRUSTED_REASON_LEN: usize = 256;
+
+/// Normalize a user-supplied trusted-path pattern to a relative fragment.
+/// Rejects anything that could match too broadly (absolute paths, `..`,
+/// `~`, empty, or over-long). Returns the normalized `a/b/c` form.
+pub(crate) fn normalize_trusted_pattern(raw: &str) -> Result<String, String> {
+    let t = raw.trim().replace('\\', "/");
+    if t.is_empty() {
+        return Err("trusted path: pattern is empty".to_string());
+    }
+    if t.len() > MAX_TRUSTED_PATTERN_LEN {
+        return Err(format!(
+            "trusted path: pattern too long ({} > {})",
+            t.len(),
+            MAX_TRUSTED_PATTERN_LEN
+        ));
+    }
+    if t.contains('\0') {
+        return Err("trusted path: invalid pattern".to_string());
+    }
+    // Collapse duplicate slashes, strip leading/trailing slashes.
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in t.split('/') {
+        let s = seg.trim();
+        if s.is_empty() {
+            continue;
+        }
+        if s == "." || s == ".." {
+            return Err("trusted path: '..' and '.' are not allowed".to_string());
+        }
+        if s == "~" || s.starts_with('~') {
+            return Err("trusted path: '~' is not allowed".to_string());
+        }
+        parts.push(s);
+    }
+    if parts.is_empty() {
+        return Err("trusted path: pattern matches everything (refused)".to_string());
+    }
+    let norm = parts.join("/");
+    // A lone "/" (or "///") normalizes to empty — already rejected above,
+    // but belt-and-braces against a match-all entry.
+    if norm.is_empty() || norm == "/" {
+        return Err("trusted path: pattern matches everything (refused)".to_string());
+    }
+    Ok(norm)
+}
+
+fn split_path_components(path: &std::path::Path) -> Vec<String> {
+    path.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(crate) fn is_trusted_path(path: &std::path::Path, trusted_paths: &[TrustedPath]) -> bool {
-    let path_str = path.to_string_lossy().to_lowercase();
+    let comps = split_path_components(path);
+    if comps.is_empty() {
+        return false;
+    }
     for tp in trusted_paths {
-        if path_str.contains(&tp.pattern.to_lowercase()) {
+        // Skip entries that would never validate (e.g. written before
+        // validation landed): fail-closed, they simply don't match.
+        let norm = match normalize_trusted_pattern(&tp.pattern) {
+            Ok(n) => n.to_lowercase(),
+            Err(_) => continue,
+        };
+        let pat: Vec<&str> = norm.split('/').collect();
+        if pat.is_empty() || pat.len() > comps.len() {
+            continue;
+        }
+        // Contiguous component-subsequence match: "docs" matches
+        // /ws/docs/a and /ws/x/docs/a, but NOT /ws/mydocs/a or /ws/docs2/a.
+        if comps.windows(pat.len()).any(|w| w.iter().zip(&pat).all(|(a, b)| a == b)) {
             return true;
         }
     }
@@ -170,9 +243,31 @@ pub(crate) fn update_trusted_paths(
     app: tauri::AppHandle,
     new_paths: Vec<TrustedPath>,
 ) -> Result<(), String> {
+    // Direct-UI only (Settings modal): the agent has no tool that calls this.
+    // Still validate server-side so a stale/compromised renderer cannot plant
+    // a match-all entry ("/", "..", "~") and silently bypass fs_write gates.
+    if new_paths.len() > MAX_TRUSTED_PATHS {
+        return Err(format!(
+            "trusted paths: too many entries ({} > {})",
+            new_paths.len(),
+            MAX_TRUSTED_PATHS
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut clean: Vec<TrustedPath> = Vec::with_capacity(new_paths.len());
+    for tp in new_paths {
+        let norm = normalize_trusted_pattern(&tp.pattern)?;
+        let reason: String = tp.reason.chars().take(MAX_TRUSTED_REASON_LEN).collect();
+        if seen.insert(norm.clone()) {
+            clean.push(TrustedPath {
+                pattern: norm,
+                reason,
+            });
+        }
+    }
     if let Some(settings) = app.try_state::<AppSettings>() {
         if let Ok(mut guard) = settings.0.lock() {
-            guard.trusted_paths = new_paths;
+            guard.trusted_paths = clean;
             return Ok(());
         }
     }
@@ -181,6 +276,52 @@ pub(crate) fn update_trusted_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_patterns_match_on_component_boundaries() {
+        let tps = vec![TrustedPath {
+            pattern: "docs".to_string(),
+            reason: String::new(),
+        }];
+        assert!(is_trusted_path(std::path::Path::new("/ws/docs/a.md"), &tps));
+        assert!(is_trusted_path(std::path::Path::new("/ws/x/docs/a.md"), &tps));
+        // Substring lookalikes must NOT match.
+        assert!(!is_trusted_path(std::path::Path::new("/ws/mydocs/a.md"), &tps));
+        assert!(!is_trusted_path(std::path::Path::new("/ws/docs2/a.md"), &tps));
+        assert!(!is_trusted_path(std::path::Path::new("/ws/src/a.md"), &tps));
+
+        let multi = vec![TrustedPath {
+            pattern: "src/generated".to_string(),
+            reason: String::new(),
+        }];
+        assert!(is_trusted_path(
+            std::path::Path::new("/ws/src/generated/a.ts"),
+            &multi
+        ));
+        assert!(!is_trusted_path(
+            std::path::Path::new("/ws/src/other/a.ts"),
+            &multi
+        ));
+    }
+
+    #[test]
+    fn trusted_patterns_reject_match_all_and_escapes() {
+        for bad in ["", "/", "///", "..", "../x", "a/../b", "~", "~/x", "."] {
+            assert!(
+                normalize_trusted_pattern(bad).is_err(),
+                "should reject {:?}",
+                bad
+            );
+        }
+        assert!(normalize_trusted_pattern("docs/").unwrap() == "docs");
+        assert!(normalize_trusted_pattern("src/generated/").unwrap() == "src/generated");
+        // Legacy substring entries fail closed (no match, no panic).
+        let legacy = vec![TrustedPath {
+            pattern: "/".to_string(),
+            reason: String::new(),
+        }];
+        assert!(!is_trusted_path(std::path::Path::new("/ws/docs/a.md"), &legacy));
+    }
 
     #[cfg(unix)]
     #[test]

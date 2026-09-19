@@ -1,6 +1,7 @@
 import type { CenterTab, Workspace } from "../types";
 import { fsRead } from "../lib/tauri";
 import { baseName, isWithin } from "../lib/utils";
+import { useConfirm } from "../context/ConfirmContext";
 
 // Per-window tabs and buffers: open/close files, rename/delete retargeting,
 // shell/PTY heights. Window-state patching lives here; the Diff gate and
@@ -13,6 +14,7 @@ export function useEditorTabs(opts: {
   setCenterTab: (t: CenterTab) => void;
 }) {
   const { ws, setWs, updateWs, workspaceRoot } = opts;
+  const confirm = useConfirm();
   const openPath = ws.openPath ?? "";
   const tabs = ws.tabs ?? [];
   const buffers = ws.buffers ?? {};
@@ -128,9 +130,9 @@ export function useEditorTabs(opts: {
     }
   }
 
-  function closeTab(path: string) {
+  async function closeTab(path: string) {
     if ((buffers[path] ?? "") !== (originals[path] ?? "")) {
-      if (!window.confirm(`Close ${baseName(path)} with unsaved changes?`)) return;
+      if (!(await confirm(`Close ${baseName(path)} with unsaved changes?`))) return;
     }
     const idx = tabs.indexOf(path);
     const next = tabs.filter((p) => p !== path);

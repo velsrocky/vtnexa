@@ -289,7 +289,7 @@ function asWorkspace(l: any, fallbackId: string): Workspace {
     return () => {
       if (sessionTimer.current) clearTimeout(sessionTimer.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounced autosave: saveSessionNow is render-scoped, listing it would reset the 500ms timer every render and starve saves
   }, [opts.ws, opts.workspaceRoot]);
 
   return { saveSessionNow, loadSession, sessionReady };

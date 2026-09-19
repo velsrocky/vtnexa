@@ -1,4 +1,7 @@
+import { memo } from "react";
 import type { SessionMeta } from "../lib/tauri";
+import { useSessionBar } from "../context/AppContext";
+import { useConfirm } from "../context/ConfirmContext";
 
 function fmtAge(ts: number): string {
   if (!ts || !isFinite(ts)) return "";
@@ -23,16 +26,18 @@ function optionLabel(s: SessionMeta): string {
 // OpenCode-style session picker: always boots fresh; previous sessions in
 // this folder are resumed explicitly. Delete removes the current session
 // file and starts fresh.
-export default function SessionBar({ sessions, currentId, currentTitle, busy, onNew, onResume, onDelete, onRefresh }: {
-  sessions: SessionMeta[];
-  currentId: string;
-  currentTitle: string;
-  busy: boolean;
-  onNew: () => void;
-  onResume: (id: string) => void;
-  onDelete: (id: string) => void;
-  onRefresh: () => void;
-}) {
+export function SessionBarInner() {
+  const {
+    sessions,
+    currentId,
+    currentTitle,
+    busy,
+    onNew,
+    onResume,
+    onDelete,
+    onRefresh,
+  } = useSessionBar();
+  const confirm = useConfirm();
   const others = sessions.filter((s) => s.id !== currentId);
   return (
     <div className="configbar">
@@ -57,8 +62,9 @@ export default function SessionBar({ sessions, currentId, currentTitle, busy, on
         ))}
       </select>
       <button
-        onClick={() => {
-          if (window.confirm(`Delete session "${currentTitle}"? This cannot be undone.`)) void onDelete(currentId);
+        onClick={async () => {
+          if (await confirm(`Delete session "${currentTitle}"? This cannot be undone.`))
+            void onDelete(currentId);
         }}
         disabled={busy || !currentId}
         title="Delete the current session file and start fresh"
@@ -74,3 +80,6 @@ export default function SessionBar({ sessions, currentId, currentTitle, busy, on
     </div>
   );
 }
+
+const SessionBar = memo(SessionBarInner);
+export default SessionBar;

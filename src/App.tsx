@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { loader } from "@monaco-editor/react";
 if (import.meta.env.MODE === "development") {
   loader.config({ paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.56.0/min/vs" } });
@@ -36,6 +36,7 @@ import { useWorkspace } from "./hooks/useWorkspace";
 import { useInit } from "./hooks/useInit";
 import { useRoutines } from "./hooks/useRoutines";
 import { useMcp } from "./hooks/useMcp";
+import { AppContextProvider, type AppContextValue } from "./context/AppContext";
 
 // One OS window = one independent VTNexa instance. Multiple windows are
 // siblings: separate workspace roots (enforced per-label in the Rust
@@ -348,7 +349,7 @@ export default function App() {
   useEffect(() => {
     if (centerTab !== "git") return;
     refreshGit();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshGit is render-scoped (new identity per render); this effect is event-like (tab/cwd change), not data-driven
   }, [centerTab, ws.cwd]);
 
   async function sendChat() {
@@ -409,8 +410,83 @@ export default function App() {
       clearInterval(interval);
       clearTimeout(once);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runRoutine is render-scoped; re-subscribing the 30s interval on every render would reset the timer and starve routines
   }, [routines, busy, workspaceRoot, padText, planText, memoryText]);
+
+  // Bar slices for AppContext (phase 1 of the prop-drilling cleanup): the
+  // same values previously threaded as ~30 individual props. Memoized so the
+  // bars don't re-render on unrelated state (e.g. stream tokens in ws).
+  const barCtx: AppContextValue = useMemo(
+    () => ({
+      top: {
+        workspaceLabel: baseName(workspaceRoot),
+        windowLabel,
+        scheduledCount: routines.filter((r) => r.enabled && r.everyMs > 0).length,
+        mcpOn,
+        mcpTools,
+        themeId,
+        onOpenRoutines: () => setShowRoutines(true),
+        onOpenMcp: () => setShowMcp(true),
+        onOpenSettings: () => setShowSettings(true),
+        onThemeChange: setThemeId,
+      },
+      provider: {
+        windowLabel,
+        editCfg,
+        provHist,
+        provModels,
+        modelsNote,
+        keychainOk,
+        setEditCfg,
+        refreshModels,
+      },
+      workspace: {
+        workspaceRoot,
+        setWorkspaceRoot,
+        changeWorkspace,
+        browseWorkspace,
+        cwd,
+        setCwd,
+      },
+      session: {
+        sessions,
+        currentId: sessionId,
+        currentTitle: sessionTitle,
+        busy,
+        onNew: () => void newSession(),
+        onResume: (id) => void resumeSession(id),
+        onDelete: (id) => void removeSession(id),
+        onRefresh: () => void refreshSessions(),
+      },
+    }),
+    [
+      workspaceRoot,
+      routines,
+      mcpOn,
+      mcpTools,
+      themeId,
+      editCfg,
+      provHist,
+      provModels,
+      modelsNote,
+      keychainOk,
+      setEditCfg,
+      refreshModels,
+      setWorkspaceRoot,
+      changeWorkspace,
+      browseWorkspace,
+      cwd,
+      setCwd,
+      sessions,
+      sessionId,
+      sessionTitle,
+      busy,
+      newSession,
+      resumeSession,
+      removeSession,
+      refreshSessions,
+    ],
+  );
 
   return (
     <div className="shell">
@@ -445,46 +521,12 @@ export default function App() {
       {showSettings && (
         <SettingsModal onClose={() => setShowSettings(false)} />
       )}
-      <TopBar
-        workspaceLabel={baseName(workspaceRoot)}
-        windowLabel={windowLabel}
-        scheduledCount={routines.filter((r) => r.enabled && r.everyMs > 0).length}
-        mcpOn={mcpOn}
-        mcpTools={mcpTools}
-        themeId={themeId}
-        onOpenRoutines={() => setShowRoutines(true)}
-        onOpenMcp={() => setShowMcp(true)}
-        onOpenSettings={() => setShowSettings(true)}
-        onThemeChange={setThemeId}
-      />
-      <ProviderBar
-        windowLabel={windowLabel}
-        editCfg={editCfg}
-        provHist={provHist}
-        provModels={provModels}
-        modelsNote={modelsNote}
-        keychainOk={keychainOk}
-        setEditCfg={setEditCfg}
-        refreshModels={refreshModels}
-      />
-      <WorkspaceBar
-        workspaceRoot={workspaceRoot}
-        setWorkspaceRoot={setWorkspaceRoot}
-        changeWorkspace={changeWorkspace}
-        browseWorkspace={browseWorkspace}
-        cwd={cwd}
-        setCwd={setCwd}
-      />
-      <SessionBar
-        sessions={sessions}
-        currentId={sessionId}
-        currentTitle={sessionTitle}
-        busy={busy}
-        onNew={() => void newSession()}
-        onResume={(id) => void resumeSession(id)}
-        onDelete={(id) => void removeSession(id)}
-        onRefresh={() => void refreshSessions()}
-      />
+      <AppContextProvider value={barCtx}>
+        <TopBar />
+        <ProviderBar />
+        <WorkspaceBar />
+        <SessionBar />
+      </AppContextProvider>
       <div className="main">
         <FileTree
           cwd={cwd}

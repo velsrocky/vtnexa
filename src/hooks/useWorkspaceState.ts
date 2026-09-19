@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { AuditInput, Workspace } from "../types";
 import { newWorkspace, uid } from "../lib/utils";
@@ -30,36 +30,42 @@ export function useWorkspaceState() {
   const streamRaf = useRef<number | null>(null);
   const stopTurnIdRef = useRef<string>("");
 
-  function updateWs(fn: (w: Workspace) => Workspace) {
+  // Stable identities: memoized children and context slices below can rely
+  // on these never changing, so stream-token setWs calls don't cascade into
+  // unrelated panes. (setWs/setBusy from useState are already stable.)
+  const updateWs = useCallback((fn: (w: Workspace) => Workspace) => {
     setWs((w) => fn(w));
-  }
+  }, []);
 
-  function logAudit(e: AuditInput) {
-    updateWs((w) => ({
-      ...w,
-      audit: [...w.audit, { ...e, id: uid(), ts: Date.now() }].slice(-AUDIT_MAX),
-    }));
-  }
+  const logAudit = useCallback(
+    (e: AuditInput) => {
+      updateWs((w) => ({
+        ...w,
+        audit: [...w.audit, { ...e, id: uid(), ts: Date.now() }].slice(-AUDIT_MAX),
+      }));
+    },
+    [updateWs],
+  );
 
   // Stop the running turn: abort the provider request. A native approval
   // dialog already on screen is answered by the user (or dismissed) — there
   // is no page-DOM queue to release. Side effects already applied are undone
   // via /undo, never automatically.
   // Returns true if a turn was stopped, false otherwise.
-  function stopTurn(id: string) {
+  const stopTurn = useCallback((id: string) => {
     if (stopTurnIdRef.current && stopTurnIdRef.current !== id) return false;
     turnAbort.current?.abort();
     turnAbort.current = null;
     stopTurnIdRef.current = "";
     return true;
-  }
+  }, []);
 
-  function flushStreamFrame() {
+  const flushStreamFrame = useCallback(() => {
     if (streamRaf.current != null) {
       cancelAnimationFrame(streamRaf.current);
       streamRaf.current = null;
     }
-  }
+  }, []);
 
   return {
     ws,

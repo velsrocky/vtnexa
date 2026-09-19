@@ -16,6 +16,35 @@ pub(crate) fn nexa_filename(kind: &str) -> Result<&'static str, String> {
     }
 }
 
+/// Size-checked read: refuse files bigger than `max` BEFORE loading them
+/// into memory (metadata gate + post-read check against TOCTOU growth).
+fn read_capped(path: &std::path::Path, max: usize, what: &str) -> Result<String, String> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > max as u64 {
+            return Err(format!(
+                "{}: file too large ({} bytes, max {})",
+                what,
+                meta.len(),
+                max
+            ));
+        }
+    }
+    let s = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("__not_found__".to_string()),
+        Err(e) => return Err(e.to_string()),
+    };
+    if s.len() > max {
+        return Err(format!(
+            "{}: file too large ({} bytes, max {})",
+            what,
+            s.len(),
+            max
+        ));
+    }
+    Ok(s)
+}
+
 pub(crate) fn nexa_path_for(root: &std::path::Path, kind: &str) -> Result<std::path::PathBuf, String> {
     Ok(root.join(".nexa").join(nexa_filename(kind)?))
 }
@@ -76,10 +105,10 @@ pub(crate) fn session_load(
 ) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
     let path = session_path_for(&root);
-    match std::fs::read_to_string(&path) {
+    match read_capped(&path, SESSION_MAX_BYTES, "session") {
         Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e.to_string()),
+        Err(e) if e == "__not_found__" => Ok(String::new()),
+        Err(e) => Err(e),
     }
 }
 
@@ -244,10 +273,10 @@ pub(crate) fn session_get(
 ) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
     let path = session_file_for(&root, &id)?;
-    match std::fs::read_to_string(&path) {
+    match read_capped(&path, SESSIONS_MAX_BYTES, "session") {
         Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("session: not found".to_string()),
-        Err(e) => Err(e.to_string()),
+        Err(e) if e == "__not_found__" => Err("session: not found".to_string()),
+        Err(e) => Err(e),
     }
 }
 
@@ -308,10 +337,10 @@ pub(crate) fn routines_load(
 ) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
     let path = routines_path_for(&root);
-    match std::fs::read_to_string(&path) {
+    match read_capped(&path, ROUTINES_MAX_BYTES, "routines") {
         Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e.to_string()),
+        Err(e) if e == "__not_found__" => Ok(String::new()),
+        Err(e) => Err(e),
     }
 }
 

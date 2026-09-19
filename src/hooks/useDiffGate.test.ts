@@ -66,7 +66,9 @@ function setup(over: Partial<Workspace> = {}) {
       setCommitMsg: (v) => calls.commitMsg.push(v),
       logAudit: (e) => calls.audits.push(e),
       retargetTabs: (o, n) => calls.retargeted.push([o, n]),
-      closeTab: (p) => calls.closed.push(p),
+      closeTab: (p) => {
+        calls.closed.push(p);
+      },
     }),
   );
   return { ...hook, calls, wsOf: () => ws };

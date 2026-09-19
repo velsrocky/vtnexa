@@ -98,7 +98,7 @@ export default function TerminalPane({ ptyId, cwd, themeId, height }: Props) {
       term.dispose();
       termRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only PTY spawn keyed by ptyId; re-running would respawn the shell and drop scrollback
   }, [ptyId]);
 
   // Live-apply palette changes.

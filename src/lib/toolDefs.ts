@@ -1,4 +1,33 @@
-import type { ToolDef } from "./providers";
+import type { UndoEntry } from "../types";
+import type { NexaKind } from "./tauri";
+
+export interface ToolDef {
+  type: "function";
+  function: { name: string; description: string; parameters: Record<string, unknown> };
+}
+
+export interface ToolPolicy {
+  /** Agent fs_write no longer writes directly: stage into Diff review gate.
+   *  May be async - the UI fetches the on-disk original for a faithful diff. */
+  onProposeWrite?: (path: string, content: string) => void | Promise<void>;
+  /** Return an Approval (native OS dialog confirmed) to allow
+   *  shell/browser/file side-effects, null to reject. Read-only tools bypass
+   *  this. The dialog lives outside page DOM so injected content and the model
+   *  cannot click it. */
+  requestApproval?: (tool: string, args: Record<string, any>) => Promise<import("./approval").Approval | null>;
+  /** Agent wrote a Nexa note directly: mirror it into the sidebar state. */
+  onNexaWrite?: (kind: NexaKind, content: string) => void;
+  /** Plan mode: runTool refuses every non-read-only tool (fail-closed), and
+   *  chatWithTools withholds their defs so the model plans instead of acts. */
+  planMode?: boolean;
+  /** Reversible agent file op just applied (rename/delete) - UI pushes it for /undo. */
+  onUndoCapture?: (e: UndoEntry) => void;
+}
+
+export interface ToolCall {
+  id: string;
+  function: { name: string; arguments: string };
+}
 
 /** Plan-mode allowlist: everything else is withheld from the model and
  *  refused by runTool. Writes are out entirely - even staged ones.
