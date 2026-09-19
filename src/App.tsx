@@ -14,6 +14,7 @@ import FileTree from "./components/FileTree";
 import ChatPane from "./components/ChatPane";
 import EditorPane from "./components/EditorPane";
 import TopBar from "./components/TopBar";
+import SettingsModal from "./components/SettingsModal";
 import ProviderBar from "./components/ProviderBar";
 import WorkspaceBar from "./components/WorkspaceBar";
 import SessionBar from "./components/SessionBar";
@@ -43,6 +44,7 @@ export default function App() {
   const [auditNote, setAuditNote] = useState("");
   const [ratings, setRatings] = useState<Record<string, 1 | -1>>(() => ratingMap(loadFeedback()));
   const { themeId, setThemeId, theme, leftW, rightW, onResizerDown, skillH, onSkillResizerDown } = usePrefs();
+  const [showSettings, setShowSettings] = useState(false);
 
   const {
     ws,
@@ -440,6 +442,9 @@ export default function App() {
           onClose={() => setShowMcp(false)}
         />
       )}
+      {showSettings && (
+        <SettingsModal onClose={() => setShowSettings(false)} />
+      )}
       <TopBar
         workspaceLabel={baseName(workspaceRoot)}
         windowLabel={windowLabel}
@@ -449,6 +454,7 @@ export default function App() {
         themeId={themeId}
         onOpenRoutines={() => setShowRoutines(true)}
         onOpenMcp={() => setShowMcp(true)}
+        onOpenSettings={() => setShowSettings(true)}
         onThemeChange={setThemeId}
       />
       <ProviderBar

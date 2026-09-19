@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { announcesToolAction, asksAuthQuestion, chatWithTools, deniesCapability, estimateCost, extractEmbeddedToolCalls, listModels, narratesBareToolCall, parseTextToolCalls, runTool } from "./providers";
+import { announcesToolAction, asksAuthQuestion, chatWithTools, deniesCapability, detectDegenerateRepetition, estimateCost, extractEmbeddedToolCalls, extractExplicitPaths, listModels, narratesBareToolCall, parseTextToolCalls, runTool, skillNeedsInspection, skillPrescribes } from "./providers";
 
 // ---- Backend seam: Tauri invoke is stubbed per test ----
 vi.mock("@tauri-apps/api/core", () => ({
@@ -276,6 +276,7 @@ describe("chatWithTools", () => {
       expect(lastUser.content).toMatch(/repeating `fs_list`/);
       expect(lastUser.content).toMatch(/Cite the actual tool outputs/);
       expect(lastUser.content).toMatch(/do NOT invent tool calls/);
+      expect(lastUser.content).toMatch(/Do not end with a question/);
       return openAIText("gave up gracefully");
     });
     let toolCount = 0;
@@ -474,6 +475,240 @@ describe("deniesCapability", () => {
   });
 });
 
+describe("detectDegenerateRepetition", () => {
+  const phrase = "The Build button is not clickable, so I have to wait for the image to be loaded.";
+
+  it("flags a phrase repeated across separate lines", () => {
+    const garbage = Array.from({ length: 12 }, () => phrase).join("\n");
+    const got = detectDegenerateRepetition(garbage);
+    expect(got).not.toBeNull();
+    expect(got?.phrase).toBe(phrase.replace(/[.!?]+$/, ""));
+    expect(got?.count).toBe(12);
+  });
+
+  it("flags a phrase repeated inside a single paragraph", () => {
+    const garbage = `${phrase} `.repeat(8).trim();
+    expect(detectDegenerateRepetition(garbage)?.count).toBe(8);
+  });
+
+  it("ignores normal prose that mentions a token several times", () => {
+    const normal =
+      "I read App.tsx and found the bug in the render loop. I patched App.tsx with a guard, " +
+      "then re-read App.tsx to verify the fix. Tests pass and App.tsx is ready for review. " +
+      "One note: App.tsx imports a helper that also needed a small change.";
+    expect(detectDegenerateRepetition(normal)).toBeNull();
+  });
+
+  it("ignores a sentence repeated a few times (below the threshold)", () => {
+    const mild =
+      `Did the check. ${phrase} Then moved on to the next step and ran the tests. ` +
+      `All good. ${phrase} Wrapping up now with a short summary of what changed.`;
+    expect(detectDegenerateRepetition(mild)).toBeNull();
+  });
+
+  it("ignores short or empty text", () => {
+    expect(detectDegenerateRepetition("")).toBeNull();
+    expect(detectDegenerateRepetition(phrase)).toBeNull();
+  });
+});
+
+describe("chatWithTools degenerate output", () => {
+  it("stops a repetition loop and returns a diagnostic instead of garbage", async () => {
+    const phrase = "The Build button is not clickable, so I have to wait for the image to be loaded.";
+    const garbage = Array.from({ length: 30 }, () => phrase).join("\n");
+    setInvokeImpl(async () => {
+      throw new Error("unexpected invoke");
+    });
+    stubFetch(() => openAIText(garbage));
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "look at this screenshot" }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(res).toContain("[stopped: degenerate repetition detected");
+    expect(res).toContain("30x");
+    // Head is truncated; the 30-line wall is not handed back.
+    expect(res.split(phrase).length - 1).toBeLessThan(10);
+    expect(res.length).toBeLessThan(garbage.length / 2);
+    expect(repairs).toEqual(["repetition"]);
+  });
+});
+
+// The skill body the frontend expands into the user message (see
+// useAgentTurn.expandSkill): marker + instructions + body + arguments.
+function skillMsg(name: string, body: string, args = ""): string {
+  return (
+    `User invoked /${name} - follow these skill instructions now using tools, do not discuss the skill itself:\n` +
+    `[skill: ${name}]\n${body}${args ? `\n\nArguments:\n${args}` : ""}`
+  );
+}
+
+describe("skillNeedsInspection", () => {
+  const RATE = skillMsg(
+    "rate",
+    "Provide a concise 1-10 score.\n1. Inspect the target with read-only tools: fs_list the root, fs_read code, git_status and git_log for activity.\n3. Reply with ONLY Score/Strengths/Weaknesses/Suggestion.",
+  );
+  it("flags a skill whose body prescribes read-only tools", () => {
+    expect(skillNeedsInspection(RATE)).toBe("rate");
+  });
+  it("returns null when no skill marker is present", () => {
+    expect(skillNeedsInspection("just a normal user question")).toBeNull();
+  });
+  it("returns null for an informational skill with no tool steps", () => {
+    const noTools = skillMsg("greet", "Answer the user's greeting warmly and briefly. No tools needed.");
+    expect(skillNeedsInspection(noTools)).toBeNull();
+  });
+  it("ignores empty input", () => {
+    expect(skillNeedsInspection("")).toBeNull();
+  });
+});
+
+describe("skillPrescribes", () => {
+  const RATE = skillMsg(
+    "rate",
+    "Inspect the target with read-only tools: fs_list the root, fs_glob for file patterns, fs_read plus fs_search for code, git_status plus git_log.",
+  );
+  it("lists the exact tools the skill body prescribes", () => {
+    expect(skillPrescribes(RATE)).toEqual({
+      name: "rate",
+      tools: expect.arrayContaining(["fs_list", "fs_glob", "fs_read", "fs_search", "git_status", "git_log"]),
+    });
+    expect(skillPrescribes(RATE)?.tools).toHaveLength(6);
+  });
+  it("returns null for a skill with no tool steps", () => {
+    expect(skillPrescribes(skillMsg("greet", "Be brief."))).toBeNull();
+  });
+});
+
+describe("chatWithTools skill follow-through", () => {
+  const RATE = skillMsg(
+    "rate",
+    "Inspect the target with read-only tools: fs_list the root, git_status for activity. Then reply with ONLY Score/Strengths/Weaknesses/Suggestion.",
+  );
+
+  it("forces inspection when a skill is answered from memory", async () => {
+    const invoked: string[] = [];
+    setInvokeImpl(async (cmd) => {
+      invoked.push(cmd);
+      if (cmd === "fs_list") return JSON.stringify(["App.tsx", "package.json"]);
+      if (cmd === "git_status") return " M App.tsx";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      if (n === 1) {
+        // Skipped every tool and produced the score from memory.
+        return openAIText("**Score: 6/10**\n\nStrengths: clean layout.");
+      }
+      // After the nudge it inspects for real, then answers.
+      if (n === 2) return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      if (n === 3) return openAITools([{ id: "g1", name: "git_status", args: {} }]);
+      return openAIText("**Score: 8/10**\n\nStrengths: inspected for real this time.");
+    });
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: RATE }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(repairs).toContain("skill");
+    expect(invoked).toContain("fs_list");
+    expect(invoked).toContain("git_status");
+    expect(res).toContain("inspected for real");
+  });
+
+  it("does not nudge when the model inspects on its own", async () => {
+    const invoked: string[] = [];
+    setInvokeImpl(async (cmd) => {
+      invoked.push(cmd);
+      return cmd === "fs_list" ? JSON.stringify(["App.tsx"]) : " M App.tsx";
+    });
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      if (n === 1) return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      if (n === 2) return openAITools([{ id: "g1", name: "git_status", args: {} }]);
+      return openAIText("**Score: 8/10** based on the listing and status above.");
+    });
+    const repairs: string[] = [];
+    await chatWithTools(
+      CFG,
+      [{ role: "user", content: RATE }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(repairs).not.toContain("skill");
+    expect(invoked).toContain("fs_list");
+  });
+
+  it("does not nudge for a skill that needs no tools", async () => {
+    const greet = skillMsg("greet", "Answer the user's greeting warmly and briefly. No tools needed.");
+    setInvokeImpl(async () => {
+      throw new Error("unexpected invoke");
+    });
+    stubFetch(() => openAIText("Hey! Good to see you. What are we working on?"));
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: greet }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(repairs).not.toContain("skill");
+    expect(res).toContain("Good to see you");
+  });
+
+  // Reproduces the real-world failure: the model burns a round on skill_read
+  // (re-reading the skill is NOT inspecting the target) and then emits a
+  // "provisional" score from memory. The guard must not be satisfied by the
+  // decoy — it forces the prescribed inspection tools to actually run.
+  it("is not fooled by a skill_read decoy into skipping inspection", async () => {
+    const invoked: string[] = [];
+    setInvokeImpl(async (cmd) => {
+      invoked.push(cmd);
+      if (cmd === "skill_read") return "# rate\nInspect the target with read-only tools.";
+      if (cmd === "fs_list") return JSON.stringify(["App.tsx", "package.json"]);
+      if (cmd === "git_status") return " M App.tsx";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      if (n === 1) {
+        // Decoy: re-reads the skill instead of inspecting.
+        return openAITools([{ id: "s1", name: "skill_read", args: { name: "rate" } }]);
+      }
+      if (n === 2) {
+        // Then answers from memory with a "provisional" score.
+        return openAIText("Score: N/A (inspection not performed). Provisional ~6/10 from memory.");
+      }
+      // After the nudge it inspects for real, then answers.
+      if (n === 3) return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      if (n === 4) return openAITools([{ id: "g1", name: "git_status", args: {} }]);
+      return openAIText("Score: 8/10 based on the actual listing and git status.");
+    });
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: RATE }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(repairs).toContain("skill");
+    // The decoy ran but so did the real inspection.
+    expect(invoked).toContain("skill_read");
+    expect(invoked).toContain("fs_list");
+    expect(invoked).toContain("git_status");
+    // The memory-based provisional answer was replaced by the inspected one.
+    expect(res).toContain("actual listing");
+    expect(res).not.toMatch(/Provisional ~6\/10/);
+  });
+});
+
 describe("chatWithTools narration repair", () => {
   it("nudges a narrating model into emitting the real call", async () => {
     const staged: { path: string; content: string }[] = [];
@@ -623,6 +858,19 @@ describe("chatWithTools text-call fallback", () => {
     // Second request carries the tool result.
     const body = JSON.parse(calls[1].init.body);
     expect(body.messages.some((m: any) => m.role === "tool")).toBe(true);
+  });
+});
+
+describe("extractExplicitPaths", () => {
+  it("finds real absolute paths", () => {
+    expect(extractExplicitPaths("list /home/u/proj then read")).toEqual(["/home/u/proj"]);
+    expect(extractExplicitPaths("fs_list /w/src")).toEqual(["/w/src"]);
+  });
+  it("ignores markdown false positives (rate skill)", () => {
+    const skill = "UX/Performance:** build size\nScore: X/10\n**Architecture:**";
+    expect(extractExplicitPaths(skill)).toEqual([]);
+    expect(extractExplicitPaths("Score: X/10")).toEqual([]);
+    expect(extractExplicitPaths("**UX/Performance:**")).toEqual([]);
   });
 });
 

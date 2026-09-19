@@ -21,8 +21,27 @@ commands in `src-tauri/src/lib.rs` → OS / sidecar.
 
 ## Backend (`src-tauri/src/`)
 
-- `lib.rs` — sandbox (`checked_path`, `ensure_within_root`), shell screening
-  (`shell_deny_reason`), PTY (window-bound ids), git (argv-direct), skills.
+- `lib.rs` — thin facade: module declarations, `run()` (window lifecycle,
+  managed state, command registration), and re-exports of the cross-module
+  names other backend modules use (`WorkspaceRoots`, `checked_path`,
+  `shell_deny_reason`, …).
+- `workspace.rs` — per-window allowlist sandbox: `WorkspaceRoots` /
+  `AppSettings` state, `checked_path`, `ensure_within_root` (symlink-safe),
+  `is_trusted_path`, root set/get + `update_trusted_paths`.
+- `util.rs` — P0 guardrail limits (`MAX_*`) + shared helpers (`write_atomic`,
+  `truncate_chars`, `reject_sensitive`, `safe_absolute`).
+- `fsops.rs` — file list/read/write/create/rename/delete + workspace-wide
+  search (`fs_search` grep-style, `fs_glob`).
+- `nexa.rs` — `<workspace>/.nexa/` persistence: Pad/Plan, legacy
+  `session.json`, named sessions (`sessions/*`), routines.
+- `keys.rs` — OS keychain for provider API keys (per endpoint+model, legacy
+  service migration).
+- `git.rs` — status/diff/commit/log/init (argv-direct, no shell).
+- `skills.rs` — project + bundled skills (`.vtnexa/skills/*.md`).
+- `shell.rs` — command screening (`shell_deny_reason`), capped exec
+  (`run_capped`), `shell_run` behind the approval gate.
+- `pty.rs` — window-bound PTY lanes (spawn/write/resize/kill, reaper).
+- `window.rs` — `create_window` + label allocation.
 - `approvals.rs` — native OS confirm (`approval_issue`, agent path) +
   dialog-free claims (`approval_claim`, direct gestures); single-use tokens
   bound to window + action + detail fingerprint, 5min TTL.

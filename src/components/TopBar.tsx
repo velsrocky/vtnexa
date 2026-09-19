@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { THEMES, asThemeId, type ThemeId } from "../lib/theme";
 import { APPROVAL_PROTO } from "../lib/approval";
 
-export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mcpOn, mcpTools, themeId, onOpenRoutines, onOpenMcp, onThemeChange }: {
+export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mcpOn, mcpTools, themeId, onOpenRoutines, onOpenMcp, onThemeChange, onOpenSettings }: {
   workspaceLabel: string;
   windowLabel: string;
   scheduledCount: number;
@@ -12,6 +12,7 @@ export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mc
   onOpenRoutines: () => void;
   onOpenMcp: () => void;
   onThemeChange: (id: ThemeId) => void;
+  onOpenSettings: () => void;
 }) {
   return (
     <header className="topbar">
@@ -54,6 +55,12 @@ export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mc
           style={mcpOn ? undefined : { opacity: 0.55 }}
         >
           ⛁{mcpOn && mcpTools > 0 ? ` ${mcpTools}` : ""}
+        </button>
+        <button
+          onClick={onOpenSettings}
+          title="Settings (trusted paths, etc)"
+        >
+          ⚙️
         </button>
         <select
           value={themeId}

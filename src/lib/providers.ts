@@ -523,6 +523,129 @@ export function asksAuthQuestion(text: string): boolean {
   return AUTH_QUESTION_RE.test(text);
 }
 
+// Degenerate-output backstop. A model (typically a weak or non-multimodal one
+// handed an image it cannot parse) can lock onto one phrase and emit it
+// dozens/hundreds of times. The tool-call loop-guard cannot see this — no
+// tools ran, it is pure prose — so the whole wall of text would land in the
+// chat. Thresholds are deliberately strict: a normal summary that mentions the
+// same file or step a few times never trips it. The phrase must repeat many
+// times AND cover the bulk of the reply.
+const REPEAT_MIN = 6; // occurrences of the same phrase
+const REPEAT_SHARE = 0.6; // ...covering this fraction of the reply
+const REPEAT_UNIT_MAX = 200; // candidate phrases inspected (bounds cost)
+
+/**
+ * Returns the phrase a reply is dominated by, with its occurrence count, or
+ * null for normal prose. Candidates are whole lines and whole sentences; both
+ * are whitespace-normalised so counting is consistent with the normalised
+ * body. Never throws.
+ */
+export function detectDegenerateRepetition(text: string): { phrase: string; count: number } | null {
+  if (!text || text.length < 200) return null;
+  const norm = text.replace(/\s+/g, " ").trim();
+  if (norm.length < 200) return null;
+  const units = new Set<string>();
+  const pushUnit = (raw: string): void => {
+    const u = raw.replace(/\s+/g, " ").trim().replace(/[.!?]+$/, "");
+    if (u.length >= 12 && u.length <= 400) units.add(u);
+  };
+  for (const raw of text.split(/\n+/)) pushUnit(raw);
+  for (const raw of norm.split(/[.!?]+/)) pushUnit(raw);
+  let best: { phrase: string; count: number } | null = null;
+  let checked = 0;
+  for (const u of units) {
+    if (checked++ >= REPEAT_UNIT_MAX) break;
+    let count = 0;
+    let i = norm.indexOf(u, 0);
+    while (i !== -1) {
+      count++;
+      i += u.length;
+      i = norm.indexOf(u, i);
+    }
+    if (count < REPEAT_MIN) continue;
+    if (count * u.length >= REPEAT_SHARE * norm.length && (!best || count > best.count)) {
+      best = { phrase: u, count };
+    }
+  }
+  return best;
+}
+
+// Skill follow-through. When the user invokes /<name>, the frontend expands
+// the skill body into the user message with a fixed marker and the instruction
+// "using tools". Weak models routinely skip the prescribed inspection and jump
+// straight to the skill's output format, answering from memory and then
+// confabulating an excuse ("the tool budget was consumed..."). Worse, they
+// sometimes burn a round on skill_read - re-reading the skill is NOT inspecting
+// the target - which is why compliance is measured against the SPECIFIC tools
+// the skill prescribes, not against "any tool ran". Detected from that already
+// expanded text, so no extra plumbing is needed.
+const SKILL_INVOKED_RE = /User invoked \/([A-Za-z0-9_-]+) - follow these skill instructions/;
+// Read-only tools a skill may prescribe. Global so matchAll can list them.
+const SKILL_INSPECT_RE =
+  /\b(fs_list|fs_read|fs_search|fs_glob|git_status|git_diff|git_log|skill_read|lsp_diagnostics|nexa_read)\b/g;
+
+/** Result of detecting an expanded skill invocation that requires inspection. */
+export interface SkillPrescription {
+  name: string;
+  /** Deduped read-only tools the skill's own body tells the model to run. */
+  tools: string[];
+}
+
+/**
+ * Parses an expanded skill invocation: returns the skill name plus the exact
+ * read-only tools its own instructions prescribe, or null when the message is
+ * not a skill invocation or the skill needs no tool work. Callers enforce that
+ * at least one prescribed tool actually runs before accepting the answer.
+ */
+export function skillPrescribes(userText: string): SkillPrescription | null {
+  if (!userText) return null;
+  const m = userText.match(SKILL_INVOKED_RE);
+  if (!m) return null;
+  const tools = [...new Set([...userText.matchAll(SKILL_INSPECT_RE)].map((x) => x[1]))];
+  if (!tools.length) return null;
+  return { name: m[1], tools };
+}
+
+/**
+ * Backwards-compatible shim: the skill name when inspection is prescribed.
+ */
+export function skillNeedsInspection(userText: string): string | null {
+  return skillPrescribes(userText)?.name ?? null;
+}
+
+/**
+ * Absolute paths the user typed explicitly (e.g. "fs_list /a/b then analyse").
+ * Used to stop the workspace-root substitution loop: when the user names an
+ * exact path, that path wins over the default workspace root.
+ * Returns deduped absolute paths, capped at 5. Never throws.
+ */
+export function extractExplicitPaths(text: string): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /(\/[^\s"'`,;|()\[\]{}]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const at = m.index;
+    // Mid-word slash (UX/Performance, X/10): char before is letter/digit — not an absolute path.
+    const prev = at > 0 ? text[at - 1] : " ";
+    if (/[A-Za-z0-9_-]/.test(prev)) continue;
+    let p = m[1].replace(/[.,:;!?)\]}'"`*]+$/, "");
+    if (p.length < 2 || !p.startsWith("/") || p === "/") continue;
+    if (p.length > 512) continue;
+    // Markdown / shell-glob residue, not a path.
+    if (p.includes("*") || p.includes("`")) continue;
+    // Must contain at least one letter — rejects /10, /2-3, /etc fragments.
+    if (!/[A-Za-z]/.test(p)) continue;
+    if (!seen.has(p)) {
+      seen.add(p);
+      out.push(p);
+      if (out.length >= 5) break;
+    }
+  }
+  return out;
+}
+
 /** Returns the narrated tool name for bare `Tool args` lines, else null. */
 export function narratesBareToolCall(text: string): string | null {
   if (!text) return null;
@@ -807,6 +930,7 @@ export async function runTool(
   args: Record<string, any>,
   policy?: ToolPolicy,
 ): Promise<string> {
+  let approval: Approval | undefined;
   try {
     // Plan-mode backstop (covers prose-recovered calls too): the defs are
     // already withheld above, so anything arriving here is a violation.
@@ -817,7 +941,6 @@ export async function runTool(
     // Native OS dialog first (page JS can trigger it but cannot click it),
     // backend token second. Unknown MCP tools fail before any dialog/invoke.
     // No approval handler (headless/routine context) fails closed — no dialog.
-    let approval: Approval | undefined;
     if (isMcpToolName(name) && !resolveMcpQualified(name)) {
       return `error: unknown MCP tool ${name} - reload MCP tools first`;
     }
@@ -1092,7 +1215,7 @@ export async function chatWithTools(
     onUsage?: (u: { input: number; output: number; model: string; cost?: number }) => void;
     onToolActivity?: (a: { name: string; ms: number; ok: boolean }) => void;
     /** Fires on every repair nudge (narration or denial) - powers auto-banding. */
-    onRepair?: (r: { kind: "narration" | "denial" | "question" }) => void;
+    onRepair?: (r: { kind: "narration" | "denial" | "question" | "repetition" | "skill" }) => void;
     onAudit?: (e: {
       tool: string;
       args: string;
@@ -1212,9 +1335,22 @@ export async function chatWithTools(
   // Own bound for question redirects: one per turn is enough to break the
   // ask-instead-of-act loop; after acting, questions are fine unchecked.
   let questionNudges = 0;
+  // Own bound for skill follow-through: one firm nudge per turn that a skill
+  // was invoked but not actually executed (see skillNeedsInspection).
+  let skillNudges = 0;
   const seen = new Map<string, number>();
   const usedTools: string[] = [];
   let loopNote = "";
+  // Explicit user paths win over the workspace-root default. Collected once
+  // from user messages so the loop-guard nudge can point at the exact path
+  // instead of just halting after 3 identical calls.
+  const explicitPaths: string[] = [
+    ...new Set(
+      messages
+        .filter((m) => m.role === "user" && typeof m.content === "string")
+        .flatMap((m) => extractExplicitPaths(m.content as string)),
+    ),
+  ].slice(0, 5);
 
   // ---- Provider backends ----
   interface BackendUsage {
@@ -1794,6 +1930,59 @@ export async function chatWithTools(
     }
 
     if (toolCalls.length === 0) {
+      // Degenerate-output backstop: a model (often a weak/non-multimodal one
+      // handed an image it cannot parse) can repeat one phrase dozens of
+      // times. The tool-call loop-guard can't see this (no tools ran), so
+      // catch it here — keep a short head of the reply and end the turn with
+      // a diagnostic instead of a wall of garbage.
+      const repeated = detectDegenerateRepetition(content);
+      if (repeated) {
+        opts?.onRepair?.({ kind: "repetition" });
+        const head = content.trim().slice(0, 400);
+        return (
+          `${head}\n\n` +
+          `[stopped: degenerate repetition detected — this model repeated ` +
+          `"${repeated.phrase.slice(0, 80)}" ${repeated.count}x instead of answering. ` +
+          `That usually means the model cannot handle the input (for example an ` +
+          `image sent to a non-vision model). Try a stronger or multimodal model.]`
+        );
+      }
+      // Skill follow-through: a skill was invoked and its instructions
+      // prescribe read-only inspection, but the model jumped straight to the
+      // skill's output format without running any of those tools — answering
+      // from memory and often confabulating an excuse for not looking.
+      // Compliance is measured against the PRESCRIBED tools: a decoy round of
+      // skill_read (re-reading the skill) does not count as inspecting the
+      // target, so it cannot satisfy the requirement. One firm nudge per turn.
+      if (useTools && skillNudges < 1) {
+        const skillMsg = [...convo]
+          .reverse()
+          .find((m) => m.role === "user" && typeof m.content === "string" && SKILL_INVOKED_RE.test(m.content));
+        const prescribed =
+          skillMsg && typeof skillMsg.content === "string" ? skillPrescribes(skillMsg.content) : null;
+        const inspected = prescribed ? prescribed.tools.some((t) => usedTools.includes(t)) : true;
+        if (prescribed && !inspected) {
+          skillNudges++;
+          opts?.onRepair?.({ kind: "skill" });
+          onEvent(
+            `\n[note: invoked /${prescribed.name} but never ran its inspection tools ` +
+              `(${prescribed.tools.join(", ")}) - running them before the answer]\n`,
+          );
+          convo.push({ role: "assistant", content });
+          convo.push({
+            role: "user",
+            content:
+              `You invoked the /${prescribed.name} skill and produced its answer without running ANY of ` +
+              `the inspection tools it prescribes: ${prescribed.tools.join(", ")}. Run those tools NOW with ` +
+              `real tool_calls against the target, then rebuild the answer from what you actually observed. ` +
+              `Note: skill_read does NOT count — re-reading the skill is not inspecting the target. ` +
+              `Never claim you inspected, read, or measured anything you did not — there is no tool budget ` +
+              `and no skill_read cost; the skill text is already in this conversation. Skip the inspection ` +
+              `again and the turn ends with what you have.`,
+          });
+          continue;
+        }
+      }
       // Repair nudges (bounded, shared budget): narration and false
       // capability denials instead of ending the turn and forcing the user
       // to re-prompt.
@@ -1903,7 +2092,19 @@ export async function chatWithTools(
       onEvent(`\n[tool ${tc.function.name} · step ${round + 1}/${MAX_ROUNDS}]\n${out.slice(0, 2000)}\n`);
       convo.push({ role: "tool", tool_call_id: tc.id, content: capForConvo(out) });
       if (signal?.aborted) throw abortError();
-      if ((seen.get(sig) ?? 0) >= 3) {
+      const repeatCount = seen.get(sig) ?? 0;
+      if (repeatCount === 2) {
+        // Second identical call: nudge before the 3rd kills the turn. When
+        // the user named an exact path, point at it — the common failure is
+        // substituting the workspace root for the user-provided subdir.
+        const hint =
+          explicitPaths.length > 0
+            ? ` You repeated \`${tc.function.name}\` with identical arguments twice. The user gave explicit path(s) this turn: ${explicitPaths.join(", ")} — use EXACTLY that path on the next call, do not substitute the workspace root. If a path is outside the workspace, say so instead of retrying.`
+            : ` You repeated \`${tc.function.name}\` with identical arguments twice. Vary the arguments (different path/subdir) or summarize what you already learned — do not emit the identical call a third time.`;
+        convo.push({ role: "user", content: `[loop-guard]${hint}` });
+        onEvent(`\n[note: repeated ${tc.function.name} twice — nudging to vary args]\n`);
+      }
+      if (repeatCount >= 3) {
         loopNote = `\n[note: stopped after repeating \`${tc.function.name}\` with identical arguments 3× - loop detected]\n`;
         round = MAX_ROUNDS; // break outer loop, go finalize
         break;
@@ -1941,7 +2142,11 @@ export async function chatWithTools(
             content:
               `${loopNote}Tool budget exhausted. Write your final answer now using only the tool results above. ` +
               `Reply with PLAIN TEXT ONLY - no tool calls, no JSON: what you found/did, and what remains. ` +
-              `Cite the actual tool outputs observed above (paths, results). Do NOT claim confusion, misunderstanding, or missing context when tool results already exist, and do NOT invent tool calls or results beyond this turn's history.` +
+              `Cite the actual tool outputs observed above (paths, results). Do NOT claim confusion, misunderstanding, or missing context when tool results already exist, and do NOT invent tool calls or results beyond this turn's history. ` +
+              `Do not end with a question asking the user how to proceed or what to do — end with what you found/did and the single most useful next step instead.` +
+              (explicitPaths.length > 0 && loopNote
+                ? ` The user gave explicit path(s): ${explicitPaths.join(", ")} — address why they were not used.`
+                : "") +
               (attempt > 0 ? ` This is attempt ${attempt + 1}: your previous reply was not plain text. Text only.` : ""),
           },
         ],
@@ -1950,6 +2155,13 @@ export async function chatWithTools(
       );
       reportUsage(fin.usage);
       const ftext = fin.content.trim();
+      // Same degenerate-output backstop on the final summary round: never
+      // hand back a phrase loop even after tools ran.
+      if (ftext && detectDegenerateRepetition(ftext)) {
+        opts?.onRepair?.({ kind: "repetition" });
+        finErr = "degenerate repetition in final answer";
+        continue;
+      }
       if (ftext) {
         return ftext;
       }

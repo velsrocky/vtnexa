@@ -163,6 +163,57 @@ describe("useDiffGate.approveDiff", () => {
     expect(writes).toBe(0);
     expect(h.wsOf().pendingDiff).not.toBeNull();
   });
+
+  it("surfaces a claim failure instead of failing silently, keeps the diff", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") return "old";
+      if (cmd === "approval_claim") throw new Error("stale app build (approval protocol mismatch, want v3)");
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup(staged);
+    await act(async () => {
+      await h.result.current.approveDiff();
+    });
+    expect(h.wsOf().pendingDiff).not.toBeNull();
+    expect(h.wsOf().shellOut).toMatch(/approve claim failed.*stale app build/);
+    expect(h.calls.audits).toMatchObject([{ tool: "fs_write", ok: false }]);
+  });
+
+  it("refuses to write when the claim yields no token, keeps the diff", async () => {
+    let writes = 0;
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") return "old";
+      if (cmd === "approval_claim") return "";
+      if (cmd === "fs_write") {
+        writes++;
+        return {};
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup(staged);
+    await act(async () => {
+      await h.result.current.approveDiff();
+    });
+    expect(writes).toBe(0);
+    expect(h.wsOf().pendingDiff).not.toBeNull();
+    expect(h.wsOf().shellOut).toMatch(/approve claim failed.*no token/);
+  });
+
+  it("surfaces a backend write failure instead of failing silently, keeps the diff", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") return "old";
+      if (cmd === "approval_claim") return "tok-test";
+      if (cmd === "fs_write") throw new Error("fs_write: approval detail mismatch (arguments changed after approval — re-approve)");
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup(staged);
+    await act(async () => {
+      await h.result.current.approveDiff();
+    });
+    expect(h.wsOf().pendingDiff).not.toBeNull();
+    expect(h.wsOf().shellOut).toMatch(/approve write failed.*detail mismatch/);
+    expect(h.calls.audits).toMatchObject([{ tool: "fs_write", ok: false }]);
+  });
 });
 
 describe("useDiffGate.approveAndCommit", () => {

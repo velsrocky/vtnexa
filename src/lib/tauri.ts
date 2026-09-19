@@ -2,8 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Approval } from "./approval";
 import type { FileEntry } from "../types";
 
-function approvalArgs(a?: Approval): { approval_token: string | null; approval_detail: string | null } {
-  return { approval_token: a?.token ?? null, approval_detail: a?.detail ?? null };
+function approvalArgs(a?: Approval): { approvalToken: string | null; approvalDetail: string | null } {
+  return { approvalToken: a?.token ?? null, approvalDetail: a?.detail ?? null };
 }
 
 export async function fsList(path: string): Promise<FileEntry[]> {
@@ -148,7 +148,13 @@ export interface ShellResult {
 }
 
 export async function shellRun(cwd: string, cmd: string, approval?: Approval): Promise<ShellResult> {
-  return invoke<ShellResult>("shell_run", { cwd, cmd, ...approvalArgs(approval) });
+  // Note: shell_run takes plain strings (not null) — serde fills missing opts as "".
+  return invoke<ShellResult>("shell_run", {
+    cwd,
+    cmd,
+    approval_token: approval?.token ?? "",
+    approval_detail: approval?.detail ?? "",
+  });
 }
 
 export interface ShellPoll {

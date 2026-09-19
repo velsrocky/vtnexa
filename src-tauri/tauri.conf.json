@@ -26,7 +26,8 @@
     "targets": "all",
     "resources": [
       "sidecar-stage/browser",
-      ".vtnexa/skills"
+      ".vtnexa/skills",
+      "../dist"
     ],
     "icon": [
       "icons/32x32.png",

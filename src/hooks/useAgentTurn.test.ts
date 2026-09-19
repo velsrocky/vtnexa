@@ -206,6 +206,10 @@ describe("useAgentTurn context packing", () => {
     });
     expect(sys).toMatch(/Answer contract/);
     expect(sys).toMatch(/Ambiguity rule/);
+    expect(sys).toMatch(/act-first/);
+    expect(sys).toMatch(/Start acting on your first reply/);
+    expect(sys).toMatch(/NEVER use shell for listing/);
+    expect(sys).toMatch(/Wrapper rule/);
     expect(sys).toMatch(/Read-before-edit/);
     expect(sys).toMatch(/Decided: use pnpm/);
     expect(sys).toMatch(/Repo map/);
@@ -242,6 +246,7 @@ describe("useAgentTurn model variants", () => {
     expect(sys).toMatch(/NO cd tool/);
     expect(sys).toMatch(/ALREADY pasted above/);
     expect(sys).toMatch(/needs NO tools/);
+    expect(sys).toMatch(/First reply/);
     expect(sys).toMatch(/Grounding/);
     expect(sys).toMatch(/text-only/);
     expect(sys).toMatch(/ONLY from a shell_run tool result/);
@@ -251,6 +256,7 @@ describe("useAgentTurn model variants", () => {
   it("uses the full contract prompt for frontier models", async () => {
     const sys = await captureSys({ baseUrl: "https://api.openai.com/v1", model: "gpt-4o" });
     expect(sys).toMatch(/Answer contract/);
+    expect(sys).toMatch(/Start acting on your first reply/);
     expect(sys).toMatch(/Grounding/);
     expect(sys).toMatch(/only shell_run results count as output/);
     expect(sys).not.toMatch(/ONE tool call per reply/);
@@ -282,7 +288,7 @@ describe("useAgentTurn.expandSkill", () => {
     });
     const h = setup({ skills: [{ name: "fix", description: "d" }] });
     await expect(h.result.current.expandSkill("/fix the bug")).resolves.toBe(
-      "[skill: fix]\nSKILL BODY\n\nArguments:\nthe bug",
+      "User invoked /fix - follow these skill instructions now using tools, do not discuss the skill itself:\n[skill: fix]\nSKILL BODY\n\nArguments:\nthe bug",
     );
   });
 });

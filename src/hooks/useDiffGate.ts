@@ -146,6 +146,30 @@ export function useDiffGate(opts: {
     });
   }
 
+  function noteApplyFailure(action: string, path: string, err: unknown, diag?: string) {
+    const msg = String(err instanceof Error ? err.message : err);
+    updateWs((w) => ({
+      ...w,
+      // Pending diff is KEPT so the user can retry after fixing the cause
+      // (workspace root, stale window, backend error).
+      shellOut: w.shellOut + `\n✗ ${action} failed for ${path}: ${msg.slice(0, 300)}${diag ? ` [${diag}]` : ""}`,
+    }));
+    opts.logAudit({
+      tool: "fs_write",
+      args: JSON.stringify({ path }).slice(0, 1000),
+      decision: "approved",
+      ok: false,
+      ms: 0,
+      note: `${action} failed: ${msg.slice(0, 200)}${diag ? ` [${diag}]` : ""}`,
+    });
+  }
+
+  // Lengths only, never secret content: proves whether the token the claim
+  // minted is the token the write sent.
+  function approvalDiag(a: { token: string; detail: string } | undefined): string {
+    return `frontend token_len=${a?.token?.length ?? -1} detail_len=${a?.detail?.length ?? -1}`;
+  }
+
   async function approveDiff() {
     const d = ws.pendingDiff;
     if (!d) return;
@@ -153,7 +177,25 @@ export function useDiffGate(opts: {
     if (!drift.proceed) return;
     // The Approve click is the review; the claim token binds this exact path
     // backend-side so a compromised renderer cannot redirect the write.
-    await fsWrite(d.path, d.content, await claimFor("fs_write", { path: d.path }));
+    // Claim and write are diagnosed separately: an empty/missing token at the
+    // write means the claim produced nothing (stale window, backend mismatch).
+    let approval;
+    try {
+      approval = await claimFor("fs_write", { path: d.path });
+    } catch (e) {
+      noteApplyFailure("approve claim", d.path, e);
+      return;
+    }
+    if (!approval?.token) {
+      noteApplyFailure("approve claim", d.path, "claim returned no token (stale window? restart the app)");
+      return;
+    }
+    try {
+      await fsWrite(d.path, d.content, approval);
+    } catch (e) {
+      noteApplyFailure("approve write", d.path, e, approvalDiag(approval));
+      return;
+    }
     markApplied(d.path, d.content);
     pushUndo({ kind: "write", path: d.path, before: drift.current, after: d.content, existedBefore: drift.existed });
     const verified = await verifyApplied(d.path, d.content);
@@ -176,7 +218,23 @@ export function useDiffGate(opts: {
     const drift = await driftRead(d);
     if (!drift.proceed) return;
 
-    await fsWrite(d.path, d.content, await claimFor("fs_write", { path: d.path }));
+    let approval;
+    try {
+      approval = await claimFor("fs_write", { path: d.path });
+    } catch (e) {
+      noteApplyFailure("approve+commit claim", d.path, e);
+      return;
+    }
+    if (!approval?.token) {
+      noteApplyFailure("approve+commit claim", d.path, "claim returned no token (stale window? restart the app)");
+      return;
+    }
+    try {
+      await fsWrite(d.path, d.content, approval);
+    } catch (e) {
+      noteApplyFailure("approve+commit write", d.path, e, approvalDiag(approval));
+      return;
+    }
     markApplied(d.path, d.content);
     pushUndo({ kind: "write", path: d.path, before: drift.current, after: d.content, existedBefore: drift.existed });
     const verified = await verifyApplied(d.path, d.content);

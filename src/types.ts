@@ -18,6 +18,11 @@ export interface WorkspaceUsage {
   toolMs: number;
 }
 
+export interface TrustedPath {
+  pattern: string;
+  reason: string;
+}
+
 export interface AuditEvent {
   id: string;
   /** epoch ms */

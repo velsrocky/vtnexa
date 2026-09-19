@@ -9,7 +9,7 @@ import { join } from "node:path";
 // --help text stay truthful. The scaffold skill additionally pins the
 // load-bearing rules distilled from real failed scaffolds.
 const DIR = ".vtnexa/skills";
-const EXPECTED = ["commit", "docs", "explain", "fix", "map", "refactor", "review", "scaffold", "test"];
+const EXPECTED = ["commit", "docs", "explain", "fix", "map", "rate", "refactor", "review", "scaffold", "test"];
 
 function read(name: string): string {
   return readFileSync(join(DIR, `${name}.md`), "utf8");

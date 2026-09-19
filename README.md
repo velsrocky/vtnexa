@@ -67,6 +67,15 @@ Most coding agents either (a) ask for permission on every keystroke or
   `mcp_<server>_<tool>`, always require approval. Remote auth is static
   headers with `{env:...}` substitution (never commit tokens), or OAuth browser
   sign-in from the ⛁ panel (tokens in the OS keychain, silent refresh).
+- **Sandboxing** — Commands run in firejail (when installed) with:
+  - Restricted filesystem access
+  - Time limits (30s default)
+  - Memory limits (512MB default)
+  - Network isolation
+- **Rate limiting** — 30 turns per minute per window, 500 turns per day (prevents token exhaustion)
+- **Audit log export** — Export full audit trail with cryptographic hash verification
+- **Health monitoring** — Uptime tracking, memory usage, turn count, heartbeat checks
+- **Trusted paths** — Skip approval dialogs for safe directories (e.g., `docs/`, `src/generated/`, `tests/__snapshots__/`). Configure via Settings → Trusted Paths to reduce UX verbosity without compromising safety.
 
 ## The 👍 / 👎 buttons (what they do)
 
@@ -141,16 +150,51 @@ vtnexa --uninstall   remove a per-user install
 ## Development
 
 ```sh
-pnpm test            # ~285 vitest tests (jsdom) + coverage via vitest.config.ts
-pnpm build           # tsc + vite
-cargo test --manifest-path src-tauri/Cargo.toml --lib   # 56 Rust tests
-pnpm install-local   # build .deb + install per-user (no sudo)
+# Quick start
+pnpm install
+pnpm dev
+
+# Full test suite
+pnpm test                        # ~285 Vitest tests + coverage
+pnpm e2e                         # Playwright E2E tests
+cargo test --manifest-path src-tauri/Cargo.toml --lib  # 56 Rust tests
+
+# Build
+pnpm build                       # tsc + vite
+cargo build --release            # Tauri release
+
+# Lint and typecheck
+pnpm exec tsc --noEmit
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 ```
 
+### Makefile targets
+
+```sh
+make dev         # Run development server
+make build       # Build production app
+make test        # Run all tests
+make lint        # Run linters
+make install-local  # Build and install locally
+```
+
+### CI/CD
+
+Automated testing and building on every PR:
+- TypeScript type checking
+- ESLint
+- Vitest unit tests
+- Rust clippy
+- Rust tests
+- Tauri build
+
+See `.github/workflows/ci.yml` for details.
+
 Architecture: thin React components → domain hooks (one window = one
-workspace) → Tauri commands in `src-tauri/src/lib.rs` (sandbox, approvals,
-git, shell, PTY, keychain) → Playwright sidecar for Browser Use. Details in
-`docs/architecture.md`; changes in `CHANGELOG.md`.
+workspace) → Tauri commands in focused `src-tauri/src/` modules (workspace
+sandbox, approvals, git, shell, PTY, keychain — see `docs/architecture.md`)
+→ Playwright sidecar for Browser Use. Details in `docs/architecture.md`;
+changes in `CHANGELOG.md`.
 
 ## Contributing
 
