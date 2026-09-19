@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AuditInput, UndoEntry, Workspace } from "../types";
 import { undoEntryLabel } from "../types";
 import { fsDelete, fsRead, fsRename, fsWrite, gitCommit } from "../lib/tauri";
 import { claimFor } from "../lib/approval";
+import { trimUndoStack } from "../lib/sessionStore";
 import { baseName } from "../lib/utils";
 
 // Undo boundaries (v1): approved Diff-gate writes + file renames/deletes.
@@ -50,6 +51,34 @@ export function useDiffGate(opts: {
   const { setOriginals, setBuffers, setOriginalText, setEditorText } = opts;
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
+
+  // Persisted trails: seed once from a restored session (ref-guarded so
+  // StrictMode double-invoke can't re-seed over live state), then mirror the
+  // budget-trimmed stacks into the Workspace snapshot for session.json.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current) return;
+    seededRef.current = true;
+    if (ws.undoStack?.length) setUndoStack(ws.undoStack);
+    if (ws.redoStack?.length) setRedoStack(ws.redoStack);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed exactly once on mount
+  }, []);
+  useEffect(() => {
+    if (!seededRef.current) return; // don't clobber a restored snapshot pre-seed
+    const undo = trimUndoStack(undoStack);
+    const redo = trimUndoStack(redoStack);
+    const prevU = ws.undoStack ?? [];
+    const prevR = ws.redoStack ?? [];
+    if (
+      prevU.length === undo.length &&
+      prevU.every((e, i) => e === undo[i]) &&
+      prevR.length === redo.length &&
+      prevR.every((e, i) => e === redo[i])
+    ) {
+      return;
+    }
+    updateWs((w) => ({ ...w, undoStack: undo, redoStack: redo }));
+  }, [undoStack, redoStack]);
 
   function note(text: string) {
     updateWs((w) => ({ ...w, shellOut: w.shellOut + text }));

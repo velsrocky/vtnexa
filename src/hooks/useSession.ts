@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { DEFAULT_PROVIDER, type AuditEvent, type CenterTab, type WorkspaceUsage, type ProviderConfig, type SideTab, type Workspace } from "../types";
 import { keyGet, sessionLoad, sessionSave } from "../lib/tauri";
 import { reviveToolEvents, trimToolEvents } from "../lib/toolCard";
+import { reviveUndoStack, trimUndoStack } from "../lib/sessionStore";
 import { uid } from "../lib/utils";
 import { windowLabel } from "./useWorkspaceState";
 
@@ -107,6 +108,8 @@ export function snapshotWorkspace(ws: Workspace, msgCap: number): Record<string,
     previewUrl: ws.previewUrl ?? "",
     planMode: ws.planMode ?? false,
     pendingDiff: ws.pendingDiff,
+    undoStack: trimUndoStack(ws.undoStack ?? []),
+    redoStack: trimUndoStack(ws.redoStack ?? []),
   };
 }
 
@@ -160,6 +163,8 @@ export function restoreWorkspace(l: any, fallbackId: string): Workspace {
     chatDraft: typeof l?.chatDraft === "string" ? l.chatDraft.slice(0, 20000) : "",
     previewUrl: typeof l?.previewUrl === "string" ? l.previewUrl.slice(0, 4096) : "",
     planMode: l?.planMode === true,
+    undoStack: reviveUndoStack(l?.undoStack),
+    redoStack: reviveUndoStack(l?.redoStack),
   };
 }
 

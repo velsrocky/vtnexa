@@ -83,6 +83,9 @@ export interface Workspace {
   previewUrl: string;
   /** Commander mode: true = plan (read-only turns), false = build. */
   planMode: boolean;
+  /** Agent file-op undo/redo trails (persisted, byte-budgeted). */
+  undoStack?: UndoEntry[];
+  redoStack?: UndoEntry[];
 }
 
 /** Center-column tab. */
@@ -130,6 +133,18 @@ export type UndoEntry =
   | { kind: "write"; path: string; before: string; after: string; existedBefore: boolean }
   | { kind: "rename"; oldPath: string; newPath: string }
   | { kind: "delete"; path: string; content: string };
+
+/** Snapshot weight of one entry in chars (dominated by file contents). */
+export function undoEntrySize(e: UndoEntry): number {
+  switch (e.kind) {
+    case "write":
+      return e.before.length + e.after.length;
+    case "delete":
+      return e.content.length;
+    case "rename":
+      return 0;
+  }
+}
 
 export function undoEntryLabel(e: UndoEntry): string {
   const short = (p: string) => p.split("/").pop() ?? p;
