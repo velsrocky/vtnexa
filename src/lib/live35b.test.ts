@@ -135,4 +135,54 @@ describe.skipIf(!LIVE)("live 35B @ llama.cpp", () => {
     },
     360_000,
   );
+
+  it(
+    "reasoning stream + parallel calls: CoT captured, every call executed, answer grounded",
+    async () => {
+      stubBackend();
+      let thinking = "";
+      let toolCalls = 0;
+      const audits: { tool: string; ok: boolean }[] = [];
+      const res = await chatWithTools(
+        CFG,
+        [
+          {
+            role: "user",
+            content:
+              "Inspect package.json in this project: tell me the project name and the exact test command it defines.",
+          },
+        ],
+        () => {},
+        {
+          onThinking: (t) => {
+            thinking += t;
+          },
+          onToolActivity: () => {
+            toolCalls++;
+          },
+          onAudit: (e) => audits.push({ tool: e.tool, ok: e.ok }),
+          signal: AbortSignal.timeout(300_000),
+        },
+      );
+      console.log(
+        JSON.stringify({
+          test: "reasoning+parallel",
+          toolCalls,
+          thinkingChars: thinking.length,
+          audits,
+          final: res.slice(0, 300),
+        }),
+      );
+      // Reasoning passthrough: the CoT stream must reach onThinking (a
+      // regression here froze the transcript blank for the whole phase).
+      expect(thinking.length).toBeGreaterThan(0);
+      expect(toolCalls).toBeGreaterThanOrEqual(1);
+      // Grounding: the canned name/script must appear, not invented content.
+      expect(res).toContain("live-ws");
+      expect(res).toContain("vitest run");
+      expect(res.length).toBeLessThan(1500);
+      expect(res.trimEnd().endsWith("?")).toBe(false);
+    },
+    360_000,
+  );
 });
