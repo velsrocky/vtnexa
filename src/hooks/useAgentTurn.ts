@@ -7,6 +7,7 @@ import { chatWithTools, asksAuthQuestion, extractExplicitPaths, type ToolDef } f
 import { isMcpEnabled, mcpListTools, setMcpToolCache, toMcpToolDefs } from "../lib/mcp";
 import { recordTurnRepairs, resolvePromptTier } from "../lib/modelBands";
 import { uid } from "../lib/utils";
+import type { ToolEvent } from "../types";
 
 interface Deps {
   ws: Workspace;
@@ -86,6 +87,8 @@ export function useAgentTurn(d: Deps) {
     let acc = "";
     let turnRepairs = 0;
     let toolCallsThisTurn = 0;
+    // Tool calls this turn, for inline tool cards on the final message.
+    const turnTools: ToolEvent[] = [];
     const stalledTurns = stallRef.current.questionTurns;
     try {
       const history = [...target.messages, userMsg].map((m) => ({ role: m.role, content: m.content }));
@@ -245,6 +248,10 @@ export function useAgentTurn(d: Deps) {
           },
           onAudit: (e) => {
             d.logAudit(e);
+            // Tool-card trail: bounded so a runaway loop can't balloon memory.
+            if (turnTools.length < 40) {
+              turnTools.push({ tool: e.tool, args: e.args, decision: e.decision, ok: e.ok, ms: e.ms });
+            }
           },
           extraTools: mcpTools,
         },
@@ -262,7 +269,16 @@ export function useAgentTurn(d: Deps) {
       }
       d.updateWs((w) => ({
         ...w,
-        messages: w.messages.filter((m) => m.id !== "stream").concat([{ id: uid(), role: "assistant", content: finalText }]),
+        messages: w.messages
+          .filter((m) => m.id !== "stream")
+          .concat([
+            {
+              id: uid(),
+              role: "assistant",
+              content: finalText,
+              ...(turnTools.length ? { tools: turnTools.slice() } : {}),
+            },
+          ]),
       }));
     } catch (e) {
       d.flushStreamFrame();
@@ -279,7 +295,16 @@ export function useAgentTurn(d: Deps) {
       }
       d.updateWs((w) => ({
         ...w,
-        messages: w.messages.filter((m) => m.id !== "stream").concat([{ id: uid(), role: "assistant", content: errText }]),
+        messages: w.messages
+          .filter((m) => m.id !== "stream")
+          .concat([
+            {
+              id: uid(),
+              role: "assistant",
+              content: errText,
+              ...(turnTools.length ? { tools: turnTools.slice() } : {}),
+            },
+          ]),
       }));
     } finally {
       d.setBusy(false);

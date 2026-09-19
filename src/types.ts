@@ -8,6 +8,18 @@ export interface ChatMsg {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
   content: string;
+  /** Tool calls executed during the turn that produced this assistant message. */
+  tools?: ToolEvent[];
+}
+
+/** One agent tool call, mirroring AuditEvent minus hook-assigned id/ts. */
+export interface ToolEvent {
+  tool: string;
+  /** JSON args, truncated at capture */
+  args: string;
+  decision: "auto" | "approved" | "rejected";
+  ok: boolean;
+  ms: number;
 }
 
 export interface WorkspaceUsage {

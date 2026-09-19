@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { DEFAULT_PROVIDER, type AuditEvent, type CenterTab, type WorkspaceUsage, type ProviderConfig, type SideTab, type Workspace } from "../types";
 import { keyGet, sessionLoad, sessionSave } from "../lib/tauri";
+import { reviveToolEvents, trimToolEvents } from "../lib/toolCard";
 import { uid } from "../lib/utils";
 import { windowLabel } from "./useWorkspaceState";
 
@@ -79,7 +80,12 @@ export function snapshotWorkspace(ws: Workspace, msgCap: number): Record<string,
     messages: ws.messages
       .filter((m) => m.role === "user" || m.role === "assistant")
       .slice(-msgCap)
-      .map((m) => ({ id: m.id, role: m.role, content: m.content })),
+      .map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        ...(m.tools?.length ? { tools: trimToolEvents(m.tools) } : {}),
+      })),
     usage: ws.usage,
     audit: ws.audit.slice(-AUDIT_MAX),
     tabs: (ws.tabs ?? []).slice(0, 20),
@@ -116,7 +122,15 @@ export function restoreWorkspace(l: any, fallbackId: string): Workspace {
           (m: any) =>
             m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string",
         )
-        .map((m: any) => ({ id: typeof m.id === "string" ? m.id : uid(), role: m.role, content: m.content }))
+        .map((m: any) => {
+          const tools = reviveToolEvents(m?.tools);
+          return {
+            id: typeof m.id === "string" ? m.id : uid(),
+            role: m.role,
+            content: m.content,
+            ...(tools ? { tools } : {}),
+          };
+        })
       : [],
     pendingDiff: p && typeof p === "object" && typeof p.path === "string" && typeof p.content === "string"
       ? { path: p.path, content: String(p.content ?? ""), original: String(p.original ?? "") }

@@ -1,12 +1,46 @@
 import { Fragment, useEffect, useState } from "react";
 import type { MutableRefObject } from "react";
-import type { SkillInfo, SideTab, Workspace } from "../types";
+import type { SkillInfo, SideTab, ToolEvent, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
 import { useInputHistory } from "../hooks/useInputHistory";
 import { renderChatMarkdown } from "../lib/chatMarkdown";
+import { toolArgsSummary } from "../lib/toolCard";
 
 /** Finalized assistant replies render as sanitized markdown; the streaming
  *  message stays plain <pre> so partial markup never flickers mid-frame. */
+/** Compact, expandable trail of the tool calls behind an assistant reply. */
+function ToolCards({ tools }: { tools: ToolEvent[] }) {
+  const [open, setOpen] = useState(false);
+  const okCount = tools.filter((t) => t.ok).length;
+  const approved = tools.filter((t) => t.decision === "approved").length;
+  const rejected = tools.filter((t) => t.decision === "rejected").length;
+  const totalMs = tools.reduce((s, t) => s + t.ms, 0);
+  return (
+    <div className="tool-cards">
+      <button className="tool-cards-toggle" onClick={() => setOpen(!open)}>
+        <span className={`tri ${open ? "open" : ""}`}>▶</span>
+        {tools.length} tool call{tools.length === 1 ? "" : "s"}
+        {rejected > 0 ? ` · ${rejected} rejected` : ` · ${okCount}/${tools.length} ok`}
+        {approved > 0 ? ` · ${approved} approved` : ""}
+        {totalMs >= 1000 ? ` · ${(totalMs / 1000).toFixed(1)}s` : ""}
+      </button>
+      {open && (
+        <div className="tool-cards-list">
+          {tools.map((t, i) => (
+            <div key={i} className="tool-card">
+              <span className={`dot ${t.ok ? "ok" : "err"}`} />
+              <b>{t.tool}</b>
+              <span className="tool-card-args">{toolArgsSummary(t.tool, t.args)}</span>
+              {t.decision !== "auto" && <span className={`badge ${t.decision}`}>{t.decision}</span>}
+              <span className="tool-card-ms">{t.ms >= 1000 ? `${(t.ms / 1000).toFixed(1)}s` : `${t.ms}ms`}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MarkdownBody({ content }: { content: string }) {
   const [html, setHtml] = useState(() => renderChatMarkdown(content));
   useEffect(() => {
@@ -138,6 +172,9 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
                     <MarkdownBody content={m.content} />
                   ) : (
                     <pre>{m.content}</pre>
+                  )}
+                  {m.role === "assistant" && m.tools && m.tools.length > 0 && (
+                    <ToolCards tools={m.tools} />
                   )}
                 </div>
               </Fragment>
