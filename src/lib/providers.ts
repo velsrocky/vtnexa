@@ -884,8 +884,12 @@ const LOCAL_MODEL_RE =
 // tool-call format, shorter replies. Heuristic on purpose: local endpoints,
 // small-model families and small size tags. Frontier cloud models get the
 // full prompt.
+// Weak-tier signals are MODEL capability hints only: small parameter sizes,
+// small-model families, or small-model edition names. Endpoint host and file
+// format are NOT capability signals — a 35B gguf served from localhost is a
+// strong model, and "localhost" says nothing about what it serves.
 const WEAK_MODEL_RE =
-  /localhost|127\.0\.0\.1|ollama|gpt-oss|deepseek.*distill|llama|qwen|mistral|mixtral|phi[-_]|gemma|gguf|\bmini\b|\bnano\b/i;
+  /gpt-oss|deepseek.*distill|llama|qwen|mistral|mixtral|phi[-_]|gemma|\bmini\b|\bnano\b/i;
 const SMALL_SIZE_RE = /[:\-_](0\.5|1|1\.5|3|7|8|9)b\b/i;
 
 export function isWeakModel(baseUrl: string, model: string): boolean {
@@ -1214,6 +1218,8 @@ export async function chatWithTools(
     signal?: AbortSignal;
     onUsage?: (u: { input: number; output: number; model: string; cost?: number }) => void;
     onToolActivity?: (a: { name: string; ms: number; ok: boolean }) => void;
+    /** Live reasoning-model thinking stream (OpenAI-compat reasoning_content). */
+    onThinking?: (text: string) => void;
     /** Fires on every repair nudge (narration or denial) - powers auto-banding. */
     onRepair?: (r: { kind: "narration" | "denial" | "question" | "repetition" | "skill" }) => void;
     onAudit?: (e: {
@@ -1387,11 +1393,18 @@ export async function chatWithTools(
       if (attempt > 0) await new Promise((r) => setTimeout(r, 1500 * attempt));
       try {
         res = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
-        break;
       } catch (e) {
         if (signal?.aborted) throw abortError();
         lastErr = e;
+        continue;
       }
+      // One silent retry for transient server-side failures (llama.cpp
+      // template/slot hiccups surface as sporadic 500s mid-conversation,
+      // gateways 502/503, endpoints 429). Safe to replay: this throws before
+      // any body byte is consumed, so the request never half-streamed.
+      if (res.ok || (res.status < 500 && res.status !== 429)) break;
+      lastErr = new Error(`provider ${res.status}`);
+      res = null;
     }
     if (!res) {
       const detail =
@@ -1480,6 +1493,7 @@ export async function chatWithTools(
     convo: NormMsg[],
     useTools: boolean,
     onDelta: (text: string) => void,
+    onThinking?: (text: string) => void,
   ): Promise<BackendResult> {
     const url = cfg.baseUrl.replace(/\/$/, "") + "/chat/completions";
     const headers: Record<string, string> = {
@@ -1501,6 +1515,8 @@ export async function chatWithTools(
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
       const msg = data.choices?.[0]?.message;
+      const reasoning = (msg as { reasoning_content?: unknown } | undefined)?.reasoning_content;
+      if (typeof reasoning === "string" && reasoning) onThinking?.(reasoning);
       const content = (msg?.content ?? "") as string;
       if (content) onDelta(content);
       const u = data.usage;
@@ -1529,6 +1545,11 @@ export async function chatWithTools(
       }
       const delta = chunk.choices?.[0]?.delta;
       if (!delta) return;
+      // Reasoning models (llama.cpp `--reasoning-format`, Ollama thinking
+      // models, DeepSeek-R1) stream CoT here; without this the UI freezes
+      // blank for the whole thinking phase.
+      const reasoning = (delta as { reasoning_content?: unknown }).reasoning_content;
+      if (typeof reasoning === "string" && reasoning) onThinking?.(reasoning);
       if (typeof delta.content === "string" && delta.content.length > 0) {
         content += delta.content;
         onDelta(delta.content);
@@ -1876,12 +1897,13 @@ export async function chatWithTools(
     convo: NormMsg[],
     useTools: boolean,
     onDelta: (text: string) => void,
+    onThinking?: (text: string) => void,
   ): Promise<BackendResult> {
     const pruned = pruneImages(convo, 2);
     const kind = resolveKind();
     if (kind === "anthropic") return anthropicComplete(pruned, useTools, onDelta);
     if (kind === "gemini") return geminiComplete(pruned, useTools, onDelta);
-    return openaiComplete(pruned, useTools, onDelta);
+    return openaiComplete(pruned, useTools, onDelta, onThinking);
   }
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -1889,7 +1911,7 @@ export async function chatWithTools(
     let content: string;
     let toolCalls: ToolCall[];
     try {
-      const r = await backendComplete(windowConvo(convo), useTools, (delta) => onEvent(delta));
+      const r = await backendComplete(windowConvo(convo), useTools, (delta) => onEvent(delta), opts?.onThinking);
       reportUsage(r.usage);
       content = r.content;
       toolCalls = r.toolCalls;

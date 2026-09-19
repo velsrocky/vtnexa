@@ -30,6 +30,11 @@ function openAIText(text: string, usage = { prompt_tokens: 20, completion_tokens
   return json({ choices: [{ message: { content: text } }], usage });
 }
 
+function sse(events: unknown[]) {
+  const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+  return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
+
 function setup(opts?: {
   busy?: boolean;
   provHistLength?: number;
@@ -438,5 +443,43 @@ describe("useAgentTurn stall escalation", () => {
     bodies = stubScript([Q, Q]);
     await run("and again");
     expect(sysOf(bodies)).not.toContain("Stall warning");
+  });
+});
+
+describe("useAgentTurn reasoning stream", () => {
+  it("renders a live thinking frame and keeps it out of the final answer", async () => {
+    let holder: ReturnType<typeof setup> | null = null;
+    const frames: string[] = [];
+    // Synchronous rAF that records each published stream frame.
+    vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
+      cb();
+      const msgs = holder?.wsOf().messages ?? [];
+      const last = msgs[msgs.length - 1];
+      if (last?.id === "stream") frames.push(last.content);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    stubFetch(() =>
+      sse([
+        { choices: [{ delta: { reasoning_content: "let me check the files " } }] },
+        { choices: [{ delta: { reasoning_content: "before answering" } }] },
+        { choices: [{ delta: { content: "answer" } }] },
+        { usage: { prompt_tokens: 20, completion_tokens: 10 } },
+      ]),
+    );
+    setInvokeImpl(async () => ({}));
+    const h = setup();
+    holder = h;
+    await act(async () => {
+      await h.result.current.runAgentTurn("go");
+    });
+    // A frame is published during the reasoning phase - before any answer
+    // text exists. Without that, the transcript sits frozen (the live bug).
+    expect(frames.some((f) => f.includes("⏺ thinking") && !f.includes("answer"))).toBe(true);
+    // ...and the persisted answer is content-only, with no thinking tail.
+    expect(h.wsOf().messages.map((m) => [m.role, m.content])).toEqual([
+      ["user", "go"],
+      ["assistant", "answer"],
+    ]);
   });
 });

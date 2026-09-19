@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Fixed
+- **Reasoning models froze the transcript blank**: llama.cpp/Ollama/DeepSeek
+  stream chain-of-thought in `delta.reasoning_content`, which the parser
+  ignored — a 35B's thinking phase (often 30s+) rendered as nothing at all.
+  Reasoning deltas now drive a live muted `⏺ thinking` tail that is never
+  persisted into the final message, and reasoning deltas publish their own
+  frames (previously only content deltas did, so the phase stayed blank).
+- **One transient 500 killed a finished turn**: `postJSON` retried only
+  network errors, so a sporadic llama.cpp template/slot 500 (seen live:
+  "Jinja Exception: No messages provided") aborted an otherwise successful
+  45-second turn. Server-side failures (5xx/429) now retry once before any
+  body byte is consumed - safe to replay; 4xx still fails fast.
 - **Approved shell commands never ran**: the `shell_run` wrapper sent
   snake_case `approval_token`/`approval_detail` keys, but Tauri v2 binds
   command args camelCase — so every approved call (agent + manual shell tab)

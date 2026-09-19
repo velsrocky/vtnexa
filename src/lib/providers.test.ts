@@ -204,6 +204,10 @@ describe("runTool", () => {
     expect(isWeakModel("https://api.anthropic.com", "claude-sonnet-4-5")).toBe(false);
     expect(isWeakModel("https://api.openai.com/v1", "gpt-4o")).toBe(false);
     expect(isWeakModel("https://x.test/v1", "qwen2.5-coder:32b")).toBe(true);
+    // Host and file format are not capability signals: a 35B gguf served
+    // locally is a strong model and gets the full system prompt.
+    expect(isWeakModel("http://localhost:8080/v1", "/models/Ornith-1.5-35B-Q4_K_M.gguf")).toBe(false);
+    expect(isWeakModel("http://127.0.0.1:8080/v1", "Qwen3-32B-Q4_K_M.gguf")).toBe(true); // family, not host/format
   });
   it("rejects relative fs paths with a self-correcting hint", async () => {
     let invoked = false;
@@ -219,6 +223,34 @@ describe("runTool", () => {
 });
 
 describe("chatWithTools", () => {
+  it("streams reasoning_content to onThinking and keeps it out of content/deltas", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sse([
+          { choices: [{ delta: { reasoning_content: "Let me think " } }] },
+          { choices: [{ delta: { reasoning_content: "about paths." } }] },
+          { choices: [{ delta: { content: "src/hooks has 3 files." } }] },
+          { choices: [{ delta: {} }], usage: { prompt_tokens: 100, completion_tokens: 20 } },
+        ]),
+      ) as unknown as typeof fetch,
+    );
+    const thinking: string[] = [];
+    let streamed = "";
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "list src/hooks" }],
+      (t) => {
+        streamed += t;
+      },
+      { onThinking: (t) => thinking.push(t) },
+    );
+    expect(thinking.join("")).toBe("Let me think about paths.");
+    expect(streamed).toBe("src/hooks has 3 files.");
+    expect(res).toContain("src/hooks has 3 files.");
+    expect(res).not.toContain("Let me think");
+  });
+
   it("returns plain replies and streams deltas", async () => {
     stubFetch(() => openAIText("hello there"));
     const deltas: string[] = [];
@@ -962,5 +994,57 @@ describe("chatWithTools question repair", () => {
     expect(res).toBe("Done. Should I proceed with the delete?");
     expect(events.join("")).not.toMatch(/asked for direction/);
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe("reasoning-content passthrough", () => {
+  it("forwards streamed reasoning_content to onThinking without polluting the answer", async () => {
+    setInvokeImpl(async () => []);
+    stubFetch(() =>
+      sse([
+        { choices: [{ delta: { reasoning_content: "weighing " } }] },
+        { choices: [{ delta: { reasoning_content: "options" } }] },
+        { choices: [{ delta: { content: "Answer." } }] },
+        { usage: { prompt_tokens: 3, completion_tokens: 4 } },
+      ]),
+    );
+    const think: string[] = [];
+    const events: string[] = [];
+    const res = await chatWithTools(CFG, [{ role: "user", content: "hi" }], (d) => events.push(d), {
+      onThinking: (t) => think.push(t),
+    });
+    expect(think.join("")).toBe("weighing options");
+    expect(res).toBe("Answer.");
+    expect(events.join("")).toBe("Answer.");
+  });
+});
+
+describe("postJSON transient-failure retry", () => {
+  it("silently retries one transient 500 and completes the turn", async () => {
+    setInvokeImpl(async () => []);
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      if (n === 1) return json({ error: { message: "Jinja Exception: No messages provided." } }, 500);
+      return sse([
+        { choices: [{ delta: { content: "recovered" } }] },
+        { usage: { prompt_tokens: 4, completion_tokens: 2 } },
+      ]);
+    });
+    const res = await chatWithTools(CFG, [{ role: "user", content: "hi" }], () => {});
+    expect(res).toBe("recovered");
+    // Exactly one retry, no extra model rounds.
+    expect(n).toBe(2);
+  });
+
+  it("does not retry non-transient 4xx errors", async () => {
+    setInvokeImpl(async () => []);
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      return json({ error: { message: "invalid request" } }, 400);
+    });
+    await expect(chatWithTools(CFG, [{ role: "user", content: "hi" }], () => {})).rejects.toThrow(/400/);
+    expect(n).toBe(1);
   });
 });
