@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Tests
+- **Long-turn integration coverage**: a hook-level replay of the messy live
+  turn (30 messages of history, 10 tool rounds with parallel calls, a repeated
+  call, a transient 500 mid-turn, reasoning deltas) that pins the whole
+  context-management regression class in one place - task preserved in every
+  outbound request, nudges confined to the tool/system channels, the 500
+  retried rather than fatal, thinking frames streamed before the answer
+  exists, tool cards and audit complete, turn closed cleanly. Mutation-checked:
+  it fails if the task anchor is removed, and fails if nudges return to the
+  user role.
+
 ### Fixed
 - **Synthetic nudges no longer masquerade as the user**: loop-guard,
   skill-follow-through, narration, denial and question repairs were injected as

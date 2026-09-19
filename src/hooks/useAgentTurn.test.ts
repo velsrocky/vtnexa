@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useAgentTurn } from "./useAgentTurn";
 import { newWorkspace } from "../lib/utils";
-import type { ProviderConfig, Workspace } from "../types";
+import type { ChatMsg, ProviderConfig, Workspace } from "../types";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -35,6 +35,25 @@ function sse(events: unknown[]) {
   return new Response(body, { headers: { "content-type": "text/event-stream" } });
 }
 
+/** One streamed tool round: thinking deltas + N parallel fs_list calls. */
+function sseToolRound(reasoning: string, calls: { id: string; path: string }[]) {
+  return sse([
+    { choices: [{ delta: { reasoning_content: reasoning } }] },
+    ...calls.map((c, i) => ({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              { index: i, id: c.id, function: { name: "fs_list", arguments: JSON.stringify({ path: c.path }) } },
+            ],
+          },
+        },
+      ],
+    })),
+    { usage: { prompt_tokens: 10, completion_tokens: 5 } },
+  ]);
+}
+
 function setup(opts?: {
   busy?: boolean;
   provHistLength?: number;
@@ -45,10 +64,13 @@ function setup(opts?: {
   openPath?: string;
   provider?: Partial<ProviderConfig>;
   planMode?: boolean;
+  /** Prior session messages, seeded before the turn runs. */
+  history?: ChatMsg[];
 }) {
   let ws: Workspace = {
     ...newWorkspace("main:ws", "/w"),
     ...(opts?.provider ? { provider: { ...newWorkspace("main:ws", "/w").provider, ...opts.provider } } : {}),
+    ...(opts?.history ? { messages: opts.history } : {}),
   };
   const busy: boolean[] = [];
   const remembered: ProviderConfig[] = [];
@@ -481,5 +503,103 @@ describe("useAgentTurn reasoning stream", () => {
       ["user", "go"],
       ["assistant", "answer"],
     ]);
+  });
+});
+
+// Replay of the messy long turn that broke in live use: 30 messages of prior
+// history, 10 tool rounds with parallel calls, a repeated call (repeat nudge),
+// a transient provider 500 mid-turn, and reasoning deltas throughout. Each
+// assertion pins one regression class found in live debugging.
+describe("useAgentTurn long-turn integration", () => {
+  it("keeps the task, isolates nudges, retries the 500 and streams thinking", async () => {
+    const history: ChatMsg[] = [];
+    for (let i = 0; i < 15; i++) {
+      history.push({ id: `h${i}u`, role: "user", content: `earlier question ${i}` });
+      history.push({ id: `h${i}a`, role: "assistant", content: `earlier answer ${i}` });
+    }
+    const TASK = "audit the workspace layout";
+    const FINAL = "COMPLETE: reviewed the workspace across ten rounds.";
+    let fetches = 0;
+    let served = 0;
+    let injected500 = false;
+    const bodies: any[] = [];
+    stubFetch((_url: string, init: any) => {
+      fetches++;
+      bodies.push(JSON.parse(init.body));
+      if (fetches === 5 && !injected500) {
+        // Transient llama.cpp template hiccup mid-turn: must be retried.
+        injected500 = true;
+        return json({ error: { message: "Jinja Exception: No messages provided." } }, 500);
+      }
+      served++;
+      if (served <= 10) {
+        // Round 2 repeats round 1's first call -> repeat nudge must fire.
+        const first = served === 2 ? "/w/d1a" : `/w/d${served}a`;
+        return sseToolRound(`round ${served}: weighing targets. `, [
+          { id: `a${served}`, path: first },
+          { id: `b${served}`, path: `/w/d${served}b` },
+        ]);
+      }
+      return sse([{ choices: [{ delta: { content: FINAL } }] }, { usage: { prompt_tokens: 1, completion_tokens: 1 } }]);
+    });
+    const frames: string[] = [];
+    let holder: ReturnType<typeof setup> | null = null;
+    vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
+      cb();
+      const msgs = holder?.wsOf().messages ?? [];
+      const last = msgs[msgs.length - 1];
+      if (last?.id === "stream") frames.push(last.content);
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    setInvokeImpl(async () => []);
+    const h = setup({ history });
+    holder = h;
+    await act(async () => {
+      await h.result.current.runAgentTurn(TASK);
+    });
+
+    // 1. Final message is content-only: no thinking tail, no nudge text.
+    const msgs = h.wsOf().messages.filter((m) => m.id !== "stream");
+    const final = msgs[msgs.length - 1];
+    expect(final.role).toBe("assistant");
+    expect(final.content).toBe(FINAL);
+
+    // 2. Inline tool cards captured every executed call (2 per round).
+    expect(final.tools).toHaveLength(20);
+
+    // 3. Every outbound request still carries this turn's request. With 30
+    //    history messages + 20+ appended round messages the window trims hard;
+    //    losing the task here is exactly the live "no task was given" bug.
+    for (const b of bodies) {
+      expect(b.messages.some((m: any) => m.role === "user" && m.content === TASK)).toBe(true);
+    }
+
+    // 4. Nudges never travel as user turns...
+    for (const b of bodies) {
+      const leaked = b.messages.filter(
+        (m: any) => m.role === "user" && /system nudge|You repeated/.test(m.content ?? ""),
+      );
+      expect(leaked).toHaveLength(0);
+    }
+    // 5. ...and the repeat nudge did land inside a tool result.
+    expect(
+      bodies.some((b) =>
+        b.messages.some((m: any) => m.role === "tool" && (m.content ?? "").includes("[system nudge]")),
+      ),
+    ).toBe(true);
+
+    // 6. The transient 500 was retried once, not fatal (11 rounds + 1 retry).
+    expect(injected500).toBe(true);
+    expect(bodies.length).toBe(12);
+
+    // 7. Reasoning streamed live during its phase, before the answer existed.
+    expect(frames.some((f) => f.includes("⏺ thinking") && !f.includes(FINAL))).toBe(true);
+
+    // 8. Audit complete and the turn closed cleanly.
+    expect(h.audits).toHaveLength(20);
+    expect(h.audits.every((a) => a.ok)).toBe(true);
+    expect(h.busy).toEqual([true, false]);
+    expect(h.turnAbort.current).toBeNull();
   });
 });
