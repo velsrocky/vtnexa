@@ -67,11 +67,17 @@ Most coding agents either (a) ask for permission on every keystroke or
   `mcp_<server>_<tool>`, always require approval. Remote auth is static
   headers with `{env:...}` substitution (never commit tokens), or OAuth browser
   sign-in from the ⛁ panel (tokens in the OS keychain, silent refresh).
-- **Sandboxing** — Commands run in firejail (when installed) with:
-  - Restricted filesystem access
-  - Time limits (30s default)
-  - Memory limits (512MB default)
-  - Network isolation
+- **Sandboxing** — Approved commands run **exactly once** in firejail (when
+  installed) with verified flags:
+  - System directories read-only: `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`
+  - Private `/tmp` and `/dev` per run
+  - No privilege escalation (`--nonewprivs`)
+  - Wall-clock time limit (30s, via `timeout` inside the jail)
+  - The workspace stays writable (builds, tests, git need it) and network
+    stays reachable (installs, fetches) — those are covered by the approval
+    dialog and backend screening, not the jail.
+  Without firejail, the same command runs behind the same screening +
+  approval + timeout path (no second, unsandboxed execution).
 - **Rate limiting** — 30 turns per minute per window, 500 turns per day (prevents token exhaustion)
 - **Audit log export** — Export full audit trail with cryptographic hash verification
 - **Health monitoring** — Uptime tracking, memory usage, turn count, heartbeat checks

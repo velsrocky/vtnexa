@@ -422,20 +422,10 @@ pub(crate) fn shell_run(
         }
         safe
     };
-    // 30s timeout via coreutils `timeout` (kills runaways), plus optional firejail sandbox.
-    // Sandbox runs first when available, then timeout as a safety backstop.
-    if sandbox::firejail_available() {
-        let _ = sandbox::run_sandboxed(&cmd, &dir);
-    }
-    
-    let output = match Command::new("timeout")
-        .arg("30s")
-        .arg("sh")
-        .arg("-c")
-        .arg(&cmd)
-        .current_dir(&dir)
-        .output()
-    {
+    // Single execution path: firejail-wrapped when installed (OS-level
+    // confinement), always capped by coreutils `timeout` (kills runaways).
+    // The payload runs exactly once — never sandbox-then-direct.
+    let output = match sandbox::exec_command(&cmd, 30, &dir).output() {
         Ok(o) => {
             if o.status.code() == Some(124) {
                 return Err("shell_run: timed out after 30s".to_string());

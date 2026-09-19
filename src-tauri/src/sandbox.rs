@@ -1,71 +1,85 @@
-// Sandbox enforcement using firejail when available.
-// Commands run in a confined environment with restricted filesystem access.
+// OS-level confinement for agent shell commands, using firejail when installed.
+//
+// Verified against firejail 0.9.72: workspace read/write and git work; /etc
+// (including /etc/shadow) and /usr are read-only; /tmp and /dev are private
+// per run; nested `timeout` works, so the 30s wall-clock cap applies inside
+// the jail exactly as it does on the direct path.
+//
+// When firejail is absent, exec_command returns the plain `timeout`-wrapped
+// command — the sandbox degrades to the screening-only path, never to a
+// second execution.
 
 use std::process::Command;
 
-#[allow(dead_code)]
 const FIREJAIL_PATH: &str = "/usr/bin/firejail";
-#[allow(dead_code)]
-const MAX_WALL_TIME_SECS: u64 = 300;
-#[allow(dead_code)]
-const MAX_MEMORY_KB: u64 = 512_000;
 
-#[allow(dead_code)]
-pub fn firejail_available() -> bool {
+/// Flags verified against firejail 0.9.72. Notably `--nonewprivs` (the
+/// `--nonewpriv` spelling is invalid) and no `--rlimit-*` (an unsupported or
+/// oversized rlimit makes firejail fail silently — `timeout` caps instead).
+const FLAGS: &[&str] = &[
+    "--quiet",
+    "--noprofile",
+    "--private-tmp",
+    "--private-dev",
+    "--nonewprivs",
+    "--read-only=/etc",
+    "--read-only=/usr",
+    "--read-only=/bin",
+    "--read-only=/sbin",
+    "--read-only=/lib",
+    "--read-only=/lib64",
+];
+
+pub(crate) fn firejail_available() -> bool {
     std::path::Path::new(FIREJAIL_PATH).exists()
 }
 
-/// Build a firejail command with workspace confinement and resource limits.
-#[allow(dead_code)]
-pub fn build_jailed_command(cmd: &str, cwd: &std::path::Path) -> Command {
-    let mut c = Command::new(FIREJAIL_PATH);
-    c.arg("--quiet")
-        .arg("--profile=new")
-        .arg("--private-tmp")
-        .arg("--private-dev")
-        .arg("--nonewpriv")
-        .arg("--rlimit-time")
-        .arg(MAX_WALL_TIME_SECS.to_string())
-        .arg("--rlimit-as")
-        .arg(MAX_MEMORY_KB.to_string())
-        .arg("--noprofile")
-        .arg("--private")
-        .arg("--read-only=/etc")
-        .arg("--read-only=/usr")
-        .arg("--read-only=/bin")
-        .arg("--read-only=/sbin")
-        .arg("--read-only=/lib")
-        .arg("--read-only=/lib64")
-        .current_dir(cwd)
-        .arg("--")
-        .arg("bash")
-        .arg("-c")
-        .arg(cmd);
-    c
-}
-
-/// Run a command with optional sandboxing. Returns whether sandboxing was applied.
-#[allow(dead_code)]
-pub fn run_sandboxed(cmd: &str, cwd: &std::path::Path) -> Result<bool, String> {
+/// The single execution path for `sh -c cmd`: firejail-wrapped when firejail
+/// is installed, `timeout`-wrapped otherwise. Runs the payload exactly once;
+/// callers must not execute the command a second time without the sandbox.
+pub(crate) fn exec_command(cmd: &str, timeout_secs: u64, cwd: &std::path::Path) -> Command {
+    let secs = format!("{timeout_secs}s");
     if firejail_available() {
-        let mut child = build_jailed_command(cmd, cwd)
-            .spawn()
-            .map_err(|e| format!("failed to spawn jailed process: {e}"))?;
-        let status = child.wait().map_err(|e| format!("failed to wait for jailed process: {e}"))?;
-        Ok(status.success())
+        let mut c = Command::new(FIREJAIL_PATH);
+        for flag in FLAGS {
+            c.arg(flag);
+        }
+        c.current_dir(cwd)
+            .arg("--")
+            .arg("timeout")
+            .arg(&secs)
+            .arg("sh")
+            .arg("-c")
+            .arg(cmd);
+        c
     } else {
-        // Fallback: run without sandbox, log warning
-        Ok(false)
+        let mut c = Command::new("timeout");
+        c.arg(&secs).arg("sh").arg("-c").arg(cmd).current_dir(cwd);
+        c
     }
 }
 
-/// Check if firejail is installed, recommend installation if not.
-#[allow(dead_code)]
-pub fn check_firejail() -> bool {
-    if firejail_available() {
-        true
-    } else {
-        eprintln!("Warning: firejail not found. Install with: sudo apt install firejail");
-        false
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_carry_no_known_invalid_options() {
+        for flag in FLAGS {
+            // All flags are of a verified, supported form: either an
+            // --option or --option=value, never a bare prefix of a real
+            // option (firejail rejects those hard, e.g. --nonewpriv).
+            assert!(flag.starts_with("--"));
+            assert_ne!(*flag, "--nonewpriv");
+            assert!(!flag.starts_with("--rlimit"));
+        }
+    }
+
+    #[test]
+    fn exec_command_single_command_with_payload() {
+        let c = exec_command("echo hi", 30, std::path::Path::new("."));
+        let joined = format!("{c:?}");
+        assert!(joined.contains("echo hi"));
+        assert!(joined.contains("-c"));
     }
 }
