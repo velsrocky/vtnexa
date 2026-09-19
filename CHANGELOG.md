@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Fixed
+- **Long tool-heavy turns lost their task**: history trimming kept only the
+  system message + the last 20 messages, and loop-guard nudges are injected as
+  role "user" too - so trimming cut at a nudge and dropped the actual request.
+  Observed live: a 23-tool-call analysis turn reached the model reporting
+  "no actual task was given in the conversation - only loop-guard prompts".
+  `windowConvo` now always re-attaches this turn's request (the pristine
+  input's last user message) and never duplicates it.
 - **Reasoning models froze the transcript blank**: llama.cpp/Ollama/DeepSeek
   stream chain-of-thought in `delta.reasoning_content`, which the parser
   ignored — a 35B's thinking phase (often 30s+) rendered as nothing at all.

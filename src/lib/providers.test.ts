@@ -997,6 +997,52 @@ describe("chatWithTools question repair", () => {
   });
 });
 
+describe("windowConvo task anchor", () => {
+  it("keeps this turn's request when a tool-heavy turn exceeds the history window", async () => {
+    setInvokeImpl(async () => []);
+    const bodies: any[] = [];
+    stubFetch((_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      const n = bodies.length;
+      if (n <= 10) {
+        // Ten distinct rounds: 10 assistant + 10 tool messages appended, which
+        // pushes the user request out of the 14/20-message history window.
+        return json({
+          choices: [
+            {
+              message: {
+                content: "",
+                tool_calls: [
+                  {
+                    id: `c${n}`,
+                    type: "function",
+                    function: { name: "fs_list", arguments: JSON.stringify({ path: `/w/d${n}` }) },
+                  },
+                ],
+              },
+            },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+      }
+      return openAIText("final");
+    });
+    const res = await chatWithTools(
+      CFG,
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "TASK-ANCHOR: analyse the app" },
+      ],
+      () => {},
+    );
+    expect(res).toBe("final");
+    // The synthesis request must still carry the original task.
+    const last = bodies[bodies.length - 1];
+    const joined = last.messages.map((m: any) => m.content).join("\n");
+    expect(joined).toContain("TASK-ANCHOR: analyse the app");
+  });
+});
+
 describe("reasoning-content passthrough", () => {
   it("forwards streamed reasoning_content to onThinking without polluting the answer", async () => {
     setInvokeImpl(async () => []);

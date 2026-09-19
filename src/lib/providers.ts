@@ -1251,6 +1251,13 @@ export async function chatWithTools(
   // Keep sys + last 20, cutting only at user boundaries so tool
   // request/response pairs are never orphaned (orphans → provider 400).
   const HIST_KEEP = 20;
+  // This turn's operative request, taken from the pristine input BEFORE any
+  // trimming. Loop-guard nudges are injected as role "user" too, so a trimmed
+  // window can leave the model with nudges and no task at all - observed live:
+  // a 23-tool-call analysis turn reached synthesis reporting "no actual task
+  // was given in the conversation - only loop-guard prompts". windowConvo
+  // re-attaches this message whenever trimming would drop it.
+  const taskAnchor = [...messages].reverse().find((m) => m.role === "user");
   // Normalized message shared by all backends. Assistant entries may carry
   // tool_calls; tool results use role "tool" + tool_call_id.
   interface NormMsg {
@@ -1268,7 +1275,13 @@ export async function chatWithTools(
     const cut = tail.findIndex((m) => m.role === "user");
     if (cut > 0) tail = tail.slice(cut);
     else if (cut < 0) tail = tail.filter((m) => m.role !== "tool");
-    const out = (sys.role === "system" ? [sys, ...tail] : [...tail]) as T[];
+    const head = (sys.role === "system" ? [sys] : []) as T[];
+    // Task anchor: never let trimming drop this turn's request. Identity check
+    // is sound - convo is a shallow copy, so the untrimmed case is a no-op.
+    if (taskAnchor && !tail.includes(taskAnchor as unknown as T)) {
+      head.push(taskAnchor as unknown as T);
+    }
+    const out = [...head, ...tail];
     // Trimming may have dropped tool results while keeping their assistant
     // calls. A dangling tool_calls is a 400 on strict backends, so demote any
     // assistant call without a recorded result back to plain text.
