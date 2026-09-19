@@ -116,31 +116,6 @@ export async function gitInit(cwd: string): Promise<string> {
   return invoke<string>("git_init", { cwd });
 }
 
-export interface GitMergeOut {
-  output: string;
-}
-
-export async function gitMerge(cwd: string, branch: string): Promise<GitMergeOut> {
-  return invoke<GitMergeOut>("git_merge", { cwd, branch });
-}
-
-export interface GitWorktree {
-  path: string;
-  branch: string;
-}
-
-export async function gitWorktreeAdd(cwd: string, name: string): Promise<GitWorktree> {
-  return invoke<GitWorktree>("git_worktree_add", { cwd, name });
-}
-
-export async function gitWorktreeRemove(cwd: string, path: string): Promise<void> {
-  await invoke("git_worktree_remove", { cwd, path });
-}
-
-export async function gitWorktreeList(cwd: string): Promise<GitWorktree[]> {
-  return invoke<GitWorktree[]>("git_worktree_list", { cwd });
-}
-
 export interface ShellResult {
   stdout: string;
   stderr: string;
