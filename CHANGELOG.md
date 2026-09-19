@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Fixed
+- **Approved shell commands never ran**: the `shell_run` wrapper sent
+  snake_case `approval_token`/`approval_detail` keys, but Tauri v2 binds
+  command args camelCase — so every approved call (agent + manual shell tab)
+  died at the binding layer with "missing required key approvalToken" *after*
+  the dialog was approved. Wrapper fixed; wire-format regression tests added.
 - **Shell sandboxing actually works now**: firejail integration had invalid
   flags (`--profile=new`, `--nonewpriv`, `--rlimit-*`) and swallowed failures
   via `let _ =`, so every approved command ran in a doomed jail and then

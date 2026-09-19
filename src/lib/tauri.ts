@@ -123,12 +123,15 @@ export interface ShellResult {
 }
 
 export async function shellRun(cwd: string, cmd: string, approval?: Approval): Promise<ShellResult> {
-  // Note: shell_run takes plain strings (not null) — serde fills missing opts as "".
+  // Tauri v2 binds args camelCase: the Rust `approval_token`/`approval_detail`
+  // params MUST be sent as approvalToken/approvalDetail (snake_case here
+  // silently fails the whole command with "missing required key"). The
+  // backend takes plain Strings, so send "" (never null) when unapproved.
   return invoke<ShellResult>("shell_run", {
     cwd,
     cmd,
-    approval_token: approval?.token ?? "",
-    approval_detail: approval?.detail ?? "",
+    approvalToken: approval?.token ?? "",
+    approvalDetail: approval?.detail ?? "",
   });
 }
 
