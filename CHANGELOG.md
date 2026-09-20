@@ -3,12 +3,16 @@
 ## 0.4.1 - 2026-09-21
 
 ### Fixed
-- **Cross-platform release builds**: macOS failed to compile (`prctl` /
-  `PR_SET_PDEATHSIG` are Linux-only; the sidecar orphan-guard is now
-  `cfg(target_os = "linux")`, macOS keeps the explicit window-close kill).
-  Windows failed on POSIX-only asset scripts: `stage-sidecar`, `sync-monaco`
-  and `sync-skills` are now small Node scripts (pnpm symlink store flattened
-  with `dereference: true`).
+- **Cross-platform release builds**: the macOS build failed to compile
+  (`prctl`/`PR_SET_PDEATHSIG` are Linux-only - the sidecar orphan-guard is
+  now `cfg(target_os = "linux")`, macOS keeps the explicit window-close
+  kill). The Windows build failed twice: POSIX-only asset scripts
+  (`stage-sidecar`, `sync-monaco`, `sync-skills` are now small Node scripts,
+  pnpm's symlinked store flattened with `dereference`), then unresolved
+  crates (`reqwest`/`tokio`/`portable-pty` were declared under `cfg(unix)`
+  despite being cross-platform; the agent shell now runs `cmd.exe /C` on
+  Windows with the 30s cap enforced by the pure-Rust kill loop - coreutils
+  `timeout` and firejail are POSIX-only paths there).
 
 ## 0.4.0 - 2026-09-21
 
