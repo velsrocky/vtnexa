@@ -1,0 +1,131 @@
+// OS-level confinement for agent shell commands, using firejail when installed.
+//
+// Verified against firejail 0.9.72: workspace read/write and git work; /etc
+// (including /etc/shadow) and /usr are read-only; /tmp and /dev are private
+// per run; nested `timeout` works, so the 30s wall-clock cap applies inside
+// the jail exactly as it does on the direct path.
+//
+// When firejail is absent, exec_command returns the plain `timeout`-wrapped
+// command — the sandbox degrades to the screening-only path, never to a
+// second execution.
+
+use std::process::Command;
+
+const FIREJAIL_PATH: &str = "/usr/bin/firejail";
+
+/// Flags verified against firejail 0.9.72. Notably `--nonewprivs` (the
+/// `--nonewpriv` spelling is invalid) and no `--rlimit-*` (an unsupported or
+/// oversized rlimit makes firejail fail silently — `timeout` caps instead).
+const FLAGS: &[&str] = &[
+    "--quiet",
+    "--noprofile",
+    "--private-tmp",
+    "--private-dev",
+    "--nonewprivs",
+    "--read-only=/etc",
+    "--read-only=/usr",
+    "--read-only=/bin",
+    "--read-only=/sbin",
+    "--read-only=/lib",
+    "--read-only=/lib64",
+];
+
+pub(crate) fn firejail_available() -> bool {
+    std::path::Path::new(FIREJAIL_PATH).exists()
+}
+
+/// UI status chip: true when agent shell commands get firejail confinement,
+/// false when they degrade to the screening-only path.
+#[tauri::command]
+pub(crate) fn sandbox_status() -> bool {
+    firejail_available()
+}
+
+/// The single execution path for `sh -c cmd`: firejail-wrapped when firejail
+/// is installed, `timeout`-wrapped otherwise. Runs the payload exactly once;
+/// callers must not execute the command a second time without the sandbox.
+pub(crate) fn exec_command(cmd: &str, timeout_secs: u64, cwd: &std::path::Path) -> Command {
+    let secs = format!("{timeout_secs}s");
+    if firejail_available() {
+        let mut c = Command::new(FIREJAIL_PATH);
+        for flag in FLAGS {
+            c.arg(flag);
+        }
+        c.current_dir(cwd)
+            .arg("--")
+            .arg("timeout")
+            .arg(&secs)
+            .arg("sh")
+            .arg("-c")
+            .arg(cmd);
+        c
+    } else {
+        let mut c = Command::new("timeout");
+        c.arg(&secs).arg("sh").arg("-c").arg(cmd).current_dir(cwd);
+        c
+    }
+}
+
+/// Background-job execution path: same firejail confinement as
+/// `exec_command`, but WITHOUT the short `timeout` wrapper. Bg jobs are
+/// long-lived by design (installs, builds, test suites); the 30-minute
+/// `MAX_JOB_AGE` poll-kill in shell_jobs.rs is the time bound instead.
+/// Callers must use this (never bare `sh`) so bg jobs get identical
+/// OS-level confinement to foreground `shell_run`.
+pub(crate) fn exec_bg_command(cmd: &str, cwd: &std::path::Path) -> Command {
+    if firejail_available() {
+        let mut c = Command::new(FIREJAIL_PATH);
+        for flag in FLAGS {
+            c.arg(flag);
+        }
+        c.current_dir(cwd).arg("--").arg("sh").arg("-c").arg(cmd);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(cmd).current_dir(cwd);
+        c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_carry_no_known_invalid_options() {
+        for flag in FLAGS {
+            // All flags are of a verified, supported form: either an
+            // --option or --option=value, never a bare prefix of a real
+            // option (firejail rejects those hard, e.g. --nonewpriv).
+            assert!(flag.starts_with("--"));
+            assert_ne!(*flag, "--nonewpriv");
+            assert!(!flag.starts_with("--rlimit"));
+        }
+    }
+
+    #[test]
+    fn exec_command_single_command_with_payload() {
+        let c = exec_command("echo hi", 30, std::path::Path::new("."));
+        let joined = format!("{c:?}");
+        assert!(joined.contains("echo hi"));
+        assert!(joined.contains("-c"));
+    }
+
+    #[test]
+    fn bg_command_carries_payload_without_short_timeout() {
+        let c = exec_bg_command("sleep 60", std::path::Path::new("."));
+        let joined = format!("{c:?}");
+        assert!(joined.contains("sleep 60"));
+        assert!(joined.contains("-c"));
+        // Bg jobs are bounded by the 30min poll-kill, not `timeout 30s`.
+        assert!(!joined.contains("\"30s\""));
+    }
+
+    #[test]
+    fn sandbox_status_matches_binary_presence() {
+        assert_eq!(
+            sandbox_status(),
+            std::path::Path::new(FIREJAIL_PATH).exists()
+        );
+    }
+}

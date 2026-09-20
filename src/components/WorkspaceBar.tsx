@@ -1,11 +1,9 @@
-export default function WorkspaceBar({ workspaceRoot, setWorkspaceRoot, changeWorkspace, browseWorkspace, cwd, setCwd }: {
-  workspaceRoot: string;
-  setWorkspaceRoot: (v: string) => void;
-  changeWorkspace: (v: string) => void;
-  browseWorkspace: () => void;
-  cwd: string;
-  setCwd: (v: string) => void;
-}) {
+import { memo } from "react";
+import { useWorkspaceBar } from "../context/AppContext";
+
+function WorkspaceBarInner() {
+  const { workspaceRoot, setWorkspaceRoot, changeWorkspace, browseWorkspace, cwd, setCwd } =
+    useWorkspaceBar();
   return (
     <div className="configbar">
       <span className="muted small">workspace</span>
@@ -24,3 +22,5 @@ export default function WorkspaceBar({ workspaceRoot, setWorkspaceRoot, changeWo
     </div>
   );
 }
+
+export default memo(WorkspaceBarInner);

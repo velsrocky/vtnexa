@@ -1,13 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { loader } from "@monaco-editor/react";
-// Monaco served from local static files (public/vs, copied from
-// node_modules/monaco-editor/min/vs by the predev/prebuild script) instead of
-// the default jsdelivr CDN. Required for offline use and the Tauri CSP
-// (script-src 'self', no CDN host). Workers load same-origin via getWorkerUrl.
-loader.config({ paths: { vs: "/vs" } });
+if (import.meta.env.MODE === "development") {
+  loader.config({ paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.56.0/min/vs" } });
+} else {
+  loader.config({ paths: { vs: "/vs" } });
+}
 import "./App.css";
 import type { CenterTab, SideTab } from "./types";
-import ApprovalModal from "./components/ApprovalModal";
 import RoutinesModal from "./components/RoutinesModal";
 import McpModal from "./components/McpModal";
 import GitPane from "./components/GitPane";
@@ -15,12 +14,12 @@ import FileTree from "./components/FileTree";
 import ChatPane from "./components/ChatPane";
 import EditorPane from "./components/EditorPane";
 import TopBar from "./components/TopBar";
+import SettingsModal from "./components/SettingsModal";
 import ProviderBar from "./components/ProviderBar";
 import WorkspaceBar from "./components/WorkspaceBar";
 import SessionBar from "./components/SessionBar";
 import { invoke } from "@tauri-apps/api/core";
-import { baseName } from "./lib/utils";
-import { loadFeedback, rateMessage, ratingMap } from "./lib/feedback";
+import { baseName, didExhaustBudget } from "./lib/utils";
 import { useGit } from "./hooks/useGit";
 import { useWorkspaceState, windowLabel, ptyId } from "./hooks/useWorkspaceState";
 import { useAgentTurn } from "./hooks/useAgentTurn";
@@ -36,14 +35,19 @@ import { useWorkspace } from "./hooks/useWorkspace";
 import { useInit } from "./hooks/useInit";
 import { useRoutines } from "./hooks/useRoutines";
 import { useMcp } from "./hooks/useMcp";
+import { useAutoApprove } from "./hooks/useAutoApprove";
+import { useSandboxStatus } from "./hooks/useSandboxStatus";
+import { AppContextProvider, type AppContextValue } from "./context/AppContext";
 
 // One OS window = one independent VTNexa instance. Multiple windows are
 // siblings: separate workspace roots (enforced per-label in the Rust
 // backend), separate PTYs, separate sessions, separate everything.
 export default function App() {
   const [auditNote, setAuditNote] = useState("");
-  const [ratings, setRatings] = useState<Record<string, 1 | -1>>(() => ratingMap(loadFeedback()));
-  const { themeId, setThemeId, theme, leftW, rightW, onResizerDown } = usePrefs();
+  const { themeId, setThemeId, theme, leftW, rightW, onResizerDown, skillH, onSkillResizerDown } = usePrefs();
+  const [showSettings, setShowSettings] = useState(false);
+  const { autoApproveWorkspace, setAutoApproveWorkspace } = useAutoApprove();
+  const sandboxOk = useSandboxStatus();
 
   const {
     ws,
@@ -53,9 +57,6 @@ export default function App() {
     turnAbort,
     stopTurnIdRef,
     streamRaf,
-    pendingTools,
-    setPendingTools,
-    resolveHead,
     updateWs,
     logAudit,
     stopTurn,
@@ -254,7 +255,6 @@ export default function App() {
     setBusy,
     logAudit,
     rememberProvider,
-    setPendingTools,
     setCenterTab,
     setPadText,
     setPlanText,
@@ -264,6 +264,7 @@ export default function App() {
     flushStreamFrame,
     planMode: ws.planMode,
     pushUndo,
+    autoApproveWorkspace,
   });
 
   const {
@@ -351,7 +352,7 @@ export default function App() {
   useEffect(() => {
     if (centerTab !== "git") return;
     refreshGit();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshGit is render-scoped (new identity per render); this effect is event-like (tab/cwd change), not data-driven
   }, [centerTab, ws.cwd]);
 
   async function sendChat() {
@@ -369,6 +370,16 @@ export default function App() {
       return;
     }
     runAgentTurn(await expandSkill(text));
+  }
+
+  // Continue a turn that died of tool budget: fresh rounds over the full
+  // history (which already holds every tool result). Transparent user
+  // message, not hidden state.
+  function continueTurn() {
+    if (busy) return;
+    runAgentTurn(
+      "▶ Continue the task from the tool results above. Do not repeat completed steps; pick up exactly where you stopped. If you are done, say what was accomplished instead of calling more tools.",
+    );
   }
 
   // Ctrl/Cmd+Shift+N: open an independent window (same as the TopBar button;
@@ -402,8 +413,87 @@ export default function App() {
       clearInterval(interval);
       clearTimeout(once);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runRoutine is render-scoped; re-subscribing the 30s interval on every render would reset the timer and starve routines
   }, [routines, busy, workspaceRoot, padText, planText, memoryText]);
+
+  // Bar slices for AppContext (phase 1 of the prop-drilling cleanup): the
+  // same values previously threaded as ~30 individual props. Memoized so the
+  // bars don't re-render on unrelated state (e.g. stream tokens in ws).
+  const barCtx: AppContextValue = useMemo(
+    () => ({
+      top: {
+        workspaceLabel: baseName(workspaceRoot),
+        windowLabel,
+        scheduledCount: routines.filter((r) => r.enabled && r.everyMs > 0).length,
+        mcpOn,
+        mcpTools,
+        sandboxOk,
+        themeId,
+        onOpenRoutines: () => setShowRoutines(true),
+        onOpenMcp: () => setShowMcp(true),
+        onOpenSettings: () => setShowSettings(true),
+        onThemeChange: setThemeId,
+      },
+      provider: {
+        windowLabel,
+        editCfg,
+        provHist,
+        provModels,
+        modelsNote,
+        keychainOk,
+        setEditCfg,
+        refreshModels,
+      },
+      workspace: {
+        workspaceRoot,
+        setWorkspaceRoot,
+        changeWorkspace,
+        browseWorkspace,
+        cwd,
+        setCwd,
+      },
+      session: {
+        sessions,
+        currentId: sessionId,
+        currentTitle: sessionTitle,
+        busy,
+        onNew: () => void newSession(),
+        onResume: (id) => void resumeSession(id),
+        onDelete: (id) => void removeSession(id),
+        onRefresh: () => void refreshSessions(),
+      },
+    }),
+    // useState setters (setShowMcp, setShowRoutines, setThemeId) are stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      workspaceRoot,
+      routines,
+      mcpOn,
+      mcpTools,
+      sandboxOk,
+      themeId,
+      editCfg,
+      provHist,
+      provModels,
+      modelsNote,
+      keychainOk,
+      setEditCfg,
+      refreshModels,
+      setWorkspaceRoot,
+      changeWorkspace,
+      browseWorkspace,
+      cwd,
+      setCwd,
+      sessions,
+      sessionId,
+      sessionTitle,
+      busy,
+      newSession,
+      resumeSession,
+      removeSession,
+      refreshSessions,
+    ],
+  );
 
   return (
     <div className="shell">
@@ -435,46 +525,19 @@ export default function App() {
           onClose={() => setShowMcp(false)}
         />
       )}
-      <ApprovalModal queue={pendingTools} onResolve={resolveHead} />
-      <TopBar
-        workspaceLabel={baseName(workspaceRoot)}
-        windowLabel={windowLabel}
-        scheduledCount={routines.filter((r) => r.enabled && r.everyMs > 0).length}
-        mcpOn={mcpOn}
-        mcpTools={mcpTools}
-        themeId={themeId}
-        onOpenRoutines={() => setShowRoutines(true)}
-        onOpenMcp={() => setShowMcp(true)}
-        onThemeChange={setThemeId}
-      />
-      <ProviderBar
-        windowLabel={windowLabel}
-        editCfg={editCfg}
-        provHist={provHist}
-        provModels={provModels}
-        modelsNote={modelsNote}
-        keychainOk={keychainOk}
-        setEditCfg={setEditCfg}
-        refreshModels={refreshModels}
-      />
-      <WorkspaceBar
-        workspaceRoot={workspaceRoot}
-        setWorkspaceRoot={setWorkspaceRoot}
-        changeWorkspace={changeWorkspace}
-        browseWorkspace={browseWorkspace}
-        cwd={cwd}
-        setCwd={setCwd}
-      />
-      <SessionBar
-        sessions={sessions}
-        currentId={sessionId}
-        currentTitle={sessionTitle}
-        busy={busy}
-        onNew={() => void newSession()}
-        onResume={(id) => void resumeSession(id)}
-        onDelete={(id) => void removeSession(id)}
-        onRefresh={() => void refreshSessions()}
-      />
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          autoApproveWorkspace={autoApproveWorkspace}
+          onAutoApproveChange={setAutoApproveWorkspace}
+        />
+      )}
+      <AppContextProvider value={barCtx}>
+        <TopBar />
+        <ProviderBar />
+        <WorkspaceBar />
+        <SessionBar />
+      </AppContextProvider>
       <div className="main">
         <FileTree
           cwd={cwd}
@@ -485,6 +548,8 @@ export default function App() {
           skills={skills}
           conventionsName={conventionsName}
           width={leftW}
+          skillH={skillH}
+          onSkillResizerDown={onSkillResizerDown}
           setCreating={setCreating}
           setRenaming={setRenaming}
           setCwd={setCwd}
@@ -575,29 +640,8 @@ export default function App() {
           stopTurn={stopTurn}
           planMode={ws.planMode}
           onTogglePlan={() => updateWs((w) => ({ ...w, planMode: !w.planMode }))}
-          pendingToolsCount={pendingTools.length}
-          ratings={ratings}
-          onRateMessage={(messageId, rating) => {
-            const msgs = ws.messages;
-            const idx = msgs.findIndex((m) => m.id === messageId);
-            const answer = idx >= 0 ? msgs[idx].content : "";
-            let prompt = "";
-            for (let i = idx - 1; i >= 0; i--) {
-              if (msgs[i].role === "user") {
-                prompt = msgs[i].content;
-                break;
-              }
-            }
-            const next = rateMessage({
-              messageId,
-              sessionId,
-              model: ws.provider.model,
-              rating,
-              prompt,
-              answer,
-            });
-            setRatings(ratingMap(next));
-          }}
+          showContinue={didExhaustBudget(ws.messages)}
+          onContinue={continueTurn}
           padText={padText}
           setPadText={setPadText}
           planText={planText}

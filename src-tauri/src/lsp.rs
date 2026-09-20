@@ -37,15 +37,42 @@ pub(crate) fn markers_for(provider: LspProvider) -> &'static [&'static str] {
 }
 
 /// Walk up from `file` (max 8 levels) for the nearest dir containing one of
-/// `markers`. Returns None when the file floats outside any project.
+/// `markers`. Clamped to `workspace_root` when provided: never escapes the
+/// sandbox even if markers are missing (a `Cargo.toml` 5 levels up outside
+/// the workspace must not redirect `cargo check` there).
+/// Returns None when the file floats outside any project.
 pub(crate) fn find_project_root(
     file: &std::path::Path,
     markers: &[&str],
+    workspace_root: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
+    let ws_canon = workspace_root.and_then(|w| w.canonicalize().ok());
     let mut dir = file.parent()?.to_path_buf();
     for _ in 0..8 {
+        // Clamp: stop when we leave the workspace.
+        if let Some(ws) = &ws_canon {
+            if let Ok(canon) = dir.canonicalize() {
+                if !canon.starts_with(ws) {
+                    break;
+                }
+            } else if let Some(wroot) = workspace_root {
+                // Non-existing ancestor: lexical check (no unwrap — ws_canon
+                // being Some implies workspace_root was Some, but don't rely
+                // on that coupling).
+                if !dir.starts_with(wroot) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
         if markers.iter().any(|m| dir.join(m).is_file()) {
             return Some(dir);
+        }
+        if let Some(ws) = workspace_root {
+            if dir == ws {
+                break;
+            }
         }
         if !dir.pop() {
             break;
@@ -230,7 +257,10 @@ pub(crate) fn render_result(
 pub(crate) fn lsp_diagnostics(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::WorkspaceRoots>,
+    approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     path: String,
+    approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<String, String> {
     let file = crate::checked_path(&state, window.label(), path, "lsp_diagnostics.path")?;
     if !file.is_file() {
@@ -247,11 +277,24 @@ pub(crate) fn lsp_diagnostics(
             ext
         )
     })?;
+    // Exec gate: `cargo check` runs build.rs, `npx tsc` runs workspace code.
+    // Python py_compile is pure — auto-approved. Everything else needs the
+    // same approval token as shell (user saw what will execute).
+    if provider != LspProvider::Python {
+        crate::approvals::approval_consume(
+            &approvals,
+            window.label(),
+            "lsp_diagnostics",
+            &approval_detail,
+            &approval_token,
+        )?;
+    }
+    let ws_root = crate::root_snapshot(&state, window.label());
     let (cwd, filter_root) = if provider == LspProvider::Python {
         let parent = file.parent().unwrap_or(&file).to_path_buf();
         (parent.clone(), parent)
     } else {
-        match find_project_root(&file, markers_for(provider)) {
+        match find_project_root(&file, markers_for(provider), Some(&ws_root)) {
             Some(root) => (root.clone(), root),
             None => {
                 let marker = markers_for(provider).join(" or ");
@@ -307,9 +350,20 @@ mod tests {
         std::fs::write(base.join("tsconfig.json"), b"{}").unwrap();
         let file = deep.join("x.ts");
         std::fs::write(&file, b"").unwrap();
-        assert_eq!(find_project_root(&file, &["tsconfig.json"]).unwrap(), base);
-        assert!(find_project_root(&file, &["Cargo.toml"]).is_none());
+        assert_eq!(
+            find_project_root(&file, &["tsconfig.json"], Some(&base)).unwrap(),
+            base
+        );
+        assert!(find_project_root(&file, &["Cargo.toml"], Some(&base)).is_none());
+        // Clamp: marker outside the workspace must not be found.
+        let outside = std::env::temp_dir().join(format!("vtnexa-lsp-out-{}", tag));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("tsconfig.json"), b"{}").unwrap();
+        // Simulate file inside ws but marker only outside: walk must stop at ws.
+        assert!(find_project_root(&file, &["nope.json"], Some(&base)).is_none());
         let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

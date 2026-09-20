@@ -202,7 +202,7 @@ export function useSessions(opts: {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [opts.ws, opts.workspaceRoot, currentId, persistCurrent]);
 
   return {

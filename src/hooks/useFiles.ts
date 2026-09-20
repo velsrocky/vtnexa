@@ -1,7 +1,9 @@
 import { useState } from "react";
 import type { UndoEntry, Workspace } from "../types";
 import { fsCreate, fsDelete, fsRead, fsRename } from "../lib/tauri";
+import { claimFor } from "../lib/approval";
 import { baseName, dirName } from "../lib/utils";
+import { useConfirm } from "../context/ConfirmContext";
 
 export interface CreatingState {
   isDir: boolean;
@@ -27,6 +29,7 @@ export function useFiles(opts: {
 }) {
   const [creating, setCreating] = useState<CreatingState | null>(null);
   const [renaming, setRenaming] = useState<RenamingState | null>(null);
+  const confirm = useConfirm();
 
   async function createEntry() {
     if (!creating) return;
@@ -57,7 +60,7 @@ export function useFiles(opts: {
     }
     const target = dirName(renaming.path) + "/" + name;
     try {
-      await fsRename(renaming.path, target);
+      await fsRename(renaming.path, target, await claimFor("fs_rename", { old_path: renaming.path, new_path: target }));
       opts.pushUndo({ kind: "rename", oldPath: renaming.path, newPath: target });
       opts.retargetTabs(renaming.path, target);
       setRenaming(null);
@@ -68,7 +71,7 @@ export function useFiles(opts: {
   }
 
   async function doDelete(path: string, isDir: boolean) {
-    if (!window.confirm(`Permanently delete ${baseName(path)}${isDir ? " and everything inside it" : ""}?`)) return;
+    if (!(await confirm(`Permanently delete ${baseName(path)}${isDir ? " and everything inside it" : ""}?`))) return;
     // Snapshot file content for /undo (directory trees are out of scope).
     let content: string | null = null;
     if (!isDir) {
@@ -79,7 +82,7 @@ export function useFiles(opts: {
       }
     }
     try {
-      await fsDelete(path, isDir);
+      await fsDelete(path, isDir, await claimFor("fs_delete", { path }));
       if (content !== null) opts.pushUndo({ kind: "delete", path, content });
       opts.dropTabsUnder(path);
       opts.refreshFiles(opts.cwd);

@@ -1,5 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { Approval } from "./approval";
 import type { FileEntry } from "../types";
+
+/** True inside the desktop app window. Plain browser tabs (localhost:1420
+ *  opened directly, preview builds) have no Tauri bridge — every invoke
+ *  fails there with `Cannot read properties of undefined (reading 'invoke')`,
+ *  so callers needing native UI (folder picker) must check first and say so. */
+export function isTauri(): boolean {
+  try {
+    return (
+      typeof window !== "undefined" && !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+    );
+  } catch {
+    return false;
+  }
+}
+
+function approvalArgs(a?: Approval): { approvalToken: string | null; approvalDetail: string | null } {
+  return { approvalToken: a?.token ?? null, approvalDetail: a?.detail ?? null };
+}
 
 export async function fsList(path: string): Promise<FileEntry[]> {
   return invoke<FileEntry[]>("fs_list", { path });
@@ -9,20 +28,28 @@ export async function fsRead(path: string): Promise<string> {
   return invoke<string>("fs_read", { path });
 }
 
-export async function fsWrite(path: string, content: string): Promise<void> {
-  return invoke<void>("fs_write", { path, content });
+export async function fsWrite(path: string, content: string, approval?: Approval): Promise<void> {
+  return invoke<void>("fs_write", { path, content, ...approvalArgs(approval) });
 }
 
 export async function fsCreate(path: string, isDir?: boolean): Promise<string> {
   return invoke<string>("fs_create", { path, is_dir: isDir ?? false });
 }
 
-export async function fsRename(oldPath: string, newPath: string): Promise<string> {
-  return invoke<string>("fs_rename", { old_path: oldPath, new_path: newPath });
+export async function fsRename(oldPath: string, newPath: string, approval?: Approval): Promise<string> {
+  return invoke<string>("fs_rename", {
+    old_path: oldPath,
+    new_path: newPath,
+    ...approvalArgs(approval),
+  });
 }
 
-export async function fsDelete(path: string, recursive?: boolean): Promise<void> {
-  return invoke<void>("fs_delete", { path, recursive: recursive ?? false });
+export async function fsDelete(path: string, recursive?: boolean, approval?: Approval): Promise<void> {
+  return invoke<void>("fs_delete", {
+    path,
+    recursive: recursive ?? false,
+    ...approvalArgs(approval),
+  });
 }
 
 export interface SearchMatch {
@@ -81,8 +108,18 @@ export async function gitDiff(cwd: string, path?: string, staged?: boolean): Pro
   return invoke<string>("git_diff", { cwd, path: path ?? null, staged: staged ?? false });
 }
 
-export async function gitCommit(cwd: string, message: string, files?: string[]): Promise<GitCommitOut> {
-  return invoke<GitCommitOut>("git_commit", { cwd, message, files: files ?? null });
+export async function gitCommit(
+  cwd: string,
+  message: string,
+  files?: string[],
+  approval?: Approval,
+): Promise<GitCommitOut> {
+  return invoke<GitCommitOut>("git_commit", {
+    cwd,
+    message,
+    files: files ?? null,
+    ...approvalArgs(approval),
+  });
 }
 
 export async function gitLog(cwd: string, limit?: number): Promise<GitLogEntry[]> {
@@ -93,43 +130,53 @@ export async function gitInit(cwd: string): Promise<string> {
   return invoke<string>("git_init", { cwd });
 }
 
-export interface GitMergeOut {
-  output: string;
-}
-
-export async function gitMerge(cwd: string, branch: string): Promise<GitMergeOut> {
-  return invoke<GitMergeOut>("git_merge", { cwd, branch });
-}
-
-export interface GitWorktree {
-  path: string;
-  branch: string;
-}
-
-export async function gitWorktreeAdd(cwd: string, name: string): Promise<GitWorktree> {
-  return invoke<GitWorktree>("git_worktree_add", { cwd, name });
-}
-
-export async function gitWorktreeRemove(cwd: string, path: string): Promise<void> {
-  await invoke("git_worktree_remove", { cwd, path });
-}
-
-export async function gitWorktreeList(cwd: string): Promise<GitWorktree[]> {
-  return invoke<GitWorktree[]>("git_worktree_list", { cwd });
-}
-
 export interface ShellResult {
   stdout: string;
   stderr: string;
   code: number;
 }
 
-export async function shellRun(cwd: string, cmd: string): Promise<ShellResult> {
-  return invoke<ShellResult>("shell_run", { cwd, cmd });
+export async function shellRun(cwd: string, cmd: string, approval?: Approval): Promise<ShellResult> {
+  // Tauri v2 binds args camelCase: the Rust `approval_token`/`approval_detail`
+  // params MUST be sent as approvalToken/approvalDetail (snake_case here
+  // silently fails the whole command with "missing required key"). The
+  // backend takes plain Strings, so send "" (never null) when unapproved.
+  return invoke<ShellResult>("shell_run", {
+    cwd,
+    cmd,
+    approvalToken: approval?.token ?? "",
+    approvalDetail: approval?.detail ?? "",
+  });
 }
 
-export async function lspDiagnostics(path: string): Promise<string> {
-  return invoke<string>("lsp_diagnostics", { path });
+export interface ShellPoll {
+  status: string;
+  code: number | null;
+  stdout_tail: string;
+  stderr_tail: string;
+  elapsed_ms: number;
+}
+
+/** True when firejail is installed and agent shell commands get OS-level
+ *  confinement; false means they run screening-only (top bar shows a chip). */
+export async function sandboxStatus(): Promise<boolean> {
+  return invoke<boolean>("sandbox_status");
+}
+
+export async function shellBg(cwd: string, cmd: string, approval?: Approval): Promise<string> {
+  return invoke<string>("shell_bg", { cwd, cmd, ...approvalArgs(approval) });
+}
+
+export async function shellPoll(id: string): Promise<ShellPoll> {
+  return invoke<ShellPoll>("shell_poll", { id });
+}
+
+export async function shellKill(id: string, approval?: Approval): Promise<string> {
+  return invoke<string>("shell_kill", { id, ...approvalArgs(approval) });
+}
+
+export async function lspDiagnostics(path: string, approval?: Approval): Promise<string> {
+  return invoke<string>("lsp_diagnostics", { path, ...approvalArgs(approval) });
 }
 
 export interface LspOpArgs {
@@ -138,6 +185,7 @@ export interface LspOpArgs {
   line?: number;
   character?: number;
   symbol?: string;
+  approval?: Approval;
 }
 
 export async function lspOp(args: LspOpArgs): Promise<string> {
@@ -147,6 +195,7 @@ export async function lspOp(args: LspOpArgs): Promise<string> {
     line: args.line ?? null,
     character: args.character ?? null,
     symbol: args.symbol ?? null,
+    ...approvalArgs(args.approval),
   });
 }
 
@@ -154,8 +203,8 @@ export async function workspaceRoot(): Promise<string> {
   return invoke<string>("workspace_root");
 }
 
-export async function setWorkspaceRoot(path: string): Promise<string> {
-  return invoke<string>("set_workspace_root", { path });
+export async function setWorkspaceRoot(path: string, confirmDangerous?: boolean): Promise<string> {
+  return invoke<string>("set_workspace_root", { path, confirm_dangerous: confirmDangerous ?? null });
 }
 
 export type NexaKind = "pad" | "plan" | "memory";

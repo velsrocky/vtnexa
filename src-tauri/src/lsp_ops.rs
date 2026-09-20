@@ -59,8 +59,13 @@ pub(crate) fn language_id(lang: LspLang, ext: &str) -> &'static str {
 }
 
 /// Server command for the language. TypeScript prefers the project's own
-/// install (node_modules/.bin walking up), else PATH. Pure — unit tested.
-pub(crate) fn server_command(lang: LspLang, file: &std::path::Path) -> (String, Vec<String>) {
+/// install (node_modules/.bin walking up, clamped to workspace), else PATH.
+/// Pure — unit tested.
+pub(crate) fn server_command(
+    lang: LspLang,
+    file: &std::path::Path,
+    workspace_root: Option<&std::path::Path>,
+) -> (String, Vec<String>) {
     match lang {
         LspLang::Rust => ("rust-analyzer".to_string(), vec![]),
         LspLang::Ts => {
@@ -70,6 +75,12 @@ pub(crate) fn server_command(lang: LspLang, file: &std::path::Path) -> (String, 
                     Some(d) => d,
                     None => break,
                 };
+                // Clamp: never walk above the workspace looking for binaries.
+                if let Some(ws) = workspace_root {
+                    if !d.starts_with(ws) {
+                        break;
+                    }
+                }
                 let cand = d
                     .join("node_modules")
                     .join(".bin")
@@ -80,6 +91,12 @@ pub(crate) fn server_command(lang: LspLang, file: &std::path::Path) -> (String, 
                         vec!["--stdio".to_string()],
                     );
                 }
+                // Stop at the workspace root itself.
+                if let Some(ws) = workspace_root {
+                    if d == ws {
+                        break;
+                    }
+                }
                 dir = d.parent().map(|p| p.to_path_buf());
             }
             (
@@ -88,6 +105,23 @@ pub(crate) fn server_command(lang: LspLang, file: &std::path::Path) -> (String, 
             )
         }
     }
+}
+
+/// True when the resolved server binary lives inside the workspace (attacker-
+/// plantable). Such runs need approval even though the op is "read-only".
+pub(crate) fn server_is_workspace_local(program: &str, workspace_root: &std::path::Path) -> bool {
+    let p = std::path::Path::new(program);
+    if !p.is_absolute() {
+        return false;
+    }
+    // Canonicalize when possible; lexical fallback otherwise.
+    if let Ok(canon) = p.canonicalize() {
+        let ws_canon = workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_root.to_path_buf());
+        return canon.starts_with(&ws_canon);
+    }
+    p.starts_with(workspace_root)
 }
 
 pub(crate) fn install_hint(lang: LspLang) -> &'static str {
@@ -494,14 +528,18 @@ pub(crate) fn run_lsp_op(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lsp_op(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::WorkspaceRoots>,
+    approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
     op: String,
     path: String,
     line: Option<i64>,
     character: Option<i64>,
     symbol: Option<String>,
+    approval_token: Option<String>,
+    approval_detail: Option<String>,
 ) -> Result<String, String> {
     let file = crate::checked_path(&state, window.label(), path, "lsp.path")?;
     if !file.is_file() {
@@ -532,16 +570,29 @@ pub(crate) fn lsp_op(
         LspLang::Ts => &["tsconfig.json"],
         LspLang::Rust => &["Cargo.toml"],
     };
-    let project_root = crate::lsp::find_project_root(&file, markers).ok_or_else(|| {
-        format!(
-            "lsp: no project marker ({}) above {}",
-            markers.join(" or "),
-            file.parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default()
-        )
-    })?;
-    let (program, args) = server_command(lang, &file);
+    let ws_root = crate::root_snapshot(&state, window.label());
+    let project_root =
+        crate::lsp::find_project_root(&file, markers, Some(&ws_root)).ok_or_else(|| {
+            format!(
+                "lsp: no project marker ({}) above {}",
+                markers.join(" or "),
+                file.parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            )
+        })?;
+    let (program, args) = server_command(lang, &file, Some(&ws_root));
+    // Exec gate: workspace-local language servers are attacker-plantable.
+    // PATH-installed servers stay auto-approved; local .bin needs a token.
+    if server_is_workspace_local(&program, &ws_root) {
+        crate::approvals::approval_consume(
+            &approvals,
+            window.label(),
+            "lsp_op",
+            &approval_detail,
+            &approval_token,
+        )?;
+    }
     let disk_text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
     if disk_text.len() > 1024 * 1024 {
         return Err("lsp: file too large (1MB max)".to_string());
@@ -610,12 +661,19 @@ mod tests {
         std::fs::write(bin.join("typescript-language-server"), b"x").unwrap();
         let file = base.join("src").join("a.ts");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        let (prog, args) = server_command(LspLang::Ts, &file);
+        let (prog, args) = server_command(LspLang::Ts, &file, Some(&base));
         assert!(prog.ends_with("typescript-language-server"), "got {}", prog);
         assert_eq!(args, vec!["--stdio"]);
-        let (prog, _) = server_command(LspLang::Rust, &file);
+        assert!(server_is_workspace_local(&prog, &base));
+        let (prog, _) = server_command(LspLang::Rust, &file, Some(&base));
         assert_eq!(prog, "rust-analyzer");
+        // Clamp: binary above the workspace is ignored.
+        let outside = std::env::temp_dir().join(format!("vtnexa-lspops-out-{}", tag));
+        let _ = std::fs::remove_dir_all(&outside);
+        let (prog2, _) = server_command(LspLang::Ts, &outside.join("a.ts"), Some(&base));
+        assert_eq!(prog2, "typescript-language-server");
         let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

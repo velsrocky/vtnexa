@@ -42,7 +42,7 @@ export function useRoutines(opts: {
         if (Array.isArray(data.routines)) {
           const now = Date.now();
           const valid: Routine[] = [];
-          for (const r of data.routines as any[]) {
+          for (const r of data.routines as Record<string, unknown>[]) {
             if (!r || typeof r.name !== "string" || typeof r.prompt !== "string" || !r.prompt.trim()) continue;
             const em = Number(r.everyMs) || 0;
             valid.push({

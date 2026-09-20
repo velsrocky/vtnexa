@@ -70,6 +70,7 @@ describe("useEditor composition", () => {
     setInvokeImpl(async (cmd) => {
       if (cmd === "fs_read") return "old";
       if (cmd === "fs_write") return {};
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     const h = setup({

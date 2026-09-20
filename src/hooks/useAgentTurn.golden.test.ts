@@ -70,6 +70,8 @@ function setupGolden() {
   const invoked: string[] = [];
   setInvokeImpl(async (cmd) => {
     invoked.push(cmd);
+    // Native dialog confirmed (mocked): issue a token like the backend would.
+    if (cmd === "approval_issue" || cmd === "approval_claim") return "tok-test";
     if (cmd === "fs_read") return "old content";
     if (cmd === "shell_run") return { stdout: "FFmpeg is installed.\n", stderr: "", code: 0 };
     return {};
@@ -94,11 +96,8 @@ function setupGolden() {
       setBusy: () => {},
       logAudit: (e) => audits.push(e),
       rememberProvider: () => {},
-      // Golden flow approves every gated tool, like the transcript's user.
-      setPendingTools: ((u: any) => {
-        const q = typeof u === "function" ? u([]) : u;
-        q.forEach((p: any) => p.resolve(true));
-      }) as any,
+      // Golden flow approves every gated tool: the mocked approval_issue
+      // above returns a token, like a confirmed native dialog.
       setCenterTab: ((t: string) => centerTabs.push(t)) as any,
       setPadText: vi.fn(),
       setPlanText: vi.fn(),

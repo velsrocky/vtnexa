@@ -91,44 +91,10 @@ describe("useWorkspaceState turn control", () => {
   });
 });
 
-describe("useWorkspaceState approval queue", () => {
-  it("resolveHead settles the head tool", () => {
+describe("useWorkspaceState approvals", () => {
+  it("has no page-DOM approval queue (native OS dialogs own approvals)", () => {
     const { result } = renderHook(() => useWorkspaceState());
-    const resolve = vi.fn();
-    act(() => {
-      result.current.setPendingTools([{ tool: "shell_run", args: { cmd: "ls" }, resolve }]);
-    });
-    act(() => {
-      result.current.resolveHead(true);
-    });
-    expect(resolve).toHaveBeenCalledWith(true);
-    expect(result.current.pendingTools).toHaveLength(0);
-  });
-
-  it("stopTurn releases every waiting approval", () => {
-    const { result } = renderHook(() => useWorkspaceState());
-    const r1 = vi.fn();
-    const r2 = vi.fn();
-    act(() => {
-      result.current.setPendingTools([
-        { tool: "shell_run", args: {}, resolve: r1 },
-        { tool: "fs_delete", args: {}, resolve: r2 },
-      ]);
-    });
-    act(() => {
-      result.current.stopTurn("test:ws");
-    });
-    expect(r1).toHaveBeenCalledWith(false);
-    expect(r2).toHaveBeenCalledWith(false);
-    expect(result.current.pendingTools).toHaveLength(0);
-  });
-
-  it("resolveHead on an empty queue is a no-op", () => {
-    const { result } = renderHook(() => useWorkspaceState());
-    expect(() => {
-      act(() => {
-        result.current.resolveHead(false);
-      });
-    }).not.toThrow();
+    expect((result.current as Record<string, unknown>).pendingTools).toBeUndefined();
+    expect((result.current as Record<string, unknown>).resolveHead).toBeUndefined();
   });
 });

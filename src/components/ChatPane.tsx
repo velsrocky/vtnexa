@@ -1,9 +1,100 @@
+import { Fragment, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
-import type { SkillInfo, SideTab, Workspace } from "../types";
+import type { SkillInfo, SideTab, ToolEvent, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
 import { useInputHistory } from "../hooks/useInputHistory";
+import { renderChatMarkdown } from "../lib/chatMarkdown";
+import { toolArgsSummary } from "../lib/toolCard";
 
-export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, pendingToolsCount, ratings, onRateMessage }: {
+/** Assistant replies render as sanitized markdown: the finalized message
+ *  directly, the in-flight one through StreamingBody (throttled, with an
+ *  auto-closed code fence so partial markup never shows raw backticks) plus a
+ *  muted reasoning tail. */
+/** Compact, expandable trail of the tool calls behind an assistant reply. */
+function ToolCards({ tools }: { tools: ToolEvent[] }) {
+  const [open, setOpen] = useState(false);
+  const okCount = tools.filter((t) => t.ok).length;
+  const approved = tools.filter((t) => t.decision === "approved").length;
+  const rejected = tools.filter((t) => t.decision === "rejected").length;
+  const totalMs = tools.reduce((s, t) => s + t.ms, 0);
+  return (
+    <div className="tool-cards">
+      <button className="tool-cards-toggle" onClick={() => setOpen(!open)}>
+        <span className={`tri ${open ? "open" : ""}`}>▶</span>
+        {tools.length} tool call{tools.length === 1 ? "" : "s"}
+        {rejected > 0 ? ` · ${rejected} rejected` : ` · ${okCount}/${tools.length} ok`}
+        {approved > 0 ? ` · ${approved} approved` : ""}
+        {totalMs >= 1000 ? ` · ${(totalMs / 1000).toFixed(1)}s` : ""}
+      </button>
+      {open && (
+        <div className="tool-cards-list">
+          {tools.map((t, i) => (
+            <div key={i} className="tool-card">
+              <span className={`dot ${t.ok ? "ok" : "err"}`} />
+              <b>{t.tool}</b>
+              <span className="tool-card-args">{toolArgsSummary(t.tool, t.args)}</span>
+              {t.decision !== "auto" && <span className={`badge ${t.decision}`}>{t.decision}</span>}
+              <span className="tool-card-ms">{t.ms >= 1000 ? `${(t.ms / 1000).toFixed(1)}s` : `${t.ms}ms`}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Leading+trailing throttle: at most ~one update per `ms` while text streams
+ *  in, plus a guaranteed final flush. Keeps markdown parsing off the rAF path. */
+function useThrottledValue<T>(value: T, ms: number): T {
+  const [shown, setShown] = useState(value);
+  const latest = useRef(value);
+  const lastAt = useRef(0);
+  const timer = useRef<number | null>(null);
+  latest.current = value;
+  useEffect(() => {
+    const flush = () => {
+      timer.current = null;
+      lastAt.current = Date.now();
+      setShown(latest.current);
+    };
+    const since = Date.now() - lastAt.current;
+    if (since >= ms) flush();
+    else if (timer.current == null) timer.current = window.setTimeout(flush, ms - since);
+    return () => {
+      if (timer.current != null) {
+        window.clearTimeout(timer.current);
+        timer.current = null;
+      }
+    };
+  }, [value, ms]);
+  return shown;
+}
+
+export function MarkdownBody({ content }: { content: string }) {
+  const [html, setHtml] = useState(() => renderChatMarkdown(content));
+  useEffect(() => {
+    setHtml(renderChatMarkdown(content));
+  }, [content]);
+  return <div className="md" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+/** In-flight assistant message: muted reasoning tail + markdown answer
+ *  (throttled - partial markdown is safe to render, see chatMarkdown.ts). */
+export function StreamingBody({ content, thinking }: { content: string; thinking?: string }) {
+  const shown = useThrottledValue(content, 120);
+  return (
+    <>
+      {thinking ? (
+        <pre className="thinking-tail" title="Live reasoning - display only, never saved">
+          {`⏺ thinking\n${thinking}`}
+        </pre>
+      ) : null}
+      <MarkdownBody content={shown} />
+    </>
+  );
+}
+
+export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, showContinue, onContinue, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote }: {
   ws: Workspace;
   busy: boolean;
   sideTab: SideTab;
@@ -21,6 +112,8 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
   stopTurn: (id: string) => void;
   planMode: boolean;
   onTogglePlan: () => void;
+  showContinue: boolean;
+  onContinue: () => void;
   padText: string;
   setPadText: (v: string) => void;
   planText: string;
@@ -30,9 +123,6 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
   nexaState: NexaState;
   auditNote: string;
   setAuditNote: (v: string) => void;
-  pendingToolsCount?: number;
-  ratings?: Record<string, 1 | -1>;
-  onRateMessage?: (messageId: string, rating: 1 | -1) => void;
 }) {
   const hist = useInputHistory();
   function onInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -96,29 +186,27 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
               setShowJump(!nearBottom);
             }}
           >
-            {ws.messages.map((m) => (
-              <div key={m.id} className={`msg ${m.role}`}>
-                <b>{m.role}</b>
-                {m.role === "assistant" && m.id !== "stream" && onRateMessage && (
-                  <span className="rate" title="Rate this answer - helps improve Commander">
-                    <button
-                      className={ratings?.[m.id] === 1 ? "active" : ""}
-                      onClick={() => onRateMessage(m.id, 1)}
-                      title="Good answer"
-                    >
-                      👍
-                    </button>
-                    <button
-                      className={ratings?.[m.id] === -1 ? "active" : ""}
-                      onClick={() => onRateMessage(m.id, -1)}
-                      title="Bad answer"
-                    >
-                      👎
-                    </button>
-                  </span>
-                )}
-                <pre>{m.content}</pre>
-              </div>
+            {ws.messages.map((m, i) => (
+              <Fragment key={m.id}>
+                {m.role === "user" && i > 0 && <div className="turn-sep" aria-hidden="true" />}
+                <div className={`msg ${m.role}`}>
+                  <div className="msg-head">
+                    <b>{m.role === "user" ? "You" : m.role === "assistant" ? "Commander" : "Note"}</b>
+                  </div>
+                  {m.role === "assistant" ? (
+                    m.id === "stream" ? (
+                      <StreamingBody content={m.content} thinking={m.thinking} />
+                    ) : (
+                      <MarkdownBody content={m.content} />
+                    )
+                  ) : (
+                    <pre>{m.content}</pre>
+                  )}
+                  {m.role === "assistant" && m.tools && m.tools.length > 0 && (
+                    <ToolCards tools={m.tools} />
+                  )}
+                </div>
+              </Fragment>
             ))}
           </div>
           {showJump && (
@@ -146,25 +234,26 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
             <button onClick={sendChat} disabled={busy}>
               Send
             </button>
+            {showContinue && !busy && (
+              <button
+                onClick={onContinue}
+                title="The last turn ran out of tool budget. Continue it with fresh rounds over the full history (nothing is repeated or lost)."
+              >
+                ▶ Continue
+              </button>
+            )}
             {busy && (
               <button
                 onClick={() => stopTurn(ws.id)}
-                title="Stop this turn: aborts the request and releases waiting approvals (applied side effects are not undone)"
+                title="Stop this turn: aborts the request (applied side effects are not undone; answer the native approval dialog if one is open)"
               >
                 ■ Stop
               </button>
             )}
             {busy && (
-              <span
-                className="agent-status"
-                title={
-                  (pendingToolsCount ?? 0) > 0
-                    ? "Waiting for approval"
-                    : "Agent is thinking..."
-                }
-              >
+              <span className="agent-status" title="Agent is thinking...">
                 <span className="spinner" />
-                {(pendingToolsCount ?? 0) > 0 ? "approval" : "thinking"}
+                thinking
               </span>
             )}
           </div>

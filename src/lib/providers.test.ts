@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { announcesToolAction, chatWithTools, deniesCapability, estimateCost, extractEmbeddedToolCalls, listModels, narratesBareToolCall, parseTextToolCalls, runTool } from "./providers";
+import { announcesToolAction, asksAuthQuestion, chatWithTools, deniesCapability, detectDegenerateRepetition, estimateCost, extractEmbeddedToolCalls, extractExplicitPaths, listModels, narratesBareToolCall, parseTextToolCalls, requestsAction, runTool, skillConfinement, skillNeedsInspection, skillPrescribes } from "./providers";
 
 // ---- Backend seam: Tauri invoke is stubbed per test ----
 vi.mock("@tauri-apps/api/core", () => ({
@@ -10,6 +10,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 function setInvokeImpl(fn: (cmd: string, args?: any) => Promise<any>) {
   (globalThis as any).__invokeImpl = fn;
 }
+
+// Policy stub: native dialog confirmed (see lib/approval approvalIssue).
+const TOK = { token: "tok-test", detail: "{}" };
 
 type FetchCalls = { url: string; init: any }[];
 
@@ -119,7 +122,7 @@ describe("runTool", () => {
       "shell_run",
       { cwd: "/w", cmd: "ls" },
       {
-        requestApproval: async () => false,
+        requestApproval: async () => null,
         // silence unused warnings if policy shape changes
       },
     );
@@ -136,7 +139,7 @@ describe("runTool", () => {
     const out = await runTool(
       "shell_run",
       { cwd: "/w", cmd: "echo hi" },
-      { requestApproval: async () => true },
+      { requestApproval: async () => TOK },
     );
     expect(out).toContain("hi");
     void seen;
@@ -164,7 +167,7 @@ describe("runTool", () => {
   it("reports unknown tools instead of throwing", async () => {
     await expect(runTool("teleport", {})).resolves.toMatch(/unknown tool/);
   });
-  it("runs lsp_diagnostics without approval and requires absolute paths", async () => {
+  it("runs lsp_diagnostics with approval for ts (py stays free) and requires absolute paths", async () => {
     let approvals = 0;
     setInvokeImpl(async (cmd) => {
       expect(cmd).toBe("lsp_diagnostics");
@@ -173,10 +176,23 @@ describe("runTool", () => {
     const out = await runTool(
       "lsp_diagnostics",
       { path: "/w/a.ts" },
-      { requestApproval: async () => { approvals++; return true; } },
+      { requestApproval: async () => { approvals++; return TOK; } },
     );
     expect(out).toContain("clean:");
-    expect(approvals).toBe(0);
+    expect(approvals).toBe(1);
+    // Python stays approval-free.
+    let pyApprovals = 0;
+    setInvokeImpl(async (cmd) => {
+      expect(cmd).toBe("lsp_diagnostics");
+      return "clean: no diagnostics for /w/a.py";
+    });
+    const pyOut = await runTool(
+      "lsp_diagnostics",
+      { path: "/w/a.py" },
+      { requestApproval: async () => { pyApprovals++; return TOK; } },
+    );
+    expect(pyOut).toContain("clean:");
+    expect(pyApprovals).toBe(0);
     await expect(runTool("lsp_diagnostics", { path: "relative/a.ts" })).resolves.toMatch(/^error:/);
     await expect(runTool("lsp_diagnostics", {})).resolves.toMatch(/^error:/);
   });
@@ -188,6 +204,10 @@ describe("runTool", () => {
     expect(isWeakModel("https://api.anthropic.com", "claude-sonnet-4-5")).toBe(false);
     expect(isWeakModel("https://api.openai.com/v1", "gpt-4o")).toBe(false);
     expect(isWeakModel("https://x.test/v1", "qwen2.5-coder:32b")).toBe(true);
+    // Host and file format are not capability signals: a 35B gguf served
+    // locally is a strong model and gets the full system prompt.
+    expect(isWeakModel("http://localhost:8080/v1", "/models/Ornith-1.5-35B-Q4_K_M.gguf")).toBe(false);
+    expect(isWeakModel("http://127.0.0.1:8080/v1", "Qwen3-32B-Q4_K_M.gguf")).toBe(true); // family, not host/format
   });
   it("rejects relative fs paths with a self-correcting hint", async () => {
     let invoked = false;
@@ -203,6 +223,34 @@ describe("runTool", () => {
 });
 
 describe("chatWithTools", () => {
+  it("streams reasoning_content to onThinking and keeps it out of content/deltas", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sse([
+          { choices: [{ delta: { reasoning_content: "Let me think " } }] },
+          { choices: [{ delta: { reasoning_content: "about paths." } }] },
+          { choices: [{ delta: { content: "src/hooks has 3 files." } }] },
+          { choices: [{ delta: {} }], usage: { prompt_tokens: 100, completion_tokens: 20 } },
+        ]),
+      ) as unknown as typeof fetch,
+    );
+    const thinking: string[] = [];
+    let streamed = "";
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "list src/hooks" }],
+      (t) => {
+        streamed += t;
+      },
+      { onThinking: (t) => thinking.push(t) },
+    );
+    expect(thinking.join("")).toBe("Let me think about paths.");
+    expect(streamed).toBe("src/hooks has 3 files.");
+    expect(res).toContain("src/hooks has 3 files.");
+    expect(res).not.toContain("Let me think");
+  });
+
   it("returns plain replies and streams deltas", async () => {
     stubFetch(() => openAIText("hello there"));
     const deltas: string[] = [];
@@ -260,6 +308,7 @@ describe("chatWithTools", () => {
       expect(lastUser.content).toMatch(/repeating `fs_list`/);
       expect(lastUser.content).toMatch(/Cite the actual tool outputs/);
       expect(lastUser.content).toMatch(/do NOT invent tool calls/);
+      expect(lastUser.content).toMatch(/Do not end with a question/);
       return openAIText("gave up gracefully");
     });
     let toolCount = 0;
@@ -358,7 +407,7 @@ describe("chatWithTools", () => {
       [{ role: "user", content: "run ls" }],
       () => {},
       {
-        policy: { requestApproval: async () => false },
+        policy: { requestApproval: async () => null },
         onAudit: (e) => audits.push(e),
       },
     );
@@ -458,6 +507,240 @@ describe("deniesCapability", () => {
   });
 });
 
+describe("detectDegenerateRepetition", () => {
+  const phrase = "The Build button is not clickable, so I have to wait for the image to be loaded.";
+
+  it("flags a phrase repeated across separate lines", () => {
+    const garbage = Array.from({ length: 12 }, () => phrase).join("\n");
+    const got = detectDegenerateRepetition(garbage);
+    expect(got).not.toBeNull();
+    expect(got?.phrase).toBe(phrase.replace(/[.!?]+$/, ""));
+    expect(got?.count).toBe(12);
+  });
+
+  it("flags a phrase repeated inside a single paragraph", () => {
+    const garbage = `${phrase} `.repeat(8).trim();
+    expect(detectDegenerateRepetition(garbage)?.count).toBe(8);
+  });
+
+  it("ignores normal prose that mentions a token several times", () => {
+    const normal =
+      "I read App.tsx and found the bug in the render loop. I patched App.tsx with a guard, " +
+      "then re-read App.tsx to verify the fix. Tests pass and App.tsx is ready for review. " +
+      "One note: App.tsx imports a helper that also needed a small change.";
+    expect(detectDegenerateRepetition(normal)).toBeNull();
+  });
+
+  it("ignores a sentence repeated a few times (below the threshold)", () => {
+    const mild =
+      `Did the check. ${phrase} Then moved on to the next step and ran the tests. ` +
+      `All good. ${phrase} Wrapping up now with a short summary of what changed.`;
+    expect(detectDegenerateRepetition(mild)).toBeNull();
+  });
+
+  it("ignores short or empty text", () => {
+    expect(detectDegenerateRepetition("")).toBeNull();
+    expect(detectDegenerateRepetition(phrase)).toBeNull();
+  });
+});
+
+describe("chatWithTools degenerate output", () => {
+  it("stops a repetition loop and returns a diagnostic instead of garbage", async () => {
+    const phrase = "The Build button is not clickable, so I have to wait for the image to be loaded.";
+    const garbage = Array.from({ length: 30 }, () => phrase).join("\n");
+    setInvokeImpl(async () => {
+      throw new Error("unexpected invoke");
+    });
+    stubFetch(() => openAIText(garbage));
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "look at this screenshot" }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(res).toContain("[stopped: degenerate repetition detected");
+    expect(res).toContain("30x");
+    // Head is truncated; the 30-line wall is not handed back.
+    expect(res.split(phrase).length - 1).toBeLessThan(10);
+    expect(res.length).toBeLessThan(garbage.length / 2);
+    expect(repairs).toEqual(["repetition"]);
+  });
+});
+
+// The skill body the frontend expands into the user message (see
+// useAgentTurn.expandSkill): marker + instructions + body + arguments.
+function skillMsg(name: string, body: string, args = ""): string {
+  return (
+    `User invoked /${name} - follow these skill instructions now using tools, do not discuss the skill itself:\n` +
+    `[skill: ${name}]\n${body}${args ? `\n\nArguments:\n${args}` : ""}`
+  );
+}
+
+describe("skillNeedsInspection", () => {
+  const RATE = skillMsg(
+    "rate",
+    "Provide a concise 1-10 score.\n1. Inspect the target with read-only tools: fs_list the root, fs_read code, git_status and git_log for activity.\n3. Reply with ONLY Score/Strengths/Weaknesses/Suggestion.",
+  );
+  it("flags a skill whose body prescribes read-only tools", () => {
+    expect(skillNeedsInspection(RATE)).toBe("rate");
+  });
+  it("returns null when no skill marker is present", () => {
+    expect(skillNeedsInspection("just a normal user question")).toBeNull();
+  });
+  it("returns null for an informational skill with no tool steps", () => {
+    const noTools = skillMsg("greet", "Answer the user's greeting warmly and briefly. No tools needed.");
+    expect(skillNeedsInspection(noTools)).toBeNull();
+  });
+  it("ignores empty input", () => {
+    expect(skillNeedsInspection("")).toBeNull();
+  });
+});
+
+describe("skillPrescribes", () => {
+  const RATE = skillMsg(
+    "rate",
+    "Inspect the target with read-only tools: fs_list the root, fs_glob for file patterns, fs_read plus fs_search for code, git_status plus git_log.",
+  );
+  it("lists the exact tools the skill body prescribes", () => {
+    expect(skillPrescribes(RATE)).toEqual({
+      name: "rate",
+      tools: expect.arrayContaining(["fs_list", "fs_glob", "fs_read", "fs_search", "git_status", "git_log"]),
+    });
+    expect(skillPrescribes(RATE)?.tools).toHaveLength(6);
+  });
+  it("returns null for a skill with no tool steps", () => {
+    expect(skillPrescribes(skillMsg("greet", "Be brief."))).toBeNull();
+  });
+});
+
+describe("chatWithTools skill follow-through", () => {
+  const RATE = skillMsg(
+    "rate",
+    "Inspect the target with read-only tools: fs_list the root, git_status for activity. Then reply with ONLY Score/Strengths/Weaknesses/Suggestion.",
+  );
+
+  it("forces inspection when a skill is answered from memory", async () => {
+    const invoked: string[] = [];
+    setInvokeImpl(async (cmd) => {
+      invoked.push(cmd);
+      if (cmd === "fs_list") return JSON.stringify(["App.tsx", "package.json"]);
+      if (cmd === "git_status") return " M App.tsx";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      if (n === 1) {
+        // Skipped every tool and produced the score from memory.
+        return openAIText("**Score: 6/10**\n\nStrengths: clean layout.");
+      }
+      // After the nudge it inspects for real, then answers.
+      if (n === 2) return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      if (n === 3) return openAITools([{ id: "g1", name: "git_status", args: {} }]);
+      return openAIText("**Score: 8/10**\n\nStrengths: inspected for real this time.");
+    });
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: RATE }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(repairs).toContain("skill");
+    expect(invoked).toContain("fs_list");
+    expect(invoked).toContain("git_status");
+    expect(res).toContain("inspected for real");
+  });
+
+  it("does not nudge when the model inspects on its own", async () => {
+    const invoked: string[] = [];
+    setInvokeImpl(async (cmd) => {
+      invoked.push(cmd);
+      return cmd === "fs_list" ? JSON.stringify(["App.tsx"]) : " M App.tsx";
+    });
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      if (n === 1) return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      if (n === 2) return openAITools([{ id: "g1", name: "git_status", args: {} }]);
+      return openAIText("**Score: 8/10** based on the listing and status above.");
+    });
+    const repairs: string[] = [];
+    await chatWithTools(
+      CFG,
+      [{ role: "user", content: RATE }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(repairs).not.toContain("skill");
+    expect(invoked).toContain("fs_list");
+  });
+
+  it("does not nudge for a skill that needs no tools", async () => {
+    const greet = skillMsg("greet", "Answer the user's greeting warmly and briefly. No tools needed.");
+    setInvokeImpl(async () => {
+      throw new Error("unexpected invoke");
+    });
+    stubFetch(() => openAIText("Hey! Good to see you. What are we working on?"));
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: greet }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(repairs).not.toContain("skill");
+    expect(res).toContain("Good to see you");
+  });
+
+  // Reproduces the real-world failure: the model burns a round on skill_read
+  // (re-reading the skill is NOT inspecting the target) and then emits a
+  // "provisional" score from memory. The guard must not be satisfied by the
+  // decoy — it forces the prescribed inspection tools to actually run.
+  it("is not fooled by a skill_read decoy into skipping inspection", async () => {
+    const invoked: string[] = [];
+    setInvokeImpl(async (cmd) => {
+      invoked.push(cmd);
+      if (cmd === "skill_read") return "# rate\nInspect the target with read-only tools.";
+      if (cmd === "fs_list") return JSON.stringify(["App.tsx", "package.json"]);
+      if (cmd === "git_status") return " M App.tsx";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      if (n === 1) {
+        // Decoy: re-reads the skill instead of inspecting.
+        return openAITools([{ id: "s1", name: "skill_read", args: { name: "rate" } }]);
+      }
+      if (n === 2) {
+        // Then answers from memory with a "provisional" score.
+        return openAIText("Score: N/A (inspection not performed). Provisional ~6/10 from memory.");
+      }
+      // After the nudge it inspects for real, then answers.
+      if (n === 3) return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      if (n === 4) return openAITools([{ id: "g1", name: "git_status", args: {} }]);
+      return openAIText("Score: 8/10 based on the actual listing and git status.");
+    });
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: RATE }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(repairs).toContain("skill");
+    // The decoy ran but so did the real inspection.
+    expect(invoked).toContain("skill_read");
+    expect(invoked).toContain("fs_list");
+    expect(invoked).toContain("git_status");
+    // The memory-based provisional answer was replaced by the inspected one.
+    expect(res).toContain("actual listing");
+    expect(res).not.toMatch(/Provisional ~6\/10/);
+  });
+});
+
 describe("chatWithTools narration repair", () => {
   it("nudges a narrating model into emitting the real call", async () => {
     const staged: { path: string; content: string }[] = [];
@@ -470,10 +753,10 @@ describe("chatWithTools narration repair", () => {
         return openAIText("Please approve the fs_write to create check_ffmpeg.py.");
       }
       if (prev.length === 2) {
-        // The repair nudge is a user message demanding the real call.
+        // The repair nudge is a system message demanding the real call.
         const body = JSON.parse(_init.body);
         const last = body.messages[body.messages.length - 1];
-        expect(last.role).toBe("user");
+        expect(last.role).toBe("system");
         expect(last.content).toMatch(/NO tool call/);
         return openAITools([
           { id: "w1", name: "fs_write", args: { path: "/w/check_ffmpeg.py", content: "print(1)" } },
@@ -535,7 +818,7 @@ describe("chatWithTools narration repair", () => {
       if (prev.length === 2) {
         const body = JSON.parse(_init.body);
         const last = body.messages[body.messages.length - 1];
-        expect(last.role).toBe("user");
+        expect(last.role).toBe("system");
         expect(last.content).toMatch(/You DO have that capability/);
         return openAITools([{ id: "s1", name: "shell_run", args: { cwd: "/w", cmd: "python3 check_ffmpeg.py" } }]);
       }
@@ -548,7 +831,7 @@ describe("chatWithTools narration repair", () => {
       [{ role: "user", content: "run it" }],
       (d) => events.push(d),
       {
-        policy: { requestApproval: async () => true },
+        policy: { requestApproval: async () => TOK },
         onRepair: (r) => repairs.push(r.kind),
       },
     );
@@ -607,5 +890,682 @@ describe("chatWithTools text-call fallback", () => {
     // Second request carries the tool result.
     const body = JSON.parse(calls[1].init.body);
     expect(body.messages.some((m: any) => m.role === "tool")).toBe(true);
+  });
+});
+
+describe("extractExplicitPaths", () => {
+  it("finds real absolute paths", () => {
+    expect(extractExplicitPaths("list /home/u/proj then read")).toEqual(["/home/u/proj"]);
+    expect(extractExplicitPaths("fs_list /w/src")).toEqual(["/w/src"]);
+  });
+  it("ignores markdown false positives (rate skill)", () => {
+    const skill = "UX/Performance:** build size\nScore: X/10\n**Architecture:**";
+    expect(extractExplicitPaths(skill)).toEqual([]);
+    expect(extractExplicitPaths("Score: X/10")).toEqual([]);
+    expect(extractExplicitPaths("**UX/Performance:**")).toEqual([]);
+  });
+});
+
+describe("asksAuthQuestion", () => {
+  it.each([
+    "Should I proceed with the setup?",
+    "Would you like me to run the commands?",
+    "Do you want me to continue?",
+    "How would you like to proceed?",
+    "Let me know how to proceed?",
+    "Shall I start the install?",
+    "Please confirm that I should proceed?",
+    "Want me to go ahead?",
+    "How should we proceed here?",
+  ])("flags authorization-seeking: %s", (text) => {
+    expect(asksAuthQuestion(text)).toBe(true);
+  });
+  it.each([
+    "Which directory should I use?",
+    "What should the commit message say?",
+    "The file is ready for review.",
+    "I ran the tests and they pass - 3 failures remain.",
+    "Should the backup include node_modules?",
+    "",
+  ])("leaves genuine questions and prose alone: %s", (text) => {
+    expect(asksAuthQuestion(text)).toBe(false);
+  });
+});
+
+describe("chatWithTools question repair", () => {
+  it("redirects an asking model into a real call", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [{ name: "a", path: "/w/a", is_dir: false }];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAIText("Should I proceed with the setup? Would you like me to run the commands?");
+      }
+      if (prev.length === 2) {
+        const body = JSON.parse(_init.body);
+        const last = body.messages[body.messages.length - 1];
+        expect(last.role).toBe("system");
+        expect(last.content).toMatch(/instead of acting/);
+        return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      }
+      return openAIText("listed.");
+    });
+    const events: string[] = [];
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "set it up" }],
+      (d) => events.push(d),
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(res).toBe("listed.");
+    expect(events.join("")).toMatch(/asked for direction instead of acting/);
+    expect(repairs).toEqual(["question"]);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("redirects only once, then ends the turn visibly stalled", async () => {
+    stubFetch(() => openAIText("Should I proceed? Just say the word."));
+    setInvokeImpl(async () => {
+      throw new Error("must not run tools");
+    });
+    const events: string[] = [];
+    const res = await chatWithTools(CFG, [{ role: "user", content: "go" }], (d) => events.push(d));
+    expect(res).toBe("Should I proceed? Just say the word.");
+    expect(events.join("").match(/asked for direction instead of acting/g)).toHaveLength(1);
+  });
+
+  it("leaves post-action questions alone", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      }
+      return openAIText("Done. Should I proceed with the delete?");
+    });
+    const events: string[] = [];
+    const res = await chatWithTools(CFG, [{ role: "user", content: "list then ask" }], (d) =>
+      events.push(d),
+    );
+    expect(res).toBe("Done. Should I proceed with the delete?");
+    expect(events.join("")).not.toMatch(/asked for direction/);
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe("synthesis turn digest", () => {
+  it("injects a citable outcome line for every executed call", async () => {
+    setInvokeImpl(async (cmd, a) => {
+      if (cmd === "fs_list") {
+        return a?.path?.includes("sub")
+          ? [{ name: "alpha", path: "/w/early/alpha", is_dir: true }]
+          : [{ name: "beta", path: "/w/early/beta", is_dir: false }];
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const bodies: any[] = [];
+    stubFetch((_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      const n = bodies.length;
+      if (n === 1) {
+        return openAITools([{ id: "a1", name: "fs_list", args: { path: "/w/early" } }]);
+      }
+      if (n <= 10) {
+        // Keep emitting distinct calls so the loop guard (3× identical)
+        // doesn't fire: the digest path under test is budget exhaustion
+        // after MAX_ROUNDS, where the trimmed tail would otherwise drop
+        // the early calls.
+        return openAITools([{ id: `b${n}`, name: "fs_list", args: { path: `/w/early/sub${n}` } }]);
+      }
+      return openAIText("done");
+    });
+    await chatWithTools(CFG, [{ role: "user", content: "go" }], () => {});
+    const digest = bodies[bodies.length - 1].messages.find(
+      (m: any) => m.role === "system" && typeof m.content === "string" && m.content.includes("Turn digest"),
+    );
+    expect(digest).toBeTruthy();
+    expect(digest.content).toMatch(/fs_list.*"\/w\/early"/);
+    expect(digest.content).toMatch(/fs_list.*"\/w\/early\/sub2"/);
+    // The digest rides one round only as synthesis context: no user-turn text.
+    const users = bodies[bodies.length - 1].messages.filter((m: any) => m.role === "user");
+    expect(users.some((u: any) => /Turn digest/.test(u.content ?? ""))).toBe(false);
+  });
+
+  it("stays silent when no tools ran this turn", async () => {
+    setInvokeImpl(async () => []);
+    const bodies: any[] = [];
+    stubFetch((_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return openAIText("plain answer");
+    });
+    await chatWithTools(CFG, [{ role: "user", content: "hi" }], () => {});
+    expect(
+      bodies.some((b) =>
+        (b.messages as any[]).some((m) => typeof m.content === "string" && m.content.includes("Turn digest")),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("nudge channels", () => {
+  it("attaches the repeat nudge to the tool result, never as a user turn", async () => {
+    setInvokeImpl(async () => []);
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length <= 3) {
+        return openAITools([{ id: `c${prev.length}`, name: "fs_list", args: { path: "/w" } }]);
+      }
+      return openAIText("done");
+    });
+    await chatWithTools(CFG, [{ role: "user", content: "list" }], () => {});
+    const sent = calls.map((c) => JSON.parse(c.init.body).messages as any[]);
+    const nudges = sent.flat().filter((m) => typeof m.content === "string" && m.content.includes("You repeated"));
+    expect(nudges.length).toBeGreaterThan(0);
+    // The hint rides inside the tool result it follows - or inside the system
+    // turn-digest that quotes every executed call for the synthesis round...
+    expect(
+      nudges.every(
+        (m) => m.role === "tool" || (m.role === "system" && m.content.includes("Turn digest")),
+      ),
+    ).toBe(true);
+    // ...and never masquerades as something the user said.
+    const userTurns = sent.flat().filter((m) => m.role === "user");
+    expect(userTurns.some((m) => typeof m.content === "string" && m.content.includes("You repeated"))).toBe(false);
+  });
+});
+
+describe("windowConvo task anchor", () => {
+  it("keeps this turn's request when a tool-heavy turn exceeds the history window", async () => {
+    setInvokeImpl(async () => []);
+    const bodies: any[] = [];
+    stubFetch((_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      const n = bodies.length;
+      if (n <= 10) {
+        // Ten distinct rounds: 10 assistant + 10 tool messages appended, which
+        // pushes the user request out of the 14/20-message history window.
+        return json({
+          choices: [
+            {
+              message: {
+                content: "",
+                tool_calls: [
+                  {
+                    id: `c${n}`,
+                    type: "function",
+                    function: { name: "fs_list", arguments: JSON.stringify({ path: `/w/d${n}` }) },
+                  },
+                ],
+              },
+            },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 5 },
+        });
+      }
+      return openAIText("final");
+    });
+    const res = await chatWithTools(
+      CFG,
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "TASK-ANCHOR: analyse the app" },
+      ],
+      () => {},
+    );
+    expect(res).toBe("final");
+    // The synthesis request must still carry the original task.
+    const last = bodies[bodies.length - 1];
+    const joined = last.messages.map((m: any) => m.content).join("\n");
+    expect(joined).toContain("TASK-ANCHOR: analyse the app");
+  });
+});
+
+describe("reasoning-content passthrough", () => {
+  it("forwards streamed reasoning_content to onThinking without polluting the answer", async () => {
+    setInvokeImpl(async () => []);
+    stubFetch(() =>
+      sse([
+        { choices: [{ delta: { reasoning_content: "weighing " } }] },
+        { choices: [{ delta: { reasoning_content: "options" } }] },
+        { choices: [{ delta: { content: "Answer." } }] },
+        { usage: { prompt_tokens: 3, completion_tokens: 4 } },
+      ]),
+    );
+    const think: string[] = [];
+    const events: string[] = [];
+    const res = await chatWithTools(CFG, [{ role: "user", content: "hi" }], (d) => events.push(d), {
+      onThinking: (t) => think.push(t),
+    });
+    expect(think.join("")).toBe("weighing options");
+    expect(res).toBe("Answer.");
+    expect(events.join("")).toBe("Answer.");
+  });
+});
+
+describe("postJSON transient-failure retry", () => {
+  it("silently retries one transient 500 and completes the turn", async () => {
+    setInvokeImpl(async () => []);
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      if (n === 1) return json({ error: { message: "Jinja Exception: No messages provided." } }, 500);
+      return sse([
+        { choices: [{ delta: { content: "recovered" } }] },
+        { usage: { prompt_tokens: 4, completion_tokens: 2 } },
+      ]);
+    });
+    const res = await chatWithTools(CFG, [{ role: "user", content: "hi" }], () => {});
+    expect(res).toBe("recovered");
+    // Exactly one retry, no extra model rounds.
+    expect(n).toBe(2);
+  });
+
+  it("does not retry non-transient 4xx errors", async () => {
+    setInvokeImpl(async () => []);
+    let n = 0;
+    stubFetch(() => {
+      n++;
+      return json({ error: { message: "invalid request" } }, 400);
+    });
+    await expect(chatWithTools(CFG, [{ role: "user", content: "hi" }], () => {})).rejects.toThrow(/400/);
+    expect(n).toBe(1);
+  });
+});
+
+describe("requestsAction", () => {
+  it("detects work requests, including polite can-you-do phrasing", () => {
+    for (const t of [
+      "can you do the git setup and commit for me?",
+      "please add unit tests for auth",
+      "fix the login bug",
+      "implement pagination",
+      "set up CI",
+    ]) {
+      expect(requestsAction(t), t).toBe(true);
+    }
+  });
+
+  it("leaves discussion openers alone", () => {
+    for (const t of [
+      "how do I add tests for auth?",
+      "how could we improve the score?",
+      "what files handle login?",
+      "explain the auth flow",
+      "do you think we should refactor?",
+      "list then ask",
+      "go",
+      "",
+    ]) {
+      expect(requestsAction(t), t).toBe(false);
+    }
+  });
+});
+
+describe("chatWithTools survey repair", () => {
+  const SURVEY =
+    "Backend structure shows NestJS auth and orders modules. No test suites or CI workflows were detected in the listings. Commit the files to establish state.";
+  it("redirects a recon-only turn into its first mutation", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [{ name: "a", path: "/w/a", is_dir: false }];
+      if (cmd === "fs_create") return "created";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      }
+      if (prev.length === 2) {
+        return openAIText(SURVEY);
+      }
+      if (prev.length === 3) {
+        const body = JSON.parse(_init.body);
+        const last = body.messages[body.messages.length - 1];
+        expect(last.role).toBe("system");
+        expect(last.content).toMatch(/Recon is not completion/);
+        return openAITools([{ id: "c1", name: "fs_create", args: { path: "/w/a.txt" } }]);
+      }
+      return openAIText("done - created and committed.");
+    });
+    const events: string[] = [];
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "can you do the git setup and commit for me?" }],
+      (d) => events.push(d),
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(res).toBe("done - created and committed.");
+    expect(repairs).toEqual(["survey"]);
+    expect(events.join("")).toMatch(/first mutation/);
+    expect(calls.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("pushes repeat stallers twice, then lets the third survey stand", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      }
+      return openAIText(SURVEY);
+    });
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "please add tests for auth" }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(repairs).toEqual(["survey", "survey"]);
+    expect(res).toBe(SURVEY);
+    expect(calls).toHaveLength(4);
+  });
+
+  it("stays silent on discussion questions after recon", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [{ name: "a", path: "/w/a", is_dir: false }];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      }
+      return openAIText("Auth lives in backend/src/auth with a service and controller.");
+    });
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "how do I add tests for the auth module?" }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(res).toContain("Auth lives");
+    expect(repairs).toEqual([]);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("stays silent in plan mode, where findings are the job", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [{ name: "a", path: "/w/a", is_dir: false }];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAITools([{ id: "l1", name: "fs_list", args: { path: "/w" } }]);
+      }
+      return openAIText(SURVEY);
+    });
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "can you do the git setup and commit for me?" }],
+      () => {},
+      { policy: { planMode: true }, onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(res).toBe(SURVEY);
+    expect(repairs).toEqual([]);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("stays silent once the turn already mutated", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_create") return "created";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) {
+        return openAITools([{ id: "c1", name: "fs_create", args: { path: "/w/a.txt" } }]);
+      }
+      return openAIText("Created the file. Tests still missing.");
+    });
+    const repairs: string[] = [];
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "please add tests for auth" }],
+      () => {},
+      { onRepair: (r) => repairs.push(r.kind) },
+    );
+    expect(res).toContain("Created the file");
+    expect(repairs).toEqual([]);
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe("skillConfinement", () => {
+  const RATE = [
+    "User invoked /rate - follow these skill instructions NOW, using tools, for THIS turn only.",
+    "[skill: rate]",
+    "1. Inspect the target using read-only tools: fs_list the workspace root, fs_glob for file patterns, fs_read plus fs_search for code, git_status plus git_log for activity.",
+    "3. Reply with ONLY:",
+  ].join("\n");
+  it("confines /rate to exactly its prescribed read-only tools", () => {
+    const c = skillConfinement(RATE);
+    expect(c?.skill).toBe("rate");
+    expect(c?.tools.sort()).toEqual(
+      ["fs_glob", "fs_list", "fs_read", "fs_search", "git_log", "git_status"].sort(),
+    );
+  });
+  it("leaves non-skill turns and full-surface skills alone", () => {
+    expect(skillConfinement("please fix the bug")).toBeNull();
+    expect(skillConfinement("")).toBeNull();
+    // Skill turn without a read-only scope marker: no confinement.
+    const fix = [
+      "User invoked /fix - follow these skill instructions NOW, using tools, for THIS turn only.",
+      "[skill: fix]",
+      "1. Run the failing tests with shell_run, then fs_read the broken file and repair it.",
+    ].join("\n");
+    expect(skillConfinement(fix)).toBeNull();
+  });
+});
+
+describe("chatWithTools skill confinement", () => {
+  const RATE_POLICY = {
+    allowedTools: {
+      skill: "rate",
+      tools: ["fs_list", "fs_glob", "fs_read", "fs_search", "git_status", "git_log"],
+    },
+  };
+  it("withholds out-of-scope defs so the model is never offered shell", async () => {
+    setInvokeImpl(async () => {
+      throw new Error("must not reach backend");
+    });
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length === 1) return openAIText("Score: 6/10");
+      throw new Error("only one round expected");
+    });
+    const res = await chatWithTools(
+      CFG,
+      [{ role: "user", content: "rate it" }],
+      () => {},
+      { policy: RATE_POLICY },
+    );
+    expect(res).toBe("Score: 6/10");
+    const offered = (JSON.parse(calls[0].init.body).tools as any[]).map((t) => t.function.name);
+    expect(offered).not.toContain("shell_run");
+    expect(offered).not.toContain("fs_write");
+    expect(offered).toContain("fs_list");
+  });
+  it("refuses confined-out calls fail-closed before any dialog or invoke", async () => {
+    const invoked: string[] = [];
+    setInvokeImpl(async (cmd) => {
+      invoked.push(cmd);
+      return {};
+    });
+    const out = await runTool("shell_run", { cmd: "git commit -m x" }, {
+      ...RATE_POLICY,
+      requestApproval: async () => {
+        throw new Error("dialog must never appear for out-of-scope tools");
+      },
+    });
+    expect(out).toMatch(/outside this skill's tool scope/);
+    expect(out).toMatch(/\/rate allows:/);
+    expect(invoked).toEqual([]);
+  });
+  it("lets prescribed reads through untouched", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [{ name: "a", path: "/w/a", is_dir: false }];
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const out = await runTool("fs_list", { path: "/w" }, RATE_POLICY);
+    expect(out).toContain("/w/a");
+  });
+});
+
+describe("tool catalog descriptions", () => {
+  it("fs_create admits it makes empty placeholders; fs_write owns content", async () => {
+    const { TOOL_DEFS } = await import("./toolCatalog");
+    const def = (n: string) => TOOL_DEFS.find((t) => t.function.name === n)!.function.description;
+    expect(def("fs_create")).toMatch(/EMPTY/i);
+    expect(def("fs_create")).toMatch(/fs_write/);
+    expect(def("fs_write")).toMatch(/creates.*if missing|if missing/i);
+    expect(def("fs_write")).not.toMatch(/does NOT write directly/);
+  });
+});
+
+// The toAnthropic/toGemini converters only run inside chatWithTools; these
+// round-trips pin the exact wire shapes (merging, images, tool blocks) for
+// the two backends whose request formats differ structurally from OpenAI.
+describe("Anthropic & Gemini wire round-trips", () => {
+  const ANTH = { baseUrl: "https://api.anthropic.com", apiKey: "k", model: "m", kind: "anthropic" as const };
+  const GEM = { baseUrl: "https://generativelanguage.googleapis.com/v1beta", apiKey: "gk", model: "gemini-x", kind: "gemini" as const };
+
+  it("Anthropic: system+image merging, streamed tool_use args, tool_result feedback", async () => {
+    setInvokeImpl(async (cmd) => (cmd === "fs_read" ? "B DATA" : []));
+    const calls = stubFetch((_u, _i, prev) => {
+      if (prev.length === 1) {
+        return sse([
+          { type: "message_start", message: { usage: { input_tokens: 9, output_tokens: 0 } } },
+          { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu1", name: "fs_read" } },
+          { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":"' } },
+          { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '/w/b.txt"}' } },
+          { type: "message_delta", usage: { output_tokens: 3 } },
+        ]);
+      }
+      return sse([
+        { type: "content_block_start", index: 0, content_block: { type: "text" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "done" } },
+      ]);
+    });
+    const res = await chatWithTools(
+      ANTH,
+      [
+        { role: "system", content: "be terse" },
+        { role: "user", content: "read b.txt" },
+        { role: "user", content: "screenshot next", images: ["QUJD"] } as never,
+      ],
+      () => {},
+    );
+    expect(res).toBe("done");
+
+    const b1 = JSON.parse(calls[0].init.body);
+    expect(b1.system).toContain("be terse");
+    // Consecutive users collapse into one alternation-safe message, and the
+    // string + image parts merge into a content block array.
+    const withImage = b1.messages.find((m: any) =>
+      Array.isArray(m.content) && m.content.some((p: any) => p.type === "image"),
+    );
+    expect(withImage).toBeTruthy();
+    expect(withImage.content.some((p: any) => p.type === "image" && p.source.data === "QUJD")).toBe(true);
+    expect(b1.tools.some((t: any) => t.name === "fs_read" && t.input_schema)).toBe(true);
+
+    const b2 = JSON.parse(calls[1].init.body);
+    const asst = b2.messages.find((m: any) => m.role === "assistant");
+    expect(asst.content[0]).toMatchObject({
+      type: "tool_use",
+      id: "tu1",
+      name: "fs_read",
+      input: { path: "/w/b.txt" },
+    });
+    const toolResult = b2.messages
+      .flatMap((m: any) => (Array.isArray(m.content) ? m.content : []))
+      .find((p: any) => p.type === "tool_result");
+    expect(toolResult).toMatchObject({ tool_use_id: "tu1" });
+    expect(toolResult.content).toContain("B DATA");
+  });
+
+  it("Anthropic: orphaned tool_results (no preceding tool_use) are dropped", async () => {
+    stubFetch(() => openAIText("ok"));
+    const calls = stubFetch(() =>
+      sse([
+        { type: "content_block_start", index: 0, content_block: { type: "text" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+      ]),
+    );
+    await chatWithTools(
+      ANTH,
+      [
+        { role: "user", content: "hi" },
+        { role: "tool", content: "orphan", tool_call_id: "ghost" } as never,
+      ],
+      () => {},
+    );
+    const body = JSON.parse(calls[0].init.body);
+    expect(JSON.stringify(body.messages)).not.toContain("orphan");
+  });
+
+  it("Gemini: systemInstruction, UPPERCASE schema, functionCall round-trip, functionResponse feedback", async () => {
+    setInvokeImpl(async (cmd) => (cmd === "fs_read" ? "B DATA" : []));
+    const calls = stubFetch((_u, _i, prev) =>
+      prev.length === 1
+        ? sse([
+            {
+              candidates: [{ content: { parts: [{ functionCall: { name: "fs_read", args: { path: "/w/b.txt" } } }] } }],
+              usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2 },
+            },
+          ])
+        : sse([{ candidates: [{ content: { parts: [{ text: "all " }, { text: "set" }] } }] }]),
+    );
+    const res = await chatWithTools(
+      GEM,
+      [
+        { role: "system", content: "be terse" },
+        { role: "user", content: "read b.txt" },
+      ],
+      () => {},
+    );
+    expect(res).toBe("all set");
+    expect(calls[0].url).toContain(":streamGenerateContent?alt=sse");
+    expect(calls[0].init.headers["x-goog-api-key"]).toBe("gk");
+
+    const b1 = JSON.parse(calls[0].init.body);
+    expect(b1.system_instruction).toEqual({ parts: [{ text: "be terse" }] });
+    const decl = b1.tools[0].functionDeclarations.find((t: any) => t.name === "fs_read");
+    expect(decl.parameters.type).toBe("OBJECT");
+    expect(decl.parameters.properties.path.type).toBe("STRING");
+
+    const b2 = JSON.parse(calls[1].init.body);
+    const modelMsg = b2.contents.find((c: any) => c.role === "model");
+    expect(modelMsg.parts[0].functionCall).toMatchObject({ name: "fs_read", args: { path: "/w/b.txt" } });
+    const fr = b2.contents
+      .flatMap((c: any) => c.parts)
+      .find((p: any) => p.functionResponse);
+    expect(fr.functionResponse.name).toBe("fs_read");
+    expect(JSON.stringify(fr.functionResponse.response)).toContain("B DATA");
+  });
+
+  it("Gemini: malformed functionCall args and orphan responses degrade to {}", async () => {
+    setInvokeImpl(async () => []);
+    const calls = stubFetch(() =>
+      sse([{ candidates: [{ content: { parts: [{ text: "fine" }] } }] }]),
+    );
+    await chatWithTools(
+      GEM,
+      [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "x", tool_calls: [{ id: "g1", function: { name: "fs_list", arguments: "{not json" } }] } as never,
+        { role: "tool", content: "r", tool_call_id: "ghost" } as never,
+      ],
+      () => {},
+    );
+    const b = JSON.parse(calls[0].init.body);
+    const modelMsg = b.contents.find((c: any) => c.role === "model");
+    expect(modelMsg.parts.find((p: any) => p.functionCall).functionCall.args).toEqual({});
+    // Orphan tool result (no known idToName) never becomes a functionResponse.
+    expect(JSON.stringify(b.contents)).not.toContain("ghost");
   });
 });

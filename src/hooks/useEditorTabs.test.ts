@@ -93,7 +93,7 @@ describe("useEditorTabs.openFile", () => {
 });
 
 describe("useEditorTabs.closeTab", () => {
-  it("drops clean tabs and follows neighbors", () => {
+  it("drops clean tabs and follows neighbors", async () => {
     setInvokeImpl(async () => "");
     const h = setup({
       tabs: ["/w/a.txt", "/w/b.txt"],
@@ -101,14 +101,14 @@ describe("useEditorTabs.closeTab", () => {
       originals: { "/w/a.txt": "x", "/w/b.txt": "y" },
       openPath: "/w/a.txt",
     });
-    act(() => {
-      h.result.current.closeTab("/w/a.txt");
+    await act(async () => {
+      await h.result.current.closeTab("/w/a.txt");
     });
     expect(h.wsOf().tabs).toEqual(["/w/b.txt"]);
     expect(h.wsOf().openPath).toBe("/w/b.txt");
   });
 
-  it("asks before discarding dirty tabs", () => {
+  it("asks before discarding dirty tabs", async () => {
     setInvokeImpl(async () => "");
     (window as any).confirm = vi.fn(() => false);
     const h = setup({
@@ -117,13 +117,13 @@ describe("useEditorTabs.closeTab", () => {
       originals: { "/w/a.txt": "orig" },
       openPath: "/w/a.txt",
     });
-    act(() => {
-      h.result.current.closeTab("/w/a.txt");
+    await act(async () => {
+      await h.result.current.closeTab("/w/a.txt");
     });
     expect(h.wsOf().tabs).toEqual(["/w/a.txt"]);
     (window as any).confirm = vi.fn(() => true);
-    act(() => {
-      h.result.current.closeTab("/w/a.txt");
+    await act(async () => {
+      await h.result.current.closeTab("/w/a.txt");
     });
     expect(h.wsOf().tabs).toEqual([]);
   });

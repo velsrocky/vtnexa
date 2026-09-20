@@ -2,56 +2,133 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
+    tags: ["v*"]
   pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: pnpm/action-setup@v4
-        with:
-          version: 12
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
+
       - run: pnpm install --frozen-lockfile
-      - run: pnpm exec tsc --noEmit
-      - run: pnpm test
-      - run: pnpm build
+
+      - name: ESLint (zero warnings tolerated)
+        run: pnpm lint
+
+      - name: TypeScript
+        run: pnpm typecheck
+
+      - name: Unit tests + coverage ratchet
+        run: pnpm exec vitest run --coverage
+
+      - name: E2E (chromium against the web build)
+        run: |
+          pnpm exec playwright install --with-deps chromium
+          pnpm e2e
 
   backend:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src-tauri
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Install Tauri system deps
+
+      - name: Install Tauri system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev \
-            patchelf build-essential curl wget file libxdo-dev libssl-dev
-      # tauri.conf.json bundles sidecar-stage/browser - gitignored, built here
-      - name: Stage sidecar resources
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The tauri build-script validates bundle resource paths exist
+      # (sidecar-stage/ and ../dist are gitignored build outputs); clippy and
+      # test never bundle, so empty stubs suffice (release stages the real
+      # sidecar and builds dist via beforeBuildCommand).
+      - name: Stub gitignored bundle resource paths
+        run: mkdir -p dist src-tauri/sidecar-stage/browser
+
+      - name: rustfmt check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  release:
+    name: Build & release (tags only)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [frontend, backend]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          pnpm install --frozen-lockfile
-          pnpm -C sidecar/browser install --frozen-lockfile
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # tauri-action runs the CLI directly, so npm's pre-hooks never fire —
+      # the gitignored sidecar staging has to be built explicitly.
+      - name: Stage browser sidecar
+        run: |
+          cd sidecar/browser
+          pnpm install --prod --ignore-scripts
+          cd ../..
           pnpm run stage-sidecar
-        working-directory: .
-      - run: cargo fmt --check
-      - run: cargo clippy --lib --tests -- -D warnings
-      - run: cargo test --lib
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "VTNexa v__VERSION__"
+          releaseBody: "See the changelog for what shipped."
+          releaseDraft: true
+          prerelease: false

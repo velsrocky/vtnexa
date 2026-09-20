@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* https: ws://localhost:* ws://127.0.0.1:* wss:; frame-src 'self' data: https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; worker-src 'self' blob: https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; img-src 'self' data:; font-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* https: ws://localhost:* ws://127.0.0.1:* wss:; frame-src 'self'; object-src 'none'; base-uri 'self'"
     }
   },
   "bundle": {
@@ -26,7 +26,8 @@
     "targets": "all",
     "resources": [
       "sidecar-stage/browser",
-      ".vtnexa/skills"
+      ".vtnexa/skills",
+      "../dist"
     ],
     "icon": [
       "icons/32x32.png",

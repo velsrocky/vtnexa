@@ -6,6 +6,7 @@ import {
   mcpOAuthLogin,
   mcpOAuthLogout,
   mcpOAuthStatus,
+  mcpWorkspaceTrust,
   setMcpEnabled,
   setMcpServerEnabled,
   type McpAuthStatus,
@@ -17,6 +18,7 @@ export interface McpServerRow {
   enabled: boolean;
   tools: number;
   error?: string;
+  untrusted?: boolean;
   /** Remote servers only: OAuth state (undefined while loading/failed). */
   auth?: McpAuthStatus;
 }
@@ -40,8 +42,23 @@ export function useMcp({ workspaceRoot }: { workspaceRoot: string }) {
         name: s.name,
         kind: s.kind,
         enabled: s.enabled,
+        untrusted: !!s.untrusted,
         tools: 0,
       }));
+      // Trust prompt data: warn once when the workspace adds new servers.
+      try {
+        const trust = await mcpWorkspaceTrust();
+        const fresh = (trust.workspace_servers ?? []).filter(
+          (n) => !rows.find((r) => r.name === n)?.enabled,
+        );
+        if (fresh.length > 0) {
+          setNote(
+            `Workspace wants to add MCP servers (${fresh.join(", ")}) — disabled until you enable them. Only enable servers you trust; workspace configs cannot use {env:} secrets.`,
+          );
+        }
+      } catch {
+        /* trust probe is best-effort */
+      }
       if (isMcpEnabled()) {
         try {
           const raw = await mcpListToolsRaw();
@@ -84,11 +101,11 @@ export function useMcp({ workspaceRoot }: { workspaceRoot: string }) {
     }
   }, []);
 
-  // Refresh when the workspace changes or the panel opens.
+  // Refresh when the workspace changes or the panel opens. refresh is a
+  // useCallback([]) — referentially stable, so listing it is loop-safe.
   useEffect(() => {
     if (showMcp) void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showMcp, workspaceRoot]);
+  }, [showMcp, workspaceRoot, refresh]);
 
   async function setOn(on: boolean) {
     setMcpEnabled(on);

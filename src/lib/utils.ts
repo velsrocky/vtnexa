@@ -1,4 +1,4 @@
-import { DEFAULT_PROVIDER, type ProviderConfig, type Workspace } from "../types";
+import { DEFAULT_PROVIDER, type ChatMsg, type ProviderConfig, type Workspace } from "../types";
 
 export const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -49,3 +49,18 @@ export const dirName = (p: string) => {
 
 export const clampW = (v: number, lo: number, hi: number, fb: number) =>
   Number.isFinite(v) && v > 0 ? Math.min(hi, Math.max(lo, v)) : fb;
+
+/** The last turn died of budget/loop, not of completion: offer Continue.
+ *  Matches the loop marker (system-generated, only the budget path emits it)
+ *  in recent history, or the budget-exhausted fallback in the last answer. */
+export function didExhaustBudget(messages: ChatMsg[]): boolean {
+  const tail = messages.slice(-3);
+  if (tail.some((m) => m.id !== "stream" && m.content.includes("loop detected"))) return true;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.id === "stream") continue;
+    if (m.role !== "assistant") return false;
+    return m.content.includes("tool budget exhausted");
+  }
+  return false;
+}

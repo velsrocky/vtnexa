@@ -25,6 +25,12 @@ export function usePrefs() {
     clampW(Number(localStorage.getItem("vtai.rightW")), 240, 640, 360),
   );
 
+  // Skill section height in the left column (persisted). The file list above
+  // takes the rest.
+  const [skillH, setSkillH] = useState(() =>
+    clampW(Number(localStorage.getItem("vtai.skillH")), 60, 400, 150),
+  );
+
   function onResizerDown(side: "left" | "right") {
     return (e: React.MouseEvent) => {
       e.preventDefault();
@@ -52,5 +58,27 @@ export function usePrefs() {
     };
   }
 
-  return { themeId, setThemeId, theme, leftW, rightW, onResizerDown };
+  function onSkillResizerDown(e: React.MouseEvent) {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = skillH;
+    const move = (ev: MouseEvent) => {
+      // Divider sits above the skills section: dragging up grows it.
+      const h = Math.round(Math.min(400, Math.max(60, startH - (ev.clientY - startY))));
+      setSkillH(h);
+      try {
+        localStorage.setItem("vtai.skillH", String(h));
+      } catch {
+        /* ignore */
+      }
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
+
+  return { themeId, setThemeId, theme, leftW, rightW, onResizerDown, skillH, onSkillResizerDown };
 }

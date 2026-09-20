@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { useAgentTurn } from "./useAgentTurn";
+import { buildSkillPrompt, SKILL_SCOPE_NOTE, useAgentTurn } from "./useAgentTurn";
 import { newWorkspace } from "../lib/utils";
-import type { ProviderConfig, Workspace } from "../types";
+import type { ChatMsg, ProviderConfig, Workspace } from "../types";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -30,6 +30,30 @@ function openAIText(text: string, usage = { prompt_tokens: 20, completion_tokens
   return json({ choices: [{ message: { content: text } }], usage });
 }
 
+function sse(events: unknown[]) {
+  const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+  return new Response(body, { headers: { "content-type": "text/event-stream" } });
+}
+
+/** One streamed tool round: thinking deltas + N parallel fs_list calls. */
+function sseToolRound(reasoning: string, calls: { id: string; path: string }[]) {
+  return sse([
+    { choices: [{ delta: { reasoning_content: reasoning } }] },
+    ...calls.map((c, i) => ({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              { index: i, id: c.id, function: { name: "fs_list", arguments: JSON.stringify({ path: c.path }) } },
+            ],
+          },
+        },
+      ],
+    })),
+    { usage: { prompt_tokens: 10, completion_tokens: 5 } },
+  ]);
+}
+
 function setup(opts?: {
   busy?: boolean;
   provHistLength?: number;
@@ -40,10 +64,14 @@ function setup(opts?: {
   openPath?: string;
   provider?: Partial<ProviderConfig>;
   planMode?: boolean;
+  autoApproveWorkspace?: boolean;
+  /** Prior session messages, seeded before the turn runs. */
+  history?: ChatMsg[];
 }) {
   let ws: Workspace = {
     ...newWorkspace("main:ws", "/w"),
     ...(opts?.provider ? { provider: { ...newWorkspace("main:ws", "/w").provider, ...opts.provider } } : {}),
+    ...(opts?.history ? { messages: opts.history } : {}),
   };
   const busy: boolean[] = [];
   const remembered: ProviderConfig[] = [];
@@ -75,7 +103,6 @@ function setup(opts?: {
       setBusy: (v) => busy.push(v),
       logAudit: (e) => audits.push(e),
       rememberProvider: (c) => remembered.push(c),
-      setPendingTools: vi.fn(),
       setCenterTab: ((t: string) => centerTabs.push(t)) as any,
       setPadText: vi.fn(),
       setPlanText: vi.fn(),
@@ -84,6 +111,7 @@ function setup(opts?: {
       setShowJump: vi.fn(),
       flushStreamFrame: vi.fn(),
       planMode: opts?.planMode ?? false,
+      autoApproveWorkspace: opts?.autoApproveWorkspace,
       pushUndo: vi.fn(),
     }),
   );
@@ -207,6 +235,10 @@ describe("useAgentTurn context packing", () => {
     });
     expect(sys).toMatch(/Answer contract/);
     expect(sys).toMatch(/Ambiguity rule/);
+    expect(sys).toMatch(/act-first/);
+    expect(sys).toMatch(/Start acting on your first reply/);
+    expect(sys).toMatch(/NEVER use shell for listing/);
+    expect(sys).toMatch(/Wrapper rule/);
     expect(sys).toMatch(/Read-before-edit/);
     expect(sys).toMatch(/Decided: use pnpm/);
     expect(sys).toMatch(/Repo map/);
@@ -243,6 +275,7 @@ describe("useAgentTurn model variants", () => {
     expect(sys).toMatch(/NO cd tool/);
     expect(sys).toMatch(/ALREADY pasted above/);
     expect(sys).toMatch(/needs NO tools/);
+    expect(sys).toMatch(/First reply/);
     expect(sys).toMatch(/Grounding/);
     expect(sys).toMatch(/text-only/);
     expect(sys).toMatch(/ONLY from a shell_run tool result/);
@@ -252,6 +285,7 @@ describe("useAgentTurn model variants", () => {
   it("uses the full contract prompt for frontier models", async () => {
     const sys = await captureSys({ baseUrl: "https://api.openai.com/v1", model: "gpt-4o" });
     expect(sys).toMatch(/Answer contract/);
+    expect(sys).toMatch(/Start acting on your first reply/);
     expect(sys).toMatch(/Grounding/);
     expect(sys).toMatch(/only shell_run results count as output/);
     expect(sys).not.toMatch(/ONE tool call per reply/);
@@ -283,8 +317,37 @@ describe("useAgentTurn.expandSkill", () => {
     });
     const h = setup({ skills: [{ name: "fix", description: "d" }] });
     await expect(h.result.current.expandSkill("/fix the bug")).resolves.toBe(
-      "[skill: fix]\nSKILL BODY\n\nArguments:\nthe bug",
+      buildSkillPrompt("fix", "SKILL BODY", "the bug"),
     );
+  });
+
+  it("fires read-only skills on a bare first word", async () => {
+    setInvokeImpl(async (cmd) => {
+      expect(cmd).toBe("skill_read");
+      return "RATE BODY";
+    });
+    const h = setup({ skills: [{ name: "rate", description: "d" }] });
+    await expect(h.result.current.expandSkill("rate the app")).resolves.toBe(
+      buildSkillPrompt("rate", "RATE BODY", "the app"),
+    );
+  });
+
+  it("never bare-fires mutating skills", async () => {
+    let invoked = false;
+    setInvokeImpl(async () => {
+      invoked = true;
+      return "x";
+    });
+    const h = setup({
+      skills: [
+        { name: "commit", description: "d" },
+        { name: "fix", description: "d" },
+      ],
+    });
+    await expect(h.result.current.expandSkill("commit this now")).resolves.toBe("commit this now");
+    await expect(h.result.current.expandSkill("fix it")).resolves.toBe("fix it");
+    await expect(h.result.current.expandSkill("rate the app")).resolves.toBe("rate the app");
+    expect(invoked).toBe(false);
   });
 });
 
@@ -358,7 +421,9 @@ describe("useAgentTurn plan mode", () => {
     expect(sys).toContain("PLAN MODE");
     const names = (body.tools as any[]).map((t) => t.function.name);
     expect(names).toContain("fs_read");
+    expect(names).toContain("shell_poll");
     expect(names).not.toContain("shell_run");
+    expect(names).not.toContain("shell_bg");
     expect(names).not.toContain("fs_write");
     expect(names).not.toContain("git_commit");
   });
@@ -371,5 +436,357 @@ describe("useAgentTurn plan mode", () => {
     expect((forced.messages[0].content as string)).not.toContain("PLAN MODE");
     const names = (forced.tools as any[]).map((t) => t.function.name);
     expect(names).toContain("shell_run");
+  });
+});
+
+describe("useAgentTurn stall escalation", () => {
+  const Q = "Should I proceed with the setup?";
+  function stubScript(replies: (string | { tool: string; args: unknown })[]) {
+    const bodies: any[] = [];
+    let i = 0;
+    stubFetch((_url: string, init: any) => {
+      try {
+        bodies.push(JSON.parse(init.body));
+      } catch {
+        /* ignore */
+      }
+      const next = replies[Math.min(i++, replies.length - 1)];
+      if (typeof next === "string") return openAIText(next);
+      return json({
+        choices: [
+          {
+            message: {
+              content: "",
+              tool_calls: [
+                { id: "c1", type: "function", function: { name: next.tool, arguments: JSON.stringify(next.args) } },
+              ],
+            },
+          },
+        ],
+        usage: { prompt_tokens: 20, completion_tokens: 10 },
+      });
+    });
+    stubRafSync();
+    return bodies;
+  }
+  function stubFs() {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_list") return [{ name: "a", path: "/w/a", is_dir: false }];
+      throw new Error(`unexpected ${cmd}`);
+    });
+  }
+  const sysOf = (bodies: any[]) => bodies[0].messages[0].content as string;
+
+  it("warns after question-only turns, resets once the model acts", async () => {
+    stubFs();
+    const h = setup();
+    const run = (p: string) => act(async () => { await h.result.current.runAgentTurn(p); });
+
+    let bodies = stubScript([Q, Q]);
+    await run("set it up");
+    expect(sysOf(bodies)).not.toContain("Stall warning");
+    expect(sysOf(bodies)).toContain("may be reused directly");
+
+    bodies = stubScript([Q, Q]);
+    await run("set it up");
+    expect(sysOf(bodies)).toContain("Stall warning: the last 1 turn");
+
+    /* bodies is consumed through the stubbed-fetch closure, not a local read */
+    // eslint-disable-next-line no-useless-assignment
+    bodies = stubScript([{ tool: "fs_list", args: { path: "/w" } }, "listed it"]);
+    await run("list again");
+    bodies = stubScript([Q, Q]);
+    await run("and again");
+    expect(sysOf(bodies)).not.toContain("Stall warning");
+  });
+});
+
+describe("useAgentTurn reasoning stream", () => {
+  it("renders a live thinking frame and keeps it out of the final answer", async () => {
+    let holder: ReturnType<typeof setup> | null = null;
+    const frames: { thinking: string; content: string }[] = [];
+    // Synchronous rAF that records each published stream frame.
+    vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
+      cb();
+      const msgs = holder?.wsOf().messages ?? [];
+      const last = msgs[msgs.length - 1];
+      if (last?.id === "stream") frames.push({ thinking: last.thinking ?? "", content: last.content });
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    stubFetch(() =>
+      sse([
+        { choices: [{ delta: { reasoning_content: "let me check the files " } }] },
+        { choices: [{ delta: { reasoning_content: "before answering" } }] },
+        { choices: [{ delta: { content: "answer" } }] },
+        { usage: { prompt_tokens: 20, completion_tokens: 10 } },
+      ]),
+    );
+    setInvokeImpl(async () => ({}));
+    const h = setup();
+    holder = h;
+    await act(async () => {
+      await h.result.current.runAgentTurn("go");
+    });
+    // A frame is published during the reasoning phase - before any answer
+    // text exists. Without that, the transcript sits frozen (the live bug).
+    expect(frames.some((f) => f.thinking.length > 0 && !f.content.includes("answer"))).toBe(true);
+    // ...and the persisted answer is content-only, with no thinking tail.
+    expect(h.wsOf().messages.map((m) => [m.role, m.content])).toEqual([
+      ["user", "go"],
+      ["assistant", "answer"],
+    ]);
+  });
+});
+
+// Replay of the messy long turn that broke in live use: 30 messages of prior
+// history, 10 tool rounds with parallel calls, a repeated call (repeat nudge),
+// a transient provider 500 mid-turn, and reasoning deltas throughout. Each
+// assertion pins one regression class found in live debugging.
+describe("useAgentTurn long-turn integration", () => {
+  it("keeps the task, isolates nudges, retries the 500 and streams thinking", async () => {
+    const history: ChatMsg[] = [];
+    for (let i = 0; i < 15; i++) {
+      history.push({ id: `h${i}u`, role: "user", content: `earlier question ${i}` });
+      history.push({ id: `h${i}a`, role: "assistant", content: `earlier answer ${i}` });
+    }
+    const TASK = "audit the workspace layout";
+    const FINAL = "COMPLETE: reviewed the workspace across ten rounds.";
+    let fetches = 0;
+    let served = 0;
+    let injected500 = false;
+    const bodies: any[] = [];
+    stubFetch((_url: string, init: any) => {
+      fetches++;
+      bodies.push(JSON.parse(init.body));
+      if (fetches === 5 && !injected500) {
+        // Transient llama.cpp template hiccup mid-turn: must be retried.
+        injected500 = true;
+        return json({ error: { message: "Jinja Exception: No messages provided." } }, 500);
+      }
+      served++;
+      if (served <= 10) {
+        // Round 2 repeats round 1's first call -> repeat nudge must fire.
+        const first = served === 2 ? "/w/d1a" : `/w/d${served}a`;
+        return sseToolRound(`round ${served}: weighing targets. `, [
+          { id: `a${served}`, path: first },
+          { id: `b${served}`, path: `/w/d${served}b` },
+        ]);
+      }
+      return sse([{ choices: [{ delta: { content: FINAL } }] }, { usage: { prompt_tokens: 1, completion_tokens: 1 } }]);
+    });
+    const frames: { thinking: string; content: string }[] = [];
+    let holder: ReturnType<typeof setup> | null = null;
+    vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
+      cb();
+      const msgs = holder?.wsOf().messages ?? [];
+      const last = msgs[msgs.length - 1];
+      if (last?.id === "stream") frames.push({ thinking: last.thinking ?? "", content: last.content });
+      return 1;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    setInvokeImpl(async () => []);
+    const h = setup({ history });
+    holder = h;
+    await act(async () => {
+      await h.result.current.runAgentTurn(TASK);
+    });
+
+    // 1. Final message is content-only: no thinking tail, no nudge text.
+    const msgs = h.wsOf().messages.filter((m) => m.id !== "stream");
+    const final = msgs[msgs.length - 1];
+    expect(final.role).toBe("assistant");
+    expect(final.content).toBe(FINAL);
+
+    // 2. Inline tool cards captured every executed call (2 per round).
+    expect(final.tools).toHaveLength(20);
+
+    // 3. Every outbound request still carries this turn's request. With 30
+    //    history messages + 20+ appended round messages the window trims hard;
+    //    losing the task here is exactly the live "no task was given" bug.
+    for (const b of bodies) {
+      expect(b.messages.some((m: any) => m.role === "user" && m.content === TASK)).toBe(true);
+    }
+
+    // 4. Nudges never travel as user turns...
+    for (const b of bodies) {
+      const leaked = b.messages.filter(
+        (m: any) => m.role === "user" && /system nudge|You repeated/.test(m.content ?? ""),
+      );
+      expect(leaked).toHaveLength(0);
+    }
+    // 5. ...and the repeat nudge did land inside a tool result.
+    expect(
+      bodies.some((b) =>
+        b.messages.some((m: any) => m.role === "tool" && (m.content ?? "").includes("[system nudge]")),
+      ),
+    ).toBe(true);
+
+    // 6. The transient 500 was retried once, not fatal (11 rounds + 1 retry).
+    expect(injected500).toBe(true);
+    expect(bodies.length).toBe(12);
+
+    // 7. Reasoning streamed live during its phase, before the answer existed.
+    expect(frames.some((f) => f.thinking.length > 0 && !f.content.includes(FINAL))).toBe(true);
+
+    // 8. Audit complete and the turn closed cleanly.
+    expect(h.audits).toHaveLength(20);
+    expect(h.audits.every((a) => a.ok)).toBe(true);
+    expect(h.busy).toEqual([true, false]);
+    expect(h.turnAbort.current).toBeNull();
+  });
+});
+
+describe("skill scope (stale formats must not hijack later turns)", () => {
+  it("buildSkillPrompt marks the format this-turn-only with exact-output discipline", () => {
+    const p = buildSkillPrompt("rate", "Reply with ONLY:\n- `Score: X/10`", "the workspace");
+    expect(p).toContain("[skill: rate]");
+    expect(p).toContain("Reply with ONLY");
+    expect(p).toContain("THIS turn only");
+    expect(p).toContain("exactly what the skill asks for");
+    expect(p).toContain("expires at the end of this turn");
+    expect(p).toContain("Arguments:\nthe workspace");
+    const bare = buildSkillPrompt("map", "List files.", "");
+    expect(bare).not.toContain("Arguments:");
+  });
+
+  it("every turn ships the scope-expiry note in the system prompt (weak tier)", async () => {
+    const bodies: any[] = [];
+    stubFetch((_url, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return openAIText("hi there");
+    });
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup();
+    await act(async () => {
+      await h.result.current.runAgentTurn("hi");
+    });
+    const sys = bodies[0].messages[0];
+    expect(sys.role).toBe("system");
+    expect(sys.content).toContain(SKILL_SCOPE_NOTE);
+    expect(sys.content).toContain("expired now");
+    // Weak-tier greeting + format discipline travel with it.
+    expect(sys.content).toContain("answer briefly and oriented");
+    expect(sys.content).toContain("followed exactly");
+  });
+
+  it("strong tier carries the orienting-greeting and exact-sections rules", async () => {
+    const bodies: any[] = [];
+    stubFetch((_url, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return openAIText("hello");
+    });
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup({
+      provider: { baseUrl: "https://api.anthropic.com", model: "claude-sonnet-4-5", kind: "anthropic" },
+    });
+    await act(async () => {
+      await h.result.current.runAgentTurn("hi");
+    });
+    const sys =
+      bodies[0].messages[0]?.role === "system"
+        ? (bodies[0].messages[0].content as string)
+        : (bodies[0].system as string);
+    expect(sys).toContain(SKILL_SCOPE_NOTE);
+    expect(sys).toContain("answer briefly and oriented");
+    expect(sys).toContain("emit exactly those sections");
+  });
+
+  it("a follow-up after a skill turn keeps history but expires its format", async () => {
+    const skillTurn: ChatMsg = {
+      id: "u1",
+      role: "user",
+      content: buildSkillPrompt("rate", "Reply with ONLY:\n- `Score: X/10`", ""),
+    };
+    const bodies: any[] = [];
+    stubFetch((_url, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return openAIText("here is how to improve");
+    });
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup({
+      history: [skillTurn, { id: "a1", role: "assistant", content: "Score: 5/10" }],
+    });
+    await act(async () => {
+      await h.result.current.runAgentTurn("how to improve the app score to 10/10?");
+    });
+    const sent = bodies[0].messages as any[];
+    // Evidence rule intact: prior turn still visible for grounding ...
+    expect(sent.some((m) => m.role === "user" && (m.content ?? "").includes("[skill: rate]"))).toBe(true);
+    // ... but the format is retired by the per-turn scope note ...
+    expect(sent[0].content).toContain(SKILL_SCOPE_NOTE);
+    // ... and the fresh question goes out unmodified.
+    const lastUser = [...sent].reverse().find((m) => m.role === "user");
+    expect(lastUser.content).toBe("how to improve the app score to 10/10?");
+  });
+});
+
+describe("auto-approve prompt wording", () => {
+  async function sysContent(auto?: boolean): Promise<string> {
+    const bodies: any[] = [];
+    stubFetch((_url, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return openAIText("ok");
+    });
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup(auto === undefined ? {} : { autoApproveWorkspace: auto });
+    await act(async () => {
+      await h.result.current.runAgentTurn("hi");
+    });
+    const first = bodies[0];
+    const sys = first.messages?.[0]?.role === "system" ? first.messages[0].content : first.system;
+    return sys as string;
+  }
+
+  it("tells the model writes go direct when auto is on", async () => {
+    const sys = await sysContent(true);
+    expect(sys).toContain("writes DIRECTLY");
+    expect(sys).toContain("NO approval popup");
+    expect(sys).not.toContain("STAGES to the Diff");
+  });
+
+  it("keeps review-gated wording when auto is off or unset", async () => {
+    for (const auto of [false, undefined]) {
+      const sys = await sysContent(auto);
+      expect(sys).toContain("STAGES to the Diff review gate");
+      expect(sys).not.toContain("writes DIRECTLY");
+    }
+  });
+});
+
+describe("continuation rule wording", () => {
+  async function sysContentFor(provider?: object): Promise<string> {
+    const bodies: any[] = [];
+    stubFetch((_url, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return openAIText("ok");
+    });
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup(provider ? { provider: provider as never } : {});
+    await act(async () => {
+      await h.result.current.runAgentTurn("hi");
+    });
+    const first = bodies[0];
+    return (first.messages?.[0]?.role === "system" ? first.messages[0].content : first.system) as string;
+  }
+
+  it("strong tier orders execution over re-survey on bare continuations", async () => {
+    const sys = await sysContentFor({
+      baseUrl: "https://api.anthropic.com",
+      model: "claude-sonnet-4-5",
+      kind: "anthropic",
+    });
+    expect(sys).toContain("Bare continuations");
+    expect(sys).toContain("never re-survey the workspace");
+  });
+
+  it("weak tier carries the short form", async () => {
+    const sys = await sysContentFor();
+    expect(sys).toContain("do the last proposed step NOW");
   });
 });

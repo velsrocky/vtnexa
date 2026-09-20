@@ -8,6 +8,24 @@ export interface ChatMsg {
   id: string;
   role: "user" | "assistant" | "system" | "tool";
   content: string;
+  /** Tool calls executed during the turn that produced this assistant message. */
+  tools?: ToolEvent[];
+  /**
+   * Live reasoning tail (OpenAI-compat reasoning_content) for the in-flight
+   * stream message only. Never persisted: session restore keeps id/role/
+   * content/tools, so this stays a display-only field.
+   */
+  thinking?: string;
+}
+
+/** One agent tool call, mirroring AuditEvent minus hook-assigned id/ts. */
+export interface ToolEvent {
+  tool: string;
+  /** JSON args, truncated at capture */
+  args: string;
+  decision: "auto" | "approved" | "rejected";
+  ok: boolean;
+  ms: number;
 }
 
 export interface WorkspaceUsage {
@@ -16,6 +34,11 @@ export interface WorkspaceUsage {
   cost: number;
   tools: number;
   toolMs: number;
+}
+
+export interface TrustedPath {
+  pattern: string;
+  reason: string;
 }
 
 export interface AuditEvent {
@@ -66,6 +89,9 @@ export interface Workspace {
   previewUrl: string;
   /** Commander mode: true = plan (read-only turns), false = build. */
   planMode: boolean;
+  /** Agent file-op undo/redo trails (persisted, byte-budgeted). */
+  undoStack?: UndoEntry[];
+  redoStack?: UndoEntry[];
 }
 
 /** Center-column tab. */
@@ -113,6 +139,18 @@ export type UndoEntry =
   | { kind: "write"; path: string; before: string; after: string; existedBefore: boolean }
   | { kind: "rename"; oldPath: string; newPath: string }
   | { kind: "delete"; path: string; content: string };
+
+/** Snapshot weight of one entry in chars (dominated by file contents). */
+export function undoEntrySize(e: UndoEntry): number {
+  switch (e.kind) {
+    case "write":
+      return e.before.length + e.after.length;
+    case "delete":
+      return e.content.length;
+    case "rename":
+      return 0;
+  }
+}
 
 export function undoEntryLabel(e: UndoEntry): string {
   const short = (p: string) => p.split("/").pop() ?? p;

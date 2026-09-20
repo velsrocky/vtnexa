@@ -1,8 +1,8 @@
 # VTNexa
 
-**A private, review-gated agentic workspace for your code.** A desktop app
-(Tauri v2 + React) where a tool-calling agent drives your workspace — and
-*nothing* writes, runs, or clicks without your explicit approval.
+**A private agentic workspace for your code.** A desktop app
+(Tauri v2 + React) where a tool-calling agent drives your workspace — autonomous
+inside it, approval-gated the moment it reaches outside.
 
 ![VTNexa window](docs/screenshot.png)
 
@@ -16,10 +16,12 @@ choose.
 Most coding agents either (a) ask for permission on every keystroke or
 (b) quietly edit your repo and hope for the best. VTNexa takes a third path:
 
-- **The agent proposes, you dispose.** File edits land in a side-by-side Diff
-  view. You approve each one (optionally with an instant commit). Shell
-  commands, browser actions, renames, deletes and commits pop an approval
-  dialog — with a warning when a command looks like it escapes the workspace.
+- **Autonomous inside, gated outside.** File writes, shell commands, renames,
+  deletes and commits *inside your workspace* run free — no popups. The
+  moment an action reaches outside (absolute paths elsewhere, `~`, sudo,
+  piped-to-shell downloads, browser and MCP tools), a native approval dialog
+  pops. Toggle it in Settings → Commander autonomy (review-gated mode asks
+  for everything, like before).
 - **Local by default.** `ollama pull qwen2.5-coder:7b` and you have a private
   coding agent. Switch models per window — grind with a cheap local model in
   one window, think with a frontier model in another.
@@ -32,14 +34,18 @@ Most coding agents either (a) ask for permission on every keystroke or
 
 ## Features
 
-- **Commander** — tool-calling agent: list/read/search files, propose diffs,
-  run shell commands, typecheck edited files (`lsp_diagnostics`: tsc, cargo
-  check, py_compile) and query language servers (`lsp`: hover, definition,
-  references, symbols — read-only, auto-approved), drive a real Chromium
-  browser (navigate, click, type, screenshot with vision), and commit to
-  git — all behind the review gate. **Plan mode** (◔ toggle or per-turn)
-  restricts it to read-only tools for investigation-first flows; routines
-  always run Build.
+- **Commander** — tool-calling agent: list/read/search files, write files
+  directly, run shell commands, typecheck edited files and query language
+  servers (`lsp`: hover, definition, references, symbols), drive a real
+  Chromium browser (navigate, click, type, screenshot with vision), and commit
+  to git. In-workspace work runs free; outside-workspace access, browser
+  actions and MCP tools pop the native approval dialog (backend single-use
+  tokens). Review-gated mode (Settings) restores per-action approval with
+  side-by-side Diff staging. Long shell work (installs, builds, test suites)
+  runs as background jobs (`shell_bg` + `shell_poll`, same screening as
+  foreground); turns that run out of budget offer a ▶ Continue
+  button over full history. **Plan mode** (◔ toggle or per-turn) restricts it
+  to read-only tools for investigation-first flows; routines always run Build.
 - **Undo** — approved writes, renames and file deletes are captured
   (↩/↪ buttons, `/undo` `/redo` in chat). Shell/terminal, directory deletes
   and files over 256KB are out of scope; the stack resets on reload.
@@ -51,9 +57,9 @@ Most coding agents either (a) ask for permission on every keystroke or
   the gate.
 - **Nexa Pad / Plan / Memory** — shared notes and durable cross-session
   context the agent reads and writes (`<workspace>/.nexa/`).
-- **Skills** — 8 ready-made slash commands (`/commit`, `/review`, `/explain`,
-  `/map`, `/fix`, `/refactor`, `/test`, `/docs`); add your own as markdown
-  files. Project `AGENTS.md`/`CLAUDE.md` is loaded every turn.
+- **Skills** — 9 ready-made slash commands (`/commit`, `/review`, `/explain`,
+  `/map`, `/fix`, `/refactor`, `/test`, `/docs`, `/scaffold`); add your own
+  as markdown files. Project `AGENTS.md`/`CLAUDE.md` is loaded every turn.
 - **Routines** — scheduled agent runs with a 15-minute minimum interval.
 - **Browser Use** — persistent Chromium profile (signed in as you) the agent
   can operate with your approval; screenshots come back as vision input.
@@ -64,23 +70,21 @@ Most coding agents either (a) ask for permission on every keystroke or
   `mcp_<server>_<tool>`, always require approval. Remote auth is static
   headers with `{env:...}` substitution (never commit tokens), or OAuth browser
   sign-in from the ⛁ panel (tokens in the OS keychain, silent refresh).
-
-## The 👍 / 👎 buttons (what they do)
-
-Every Commander answer has 👍 and 👎 buttons. Honest explanation:
-
-- Clicking one saves a private note on your machine only: what you asked,
-  what it answered, which model answered, and good/bad. Nothing leaves your
-  computer, the model never sees your rating, and clicking changes nothing
-  by itself.
-- So why do they exist? The notes are evidence. When answers are bad on a
-  particular model, the pattern (missed tool calls, invented file states,
-  false "I can't run commands") tells the developers exactly what guardrail
-  to build next — approval gates, self-correction loops, and simpler
-  instructions for weaker models all came from reading real bad answers.
-- You can safely ignore the buttons and lose nothing. But if Commander gives
-  a wrong answer, a 👎 with that trace is the most useful bug report you can
-  file — it captures the prompt, the answer, and the model in one entry.
+- **Sandboxing** — Approved commands run **exactly once** in firejail (when
+  installed) with verified flags:
+  - System directories read-only: `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`
+  - Private `/tmp` and `/dev` per run
+  - No privilege escalation (`--nonewprivs`)
+  - Wall-clock time limit (30s, via `timeout` inside the jail)
+  - The workspace stays writable (builds, tests, git need it) and network
+    stays reachable (installs, fetches) — those are covered by the approval
+    dialog and backend screening, not the jail.
+  Without firejail, the same command runs behind the same screening +
+  approval + timeout path (no second, unsandboxed execution).
+- **Rate limiting** — 30 turns per minute per window, 500 turns per day (prevents token exhaustion)
+- **Audit log export** — Export full audit trail with cryptographic hash verification
+- **Health monitoring** — Uptime tracking, memory usage, turn count, heartbeat checks
+- **Trusted paths** — Skip approval dialogs for safe directories (e.g., `docs/`, `src/generated/`, `tests/__snapshots__/`). Configure via Settings → Trusted Paths to reduce UX verbosity without compromising safety.
 
 ## Install
 
@@ -103,23 +107,45 @@ that handles tool calling well (`qwen2.5:7b-instruct`, `llama3.1:8b`,
 
 ## Security model (honest version)
 
-- **Approval is the gate.** Side-effecting tools (shell, browser actions,
-  rename/delete, commit) require your click. Read-only tools run free.
-- **Defense in depth.** The backend additionally *refuses* obviously
-  destructive shell patterns (`rm -rf /`, `mkfs`, `dd` to devices, fork
-  bombs) and direct reads of credential material (`~/.ssh`, AWS creds,
-  `/etc/shadow`). This is a backstop against blind clicking — **not a
-  sandbox**. Approved commands run as you, with your permissions. The
-  interactive terminal is deliberately unscreened: it's your shell.
-- **Workspace confinement.** File tools are confined server-side to the
-  workspace root you pick (per window), with symlink-safe checks and a
-  sensitive-path deny list.
-- **Secrets.** API keys go to the OS keychain (per endpoint+model), never to
-  session files or the workspace. Without a keychain daemon they fall back to
-  app-local storage and the UI says so.
-- **Prompt injection.** Browser/page content and file contents enter the
-  model's context. Treat agent-suggested commands accordingly — read the
-  approval dialog.
+This section documents exactly what is and isn't protected. Read it carefully.
+
+### ✅ What IS protected
+
+- **Outside access pops a dialog.** Anything reaching outside the workspace
+  (absolute paths elsewhere, `~`, sudo, piped-to-shell downloads, browser and
+  MCP tools) pops a native OS dialog — page content cannot click it.
+  In-workspace file writes, shell, renames, deletes and commits run free
+  (opencode-style; toggle review-gated mode in Settings for per-action
+  approval). Read-only tools always run free.
+- **Workspace confinement.** File tools are confined server-side to the workspace root you pick (per window), with symlink-safe checks and a sensitive-path deny list.
+- **Secrets.** API keys go to the OS keychain (per endpoint+model), never to session files or the workspace. Without a keychain daemon they fall back to app-local storage and the UI says so.
+- **Destruction patterns blocked.** The backend refuses obviously destructive shell patterns (`rm -rf /`, `mkfs`, `dd`, `curl | sh` pipe downloads to shell) and direct reads of credential material (`~/.ssh`, AWS creds, `/etc/shadow`) — even when auto-approved or blindly approved.
+- **Read-only skills are confined.** Skills that scope themselves to read-only
+  work (e.g. `/rate`) can neither be offered nor trigger side-effect tools —
+  refused fail-closed before any dialog could appear.
+
+### ⚠️ What is NOT protected (auto mode)
+
+**In auto mode the workspace is the trust boundary: a prompt-injected model
+(malicious webpage content, poisoned repo instructions, hostile tool output)
+can drive in-workspace writes and shell commands with NO popup.** The backend
+backstops above still apply, and every auto-approved call is tagged `auto`
+(not `approved`) in the audit log — but do not point Commander at untrusted
+content in auto mode and walk away. Review-gated mode (Settings) restores a
+dialog on every side effect.
+
+### ⚠️ What is NOT sandboxed
+
+**This is the critical limitation: Approved commands run as your OS user with your full permissions.**
+
+- The interactive terminal (PTY) has NO screening - it's your shell.
+- `curl ... | sh` is allowed in the backend but WARNINGED in the native approval dialog - it's how many toolchains work.
+- The backend screening is a *backstop against blind clicking*, not a sandbox. It catches patterns, not obfuscation.
+- If you approve a command that does `curl | sh` or runs arbitrary code, that code runs with your permissions.
+
+### Recommendation
+
+Treat every "Approve" click as a commitment to trust what the agent is doing. Read the native dialog carefully (including sandbox-escape warnings). The agent should explain what it needs to run before asking for approval. Treat unexpected dialogs as hostile and reject them.
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md).
 
@@ -134,15 +160,51 @@ vtnexa --uninstall   remove a per-user install
 ## Development
 
 ```sh
-pnpm test            # 188 vitest tests (jsdom)
-pnpm build           # tsc + vite
-cargo test --manifest-path src-tauri/Cargo.toml --lib   # Rust
-pnpm install-local   # build .deb + install per-user (no sudo)
+# Quick start
+pnpm install
+pnpm dev
+
+# Full test suite
+pnpm test                        # ~285 Vitest tests + coverage
+pnpm e2e                         # Playwright E2E tests
+cargo test --manifest-path src-tauri/Cargo.toml --lib  # 56 Rust tests
+
+# Build
+pnpm build                       # tsc + vite
+cargo build --release            # Tauri release
+
+# Lint and typecheck
+pnpm exec tsc --noEmit
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 ```
 
-Architecture in one line: thin React components → domain hooks (lanes are
-gone — one window = one workspace) → Tauri commands in `src-tauri/src/lib.rs`
-(sandbox, git, shell, PTY, keychain) → a Playwright sidecar for Browser Use.
+### Makefile targets
+
+```sh
+make dev         # Run development server
+make build       # Build production app
+make test        # Run all tests
+make lint        # Run linters
+make install-local  # Build and install locally
+```
+
+### CI/CD
+
+Automated testing and building on every PR:
+- ESLint (`--max-warnings 0`) + TypeScript type checking
+- Vitest unit tests with a coverage ratchet
+- Playwright e2e (chromium, against the web build)
+- Rust fmt check, clippy (`-D warnings`), and tests
+- Tauri release builds on all three platforms (draft release on `v*` tags)
+- Dependabot: weekly grouped updates for npm, cargo and GitHub Actions
+
+See `.github/workflows/ci.yml` for details.
+
+Architecture: thin React components → domain hooks (one window = one
+workspace) → Tauri commands in focused `src-tauri/src/` modules (workspace
+sandbox, approvals, git, shell, PTY, keychain — see `docs/architecture.md`)
+→ Playwright sidecar for Browser Use. Details in `docs/architecture.md`;
+changes in `CHANGELOG.md`.
 
 ## Contributing
 

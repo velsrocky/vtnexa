@@ -1,8 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AuditInput, UndoEntry, Workspace } from "../types";
-import { undoEntryLabel } from "../types";
+import { undoEntryLabel, undoEntrySize } from "../types";
 import { fsDelete, fsRead, fsRename, fsWrite, gitCommit } from "../lib/tauri";
+import { claimFor } from "../lib/approval";
+import { trimUndoStack } from "../lib/sessionStore";
 import { baseName } from "../lib/utils";
+import { useConfirm } from "../context/ConfirmContext";
 
 // Undo boundaries (v1): approved Diff-gate writes + file renames/deletes.
 // Shell/terminal side effects, directory deletes and binaries are NOT
@@ -10,16 +13,7 @@ import { baseName } from "../lib/utils";
 const MAX_UNDO_ENTRIES = 20;
 const MAX_UNDO_BYTES = 256 * 1024;
 
-function entrySize(e: UndoEntry): number {
-  switch (e.kind) {
-    case "write":
-      return e.before.length + e.after.length;
-    case "delete":
-      return e.content.length;
-    case "rename":
-      return 0;
-  }
-}
+// Single source of truth lives in types.ts (undoEntrySize) — do not duplicate.
 
 // Diff review gate: stage user edits as a pending diff (never direct
 // writes), approve with drift guard, optionally commit. Composes on the
@@ -43,12 +37,44 @@ export function useDiffGate(opts: {
   setCommitMsg: (v: string) => void;
   logAudit: (e: AuditInput) => void;
   retargetTabs: (oldP: string, newP: string) => void;
-  closeTab: (path: string) => void;
+  closeTab: (path: string) => void | Promise<void>;
 }) {
   const { ws, updateWs, openPath, editorText, originalText } = opts;
   const { setOriginals, setBuffers, setOriginalText, setEditorText } = opts;
+  const confirm = useConfirm();
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const [redoStack, setRedoStack] = useState<UndoEntry[]>([]);
+
+  // Persisted trails: seed once from a restored session (ref-guarded so
+  // StrictMode double-invoke can't re-seed over live state), then mirror the
+  // budget-trimmed stacks into the Workspace snapshot for session.json.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current) return;
+    seededRef.current = true;
+    if (ws.undoStack?.length) setUndoStack(ws.undoStack);
+    if (ws.redoStack?.length) setRedoStack(ws.redoStack);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seed exactly once on mount
+  }, []);
+  useEffect(() => {
+    if (!seededRef.current) return; // don't clobber a restored snapshot pre-seed
+    const undo = trimUndoStack(undoStack);
+    const redo = trimUndoStack(redoStack);
+    const prevU = ws.undoStack ?? [];
+    const prevR = ws.redoStack ?? [];
+    if (
+      prevU.length === undo.length &&
+      prevU.every((e, i) => e === undo[i]) &&
+      prevR.length === redo.length &&
+      prevR.every((e, i) => e === redo[i])
+    ) {
+      return;
+    }
+    updateWs((w) => ({ ...w, undoStack: undo, redoStack: redo }));
+    // Deliberately keyed on the incoming stacks only: reading ws.* in deps
+    // would re-fire this effect on every workspace change (and clobber it).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [undoStack, redoStack]);
 
   function note(text: string) {
     updateWs((w) => ({ ...w, shellOut: w.shellOut + text }));
@@ -56,7 +82,7 @@ export function useDiffGate(opts: {
 
   /** External capture (agent rename/delete via runTool, tree ops). */
   function pushUndo(e: UndoEntry) {
-    if (entrySize(e) > MAX_UNDO_BYTES) {
+    if (undoEntrySize(e) > MAX_UNDO_BYTES) {
       note(`\n↩ undo skipped ${undoEntryLabel(e)} (over 256KB - too large to snapshot)`);
       return;
     }
@@ -96,8 +122,8 @@ export function useDiffGate(opts: {
     path: string;
     original: string;
   }): Promise<{ proceed: boolean; current: string; existed: boolean }> {
-    let current = "";
-    let existed = true;
+    let current: string;
+    const existed = true;
     try {
       current = await fsRead(d.path);
     } catch (e) {
@@ -106,14 +132,14 @@ export function useDiffGate(opts: {
       if (msg.includes("No such file or directory") || msg.includes("not exist")) {
         return { proceed: true, current: "", existed: false };
       }
-      const ok = window.confirm(
+      const ok = await confirm(
         `${baseName(d.path)} could not be read (${msg}) — likely locked or permission-denied. Apply anyway and overwrite?`,
       );
       // Blind overwrite: best-effort undo seed (may be empty).
       return { proceed: ok, current: d.original, existed: d.original !== "" || existed };
     }
     if (current === d.original) return { proceed: true, current, existed: true };
-    const ok = window.confirm(
+    const ok = await confirm(
       `${baseName(d.path)} changed on disk since this diff was staged (another window, the agent, or an external editor).\n\nApply anyway and overwrite those changes?`,
     );
     return { proceed: ok, current, existed: true };
@@ -145,12 +171,56 @@ export function useDiffGate(opts: {
     });
   }
 
+  function noteApplyFailure(action: string, path: string, err: unknown, diag?: string) {
+    const msg = String(err instanceof Error ? err.message : err);
+    updateWs((w) => ({
+      ...w,
+      // Pending diff is KEPT so the user can retry after fixing the cause
+      // (workspace root, stale window, backend error).
+      shellOut: w.shellOut + `\n✗ ${action} failed for ${path}: ${msg.slice(0, 300)}${diag ? ` [${diag}]` : ""}`,
+    }));
+    opts.logAudit({
+      tool: "fs_write",
+      args: JSON.stringify({ path }).slice(0, 1000),
+      decision: "approved",
+      ok: false,
+      ms: 0,
+      note: `${action} failed: ${msg.slice(0, 200)}${diag ? ` [${diag}]` : ""}`,
+    });
+  }
+
+  // Lengths only, never secret content: proves whether the token the claim
+  // minted is the token the write sent.
+  function approvalDiag(a: { token: string; detail: string } | undefined): string {
+    return `frontend token_len=${a?.token?.length ?? -1} detail_len=${a?.detail?.length ?? -1}`;
+  }
+
   async function approveDiff() {
     const d = ws.pendingDiff;
     if (!d) return;
     const drift = await driftRead(d);
     if (!drift.proceed) return;
-    await fsWrite(d.path, d.content);
+    // The Approve click is the review; the claim token binds this exact path
+    // backend-side so a compromised renderer cannot redirect the write.
+    // Claim and write are diagnosed separately: an empty/missing token at the
+    // write means the claim produced nothing (stale window, backend mismatch).
+    let approval;
+    try {
+      approval = await claimFor("fs_write", { path: d.path });
+    } catch (e) {
+      noteApplyFailure("approve claim", d.path, e);
+      return;
+    }
+    if (!approval?.token) {
+      noteApplyFailure("approve claim", d.path, "claim returned no token (stale window? restart the app)");
+      return;
+    }
+    try {
+      await fsWrite(d.path, d.content, approval);
+    } catch (e) {
+      noteApplyFailure("approve write", d.path, e, approvalDiag(approval));
+      return;
+    }
     markApplied(d.path, d.content);
     pushUndo({ kind: "write", path: d.path, before: drift.current, after: d.content, existedBefore: drift.existed });
     const verified = await verifyApplied(d.path, d.content);
@@ -166,14 +236,30 @@ export function useDiffGate(opts: {
   }
 
   // Approve + immediately commit that file. User-initiated (the click IS the
-  // approval), so no popup - but it is recorded in this window's audit trail.
+  // approval), so no extra dialog - but it is recorded in this window's audit trail.
   async function approveAndCommit() {
     const d = ws.pendingDiff;
     if (!d) return;
     const drift = await driftRead(d);
     if (!drift.proceed) return;
 
-    await fsWrite(d.path, d.content);
+    let approval;
+    try {
+      approval = await claimFor("fs_write", { path: d.path });
+    } catch (e) {
+      noteApplyFailure("approve+commit claim", d.path, e);
+      return;
+    }
+    if (!approval?.token) {
+      noteApplyFailure("approve+commit claim", d.path, "claim returned no token (stale window? restart the app)");
+      return;
+    }
+    try {
+      await fsWrite(d.path, d.content, approval);
+    } catch (e) {
+      noteApplyFailure("approve+commit write", d.path, e, approvalDiag(approval));
+      return;
+    }
     markApplied(d.path, d.content);
     pushUndo({ kind: "write", path: d.path, before: drift.current, after: d.content, existedBefore: drift.existed });
     const verified = await verifyApplied(d.path, d.content);
@@ -181,7 +267,12 @@ export function useDiffGate(opts: {
     const msg = opts.commitMsg.trim() || `Update ${d.path.split("/").pop()}`;
     const t0 = Date.now();
     try {
-      const r = await gitCommit(ws.cwd || opts.cwd, msg, [d.path]);
+      const r = await gitCommit(
+        ws.cwd || opts.cwd,
+        msg,
+        [d.path],
+        await claimFor("git_commit", { cwd: ws.cwd || opts.cwd, message: msg, files: [d.path] }),
+      );
       updateWs((w) => ({
         ...w,
         pendingDiff: null,
@@ -233,7 +324,7 @@ export function useDiffGate(opts: {
       case "write": {
         const content = dir === "undo" ? e.before : e.after;
         if (dir === "undo" && !e.existedBefore) {
-          await fsDelete(e.path, false);
+          await fsDelete(e.path, false, await claimFor("fs_delete", { path: e.path }));
           setOriginals((o) => {
             const next = { ...o };
             delete next[e.path];
@@ -248,9 +339,9 @@ export function useDiffGate(opts: {
             setOriginalText("");
             setEditorText("");
           }
-          opts.closeTab(e.path);
+          void opts.closeTab(e.path);
         } else {
-          await fsWrite(e.path, content);
+          await fsWrite(e.path, content, await claimFor("fs_write", { path: e.path }));
           markApplied(e.path, content);
         }
         break;
@@ -258,21 +349,21 @@ export function useDiffGate(opts: {
       case "rename": {
         const from = dir === "undo" ? e.newPath : e.oldPath;
         const to = dir === "undo" ? e.oldPath : e.newPath;
-        await fsRename(from, to);
+        await fsRename(from, to, await claimFor("fs_rename", { old_path: from, new_path: to }));
         opts.retargetTabs(from, to);
         break;
       }
       case "delete": {
         if (dir === "undo") {
-          await fsWrite(e.path, e.content);
+          await fsWrite(e.path, e.content, await claimFor("fs_write", { path: e.path }));
           markApplied(e.path, e.content);
         } else {
-          await fsDelete(e.path, false);
+          await fsDelete(e.path, false, await claimFor("fs_delete", { path: e.path }));
           if (e.path === openPath) {
             setOriginalText("");
             setEditorText("");
           }
-          opts.closeTab(e.path);
+          void opts.closeTab(e.path);
         }
         break;
       }

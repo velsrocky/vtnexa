@@ -38,6 +38,7 @@ function setup() {
 describe("useShell", () => {
   it("appends command output to the shell log", async () => {
     setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "approval_claim") return "tok-test";
       expect(cmd).toBe("shell_run");
       expect(args).toMatchObject({ cwd: "/w" });
       return { stdout: "total 0\n", stderr: "", code: 0 };

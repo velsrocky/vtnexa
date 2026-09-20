@@ -1,5 +1,6 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { baseName, clampW, dirName, fmtDur, isWithin, newWorkspace, uid } from "./utils";
+import { baseName, clampW, didExhaustBudget, dirName, fmtDur, isWithin, newWorkspace, uid } from "./utils";
 
 describe("uid", () => {
   it("returns short unique strings", () => {
@@ -65,5 +66,34 @@ describe("newWorkspace", () => {
     expect(l.pendingDiff).toBeNull();
     expect(l.usage).toEqual({ input: 0, output: 0, cost: 0, tools: 0, toolMs: 0 });
     expect(l.id).toBeTruthy();
+  });
+});
+
+describe("didExhaustBudget", () => {
+  const msg = (role: string, content: string, id = "m") => ({ id, role, content }) as any;
+  it("fires on the budget-exhausted fallback", () => {
+    expect(
+      didExhaustBudget([msg("user", "do it"), msg("assistant", "(tool budget exhausted; tools used: fs_list×3 - see results)")]),
+    ).toBe(true);
+  });
+  it("fires on the loop marker even when echoed without the fallback", () => {
+    expect(
+      didExhaustBudget([msg("user", "do it"), msg("assistant", "stuck in a loop detected pattern, stopping")]),
+    ).toBe(true);
+  });
+  it("stays quiet on normal answers and empty chats", () => {
+    expect(didExhaustBudget([])).toBe(false);
+    expect(didExhaustBudget([msg("user", "do it"), msg("assistant", "done: created the file")])).toBe(false);
+  });
+  it("clears once the conversation moves on", () => {
+    expect(
+      didExhaustBudget([
+        msg("user", "do it"),
+        msg("assistant", "(tool budget exhausted; tools used: none)"),
+        msg("user", "thanks"),
+        msg("assistant", "you are welcome"),
+        msg("user", "another thing"),
+      ]),
+    ).toBe(false);
   });
 });

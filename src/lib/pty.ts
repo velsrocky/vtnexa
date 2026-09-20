@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
+// Interactive terminal only. NEVER import this from providers.ts / runTool:
+// the agent must not be able to drive the PTY (unscreened user shell).
+// Only TerminalPane keystrokes reach ptyWrite.
+
 export async function ptySpawn(id: string, cwd: string, cols: number, rows: number): Promise<void> {
   await invoke("pty_spawn", { id, cwd, cols: cols || 80, rows: rows || 24 });
 }

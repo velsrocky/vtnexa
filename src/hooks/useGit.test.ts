@@ -37,6 +37,7 @@ describe("useGit.refreshGit", () => {
         expect(args).toMatchObject({ path: "/w/a.txt" });
         return "diff --git a/a.txt";
       }
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     await act(async () => {
@@ -53,6 +54,7 @@ describe("useGit.refreshGit", () => {
     const { result } = setup(async (cmd) => {
       if (cmd === "git_status") return { ...STATUS, files: [] };
       if (cmd === "git_log") return [];
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     await act(async () => {
@@ -65,6 +67,7 @@ describe("useGit.refreshGit", () => {
     const { result } = setup(async (cmd) => {
       if (cmd === "git_status") throw new Error("git status: fatal: not a git repository");
       if (cmd === "git_log") return [];
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     await act(async () => {
@@ -85,6 +88,7 @@ describe("useGit.selectGitFile", () => {
         diffs.push(args);
         return "diff!";
       }
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     });
     await act(async () => {
@@ -110,6 +114,7 @@ describe("useGit.commitListed", () => {
         committed.push(_args);
         return { hash: "abcdef123456" };
       }
+      if (cmd === "approval_claim") return "tok-test";
       throw new Error(`unexpected ${cmd}`);
     };
   }

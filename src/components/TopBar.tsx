@@ -1,21 +1,42 @@
+import { memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { THEMES, asThemeId, type ThemeId } from "../lib/theme";
+import { APPROVAL_PROTO } from "../lib/approval";
+import { useTopBar } from "../context/AppContext";
 
-export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mcpOn, mcpTools, themeId, onOpenRoutines, onOpenMcp, onThemeChange }: {
-  workspaceLabel: string;
-  windowLabel: string;
-  scheduledCount: number;
-  mcpOn: boolean;
-  mcpTools: number;
-  themeId: ThemeId;
-  onOpenRoutines: () => void;
-  onOpenMcp: () => void;
-  onThemeChange: (id: ThemeId) => void;
-}) {
+function TopBarInner() {
+  const {
+    workspaceLabel,
+    windowLabel,
+    scheduledCount,
+    mcpOn,
+    mcpTools,
+    sandboxOk,
+    themeId,
+    onOpenRoutines,
+    onOpenMcp,
+    onThemeChange,
+    onOpenSettings,
+  } = useTopBar();
   return (
     <header className="topbar">
       <strong>VTNexa</strong>
       <span className="muted">private agent workspace</span>
+      <span
+        className="muted small"
+        title={`Review-gate protocol v${APPROVAL_PROTO} (native OS dialogs + bound tokens). If agent approvals misbehave, check this matches the latest commit — a stale window serves old gate code.`}
+      >
+        gate v{APPROVAL_PROTO}
+      </span>
+      {sandboxOk === false && (
+        <span
+          className="muted small"
+          style={{ color: "#d97706" }}
+          title="firejail not found - agent shell commands run with backend screening only, no OS-level confinement. Install firejail for read-only system paths and a private /tmp."
+        >
+          ⚠ no shell sandbox
+        </span>
+      )}
       <div className="lanes">
         <span className="muted small" title={`Window: ${windowLabel}`}>
           {workspaceLabel || "(no workspace)"}
@@ -48,6 +69,12 @@ export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mc
         >
           ⛁{mcpOn && mcpTools > 0 ? ` ${mcpTools}` : ""}
         </button>
+        <button
+          onClick={onOpenSettings}
+          title="Settings (trusted paths, etc)"
+        >
+          ⚙️
+        </button>
         <select
           value={themeId}
           onChange={(e) => onThemeChange(asThemeId(e.target.value))}
@@ -63,3 +90,7 @@ export default function TopBar({ workspaceLabel, windowLabel, scheduledCount, mc
     </header>
   );
 }
+
+// Memoized: props are gone (context slices) and App's useMemo keeps the slice
+// identities stable, so stream-token renders skip this bar entirely.
+export default memo(TopBarInner);

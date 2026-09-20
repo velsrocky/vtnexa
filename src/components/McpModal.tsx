@@ -57,7 +57,9 @@ export default function McpModal({ mcpOn, setMcpOn, servers, toolCount, errorCou
           Local-stdio servers from <code>vtnexa.json</code> (global{" "}
           <code>~/.config/vtnexa/vtnexa.json</code> + workspace{" "}
           <code>.vtnexa/vtnexa.json</code>). Every <code>mcp_*</code> call
-          requires your approval; failures never break the turn.
+          requires your approval + a backend token; failures never break the turn.
+          Workspace-only servers are <b>untrusted</b> until you enable them (no{" "}
+          <code>{`{env:}`}</code> secrets) and commands are allowlisted (npx/node/python…).
         </div>
         <div className="row" style={{ gap: 8, alignItems: "center" }}>
           <input
@@ -95,6 +97,15 @@ export default function McpModal({ mcpOn, setMcpOn, servers, toolCount, errorCou
                 />
                 <b>{s.name}</b>
                 <span className="muted small">{s.kind}</span>
+                {s.untrusted && (
+                  <span
+                    className="small"
+                    style={{ color: "var(--warn)", border: "1px solid var(--warn)", borderRadius: 4, padding: "0 4px" }}
+                    title="From workspace .vtnexa/vtnexa.json only — not yet trusted. Enabling is the trust signal; {env:} secrets stay blocked."
+                  >
+                    untrusted
+                  </span>
+                )}
                 <span className="muted small">
                   {s.enabled ? `${s.tools} tool${s.tools === 1 ? "" : "s"}` : "disabled"}
                 </span>

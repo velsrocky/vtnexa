@@ -29,7 +29,7 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
   setPreviewUrl: (v: string) => void;
   previewDoc: string;
   openFile: (path: string) => void;
-  closeTab: (path: string) => void;
+  closeTab: (path: string) => void | Promise<void>;
   saveFile: () => void;
   commitMsg: string;
   setCommitMsg: (v: string) => void;
@@ -93,7 +93,7 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    closeTab(p);
+                    void closeTab(p);
                   }}
                   title="Close tab"
                 >

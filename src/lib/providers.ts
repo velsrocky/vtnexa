@@ -1,4 +1,7 @@
-import type { ProviderConfig, ProviderKind, UndoEntry } from "../types";
+/* eslint-disable @typescript-eslint/no-explicit-any -- this module translates
+   OpenAI/Anthropic/Gemini wire formats, which are untyped JSON at the boundary;
+   shape drift is caught by the provider + agent-turn test suites. */
+import type { ProviderConfig, ProviderKind } from "../types";
 import {
   fsCreate,
   fsDelete,
@@ -10,6 +13,8 @@ import {
   fsWrite,
   skillList,
   skillRead,
+  sessionsList,
+  sessionGet,
   gitCommit,
   gitDiff,
   gitLog,
@@ -17,6 +22,9 @@ import {
   nexaRead,
   nexaWrite,
   shellRun,
+  shellBg,
+  shellPoll,
+  shellKill,
   lspDiagnostics,
   lspOp,
   type NexaKind,
@@ -31,386 +39,24 @@ import {
   browserStart,
   browserType,
 } from "./browser";
+import { actionFor, claimFor, lspNeedsApproval, type Approval } from "./approval";
+import { isWorkspaceConfined } from "./workspaceScope";
 import { isMcpToolName, mcpCallTool, resolveMcpQualified } from "./mcp";
+import { isGatedTool, isReadOnlyTool, toolsForMode } from "./toolDefs";
 
-export interface ToolDef {
-  type: "function";
-  function: { name: string; description: string; parameters: Record<string, unknown> };
-}
+import type { ToolDef, ToolCall, ToolPolicy } from "./toolDefs";
+import { TOOL_DEFS } from "./toolCatalog";
 
-export interface ToolPolicy {
-  /** Agent fs_write no longer writes directly: stage into Diff review gate.
-   *  May be async - the UI fetches the on-disk original for a faithful diff. */
-  onProposeWrite?: (path: string, content: string) => void | Promise<void>;
-  /** Return true to allow shell/browser side-effects, false to reject. Read-only tools bypass this. */
-  requestApproval?: (tool: string, args: Record<string, any>) => Promise<boolean>;
-  /** Agent wrote a Nexa note directly: mirror it into the sidebar state. */
-  onNexaWrite?: (kind: NexaKind, content: string) => void;
-  /** Plan mode: runTool refuses every non-read-only tool (fail-closed), and
-   *  chatWithTools withholds their defs so the model plans instead of acts. */
-  planMode?: boolean;
-  /** Reversible agent file op just applied (rename/delete) - UI pushes it for /undo. */
-  onUndoCapture?: (e: UndoEntry) => void;
-}
-
-/** Plan-mode allowlist: everything else is withheld from the model and
- *  refused by runTool. Writes are out entirely - even staged ones. */
-export const READONLY_TOOLS: ReadonlySet<string> = new Set([
-  "fs_list",
-  "fs_read",
-  "fs_search",
-  "fs_glob",
-  "skill_list",
-  "skill_read",
-  "git_status",
-  "git_diff",
-  "git_log",
-  "nexa_read",
-  "browser_snapshot",
-  "browser_screenshot",
-  "browser_scroll",
-  "lsp_diagnostics",
-  "lsp",
-]);
-
-export function isReadOnlyTool(name: string): boolean {
-  return READONLY_TOOLS.has(name);
-}
-
-/** Turn tool list for the mode. Plan drops MCP extras (unknown side effects)
- *  and every non-read-only built-in. Capped: tools cost context per round. */
-export function toolsForMode(base: ToolDef[], extra: ToolDef[], plan: boolean): ToolDef[] {
-  if (!plan) return [...base, ...extra.slice(0, 50)];
-  return base.filter((t) => READONLY_TOOLS.has(t.function.name));
-}
-
-export const TOOL_DEFS: ToolDef[] = [
-  {
-    type: "function",
-    function: {
-      name: "fs_list",
-      description:
-        "List directory entries. Absolute path inside the workspace, read-only. Use this (not fs_read) for directories and to discover file names. Good: {path: \"/ws/src\"}. Bad: {path: \"src\"} (relative - rejected).",
-      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fs_read",
-      description:
-        "Read a text file BEFORE editing it. Absolute path inside the workspace, read-only, 2MB max. Files only - for directories use fs_list. Good: {path: \"/ws/src/App.tsx\"}. Bad: {path: \"App.tsx\"} (relative - rejected); {path: \"/ws/src\"} (a directory - use fs_list).",
-      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fs_search",
-      description:
-        "Search file contents across the workspace (grep-like). Returns {path, line, text} matches. Default: case-insensitive literal substring. Set regex=true for regex. Optional path (subdir, absolute) and glob (filename filter). Read-only, auto-approved.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: { type: "string" },
-          path: { type: "string" },
-          glob: { type: "string" },
-          case_sensitive: { type: "boolean" },
-          regex: { type: "boolean" },
-        },
-        required: ["query"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fs_glob",
-      description:
-        "Find files by name pattern (* = any sequence, ? = one char; comma-separated for multiple). Returns relative paths. Read-only, auto-approved.",
-      parameters: {
-        type: "object",
-        properties: { pattern: { type: "string" }, path: { type: "string" } },
-        required: ["pattern"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "lsp_diagnostics",
-      description:
-        "Typecheck/lint one file and return diagnostics filtered to it (tsc for ts/js, cargo check for rs, py_compile for py). Absolute path inside the workspace. Read-only, auto-approved. Use after edits to verify. Project-level checkers can take up to ~2min on first run.",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string" } },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "lsp",
-      description:
-        "Code intelligence via language servers (typescript-language-server, rust-analyzer). Ops: hover, definition, references (need 1-based line, optional character), documentSymbol (symbols in one file), workspaceSymbol (needs symbol query). Absolute path inside the workspace. Read-only, auto-approved. Needs no project setup beyond the server binary; first runs index the project and can take ~1min.",
-      parameters: {
-        type: "object",
-        properties: {
-          op: { type: "string" },
-          path: { type: "string" },
-          line: { type: "number" },
-          character: { type: "number" },
-          symbol: { type: "string" },
-        },
-        required: ["op", "path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "skill_list",
-      description:
-        "List project skills (.vtnexa/skills/*.md) as {name, description}. Read-only, auto-approved.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "skill_read",
-      description:
-        "Read a project skill's full instructions by name. Use when the task matches a skill. Read-only, auto-approved.",
-      parameters: {
-        type: "object",
-        properties: { name: { type: "string" } },
-        required: ["name"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fs_create",
-      description:
-        "Create an empty file (parents included) or, with is_dir=true, a directory. Errors if it exists. Read-only-ish, auto-approved.",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string" }, is_dir: { type: "boolean" } },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fs_rename",
-      description: "Rename/move a file or directory (absolute paths, target must not exist). REQUIRES user approval.",
-      parameters: {
-        type: "object",
-        properties: { old_path: { type: "string" }, new_path: { type: "string" } },
-        required: ["old_path", "new_path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fs_delete",
-      description:
-        "Delete a file, or a directory (needs recursive=true for non-empty dirs). Permanent. REQUIRES user approval.",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string" }, recursive: { type: "boolean" } },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "git_status",
-      description:
-        "Show git branch + changed files for the repo containing cwd (absolute dir). Read-only, auto-approved. Errors when cwd is not in a git repo.",
-      parameters: {
-        type: "object",
-        properties: { cwd: { type: "string" } },
-        required: ["cwd"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "git_diff",
-      description:
-        "Show uncommitted diff (set staged=true for staged). Optional path (absolute file) to limit output. Read-only, auto-approved.",
-      parameters: {
-        type: "object",
-        properties: {
-          cwd: { type: "string" },
-          path: { type: "string" },
-          staged: { type: "boolean" },
-        },
-        required: ["cwd"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "git_log",
-      description: "Show recent commits (hash, author, date, message). Read-only, auto-approved.",
-      parameters: {
-        type: "object",
-        properties: { cwd: { type: "string" }, limit: { type: "number" } },
-        required: ["cwd"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "git_commit",
-      description:
-        "Stage ONLY the listed files (absolute paths) and commit with message. Prefer small commits with clear messages. REQUIRES user approval.",
-      parameters: {
-        type: "object",
-        properties: {
-          cwd: { type: "string" },
-          message: { type: "string" },
-          files: { type: "array", items: { type: "string" } },
-        },
-        required: ["cwd", "message"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "fs_write",
-      description:
-        "PROPOSE a file write (staged to Diff review gate, needs user Approve - does NOT write directly). First fs_read the file, then send the COMPLETE new content. Absolute path. Never re-send identical content.",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string" }, content: { type: "string" } },
-        required: ["path", "content"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "shell_run",
-      description:
-        "Run a shell command via sh -c (REQUIRES user approval - explain what and why first; cwd must be an absolute dir inside the workspace). Prefer read-only commands; never chain destructive ones.",
-      parameters: {
-        type: "object",
-        properties: { cwd: { type: "string" }, cmd: { type: "string" } },
-        required: ["cmd"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "browser_navigate",
-      description: "Navigate the Browser Use tab to a URL (REQUIRES user approval)",
-      parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "browser_snapshot",
-      description: "Read current page: url, title, text and clickable elements with refs",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "browser_click",
-      description: "Click a page element by its snapshot ref (REQUIRES user approval)",
-      parameters: { type: "object", properties: { target_ref: { type: "number" } }, required: ["target_ref"] },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "browser_type",
-      description: "Fill a text input by its snapshot ref (REQUIRES user approval)",
-      parameters: {
-        type: "object",
-        properties: { target_ref: { type: "number" }, text: { type: "string" }, submit: { type: "boolean" } },
-        required: ["target_ref", "text"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "browser_screenshot",
-      description:
-        "Capture the page as a screenshot that YOU CAN SEE (vision - the image is attached to the conversation). Use it to verify layout, styling, and errors. Also viewable in the Browser tab.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "browser_back",
-      description: "Go back one page in browser history (REQUIRES user approval)",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "browser_scroll",
-      description: "Scroll the page by dx/dy pixels (read-only-ish, no approval needed)",
-      parameters: {
-        type: "object",
-        properties: { dx: { type: "number" }, dy: { type: "number" } },
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "nexa_read",
-      description: "Read the shared Nexa notes (pad = scratch, plan = agreed work, memory = durable cross-session context). Auto-approved, always fresh - prefer over guessing.",
-      parameters: {
-        type: "object",
-        properties: {
-          kind: { type: "string", enum: ["pad", "plan", "memory"] },
-        },
-        required: ["kind"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "nexa_write",
-      description: "Update a shared Nexa note (writes .nexa/{pad,plan,memory}.md directly, visible in sidebar - keep short, 16KB max. Use memory for durable decisions and cross-session context; pad for scratch; plan for agreed work.)",
-      parameters: {
-        type: "object",
-        properties: {
-          kind: { type: "string", enum: ["pad", "plan", "memory"] },
-          content: { type: "string" },
-        },
-        required: ["kind", "content"],
-      },
-    },
-  },
-];
-
-interface ToolCall {
-  id: string;
-  function: { name: string; arguments: string };
-}
+/** Types + catalog live in ./toolDefs and ./toolCatalog (split from this file).
+ *  Re-exported here so existing imports keep working. */
+export type { ToolDef, ToolCall, ToolPolicy };
+export { TOOL_DEFS } from "./toolCatalog";
+export {
+  READONLY_TOOLS,
+  isReadOnlyTool,
+  isGatedTool,
+  toolsForMode,
+} from "./toolDefs";
 
 const TOOL_NAMES = new Set(TOOL_DEFS.map((t) => t.function.name));
 
@@ -441,7 +87,7 @@ export function announcesToolAction(text: string): string | null {
 // The remainder must LOOK like arguments (path / JSON / ref / quoted) so
 // descriptions ("fs_write stages to the Diff gate") never match.
 const BARE_CALL_RE = /^([A-Za-z][A-Za-z0-9_]*)\s*:?\s+(\S[\s\S]*)$/;
-const ARGS_LOOK_RE = /^(\/|{|"|'|https?:|[\d\-])/;
+const ARGS_LOOK_RE = /^(\/|{|"|'|https?:|[\d-])/;
 
 /**
  * Detects false capability denials ("I cannot run commands", "text-only
@@ -456,6 +102,183 @@ export function deniesCapability(text: string): boolean {
   if (t.includes("text-based ai") && /(cannot|can ?not|unable|only read)/.test(t)) return true;
   if (t.includes("as an ai") && /(cannot|can ?not|unable)/.test(t)) return true;
   return false;
+}
+
+/**
+ * Detects authorization-seeking / meta-procedural questions ("should I
+ * proceed?", "would you like me to ...?", "how would you like to proceed?").
+ * Deliberately narrow: genuine ambiguity questions ("which directory?",
+ * "what should the message say?") never match, so the ambiguity rule keeps
+ * working. Only applied when NO tool has run yet this turn — questions
+ * after acting are legitimate follow-ups and pass through untouched.
+ */
+const AUTH_QUESTION_RE =
+  /should i (proceed|go ahead|start|continue|run|begin)|would you like me to|do you want me to|how would you like (me )?to proceed|let me know (how|if|whether|what)|shall i\b|confirm (that|whether|if).{0,60}(proceed|continue|go ahead|start)|want me to (proceed|continue|go ahead|run|start)|how should (i|we) proceed/i;
+
+export function asksAuthQuestion(text: string): boolean {
+  if (!text || text.length > 4000) return false;
+  if (!text.includes("?")) return false;
+  return AUTH_QUESTION_RE.test(text);
+}
+
+// Survey-stall detector: did the USER ask for action (vs discussion)? Fires
+// the recon-is-not-completion nudge when a turn ran only read-only tools and
+// tries to end on prose. Discussion openers (how/what/why/explain...) are
+// excluded - those legitimately end with an explanation.
+const ACTION_REQUEST_RE =
+  /\b(do|make|add|create|implement|fix|commit|write|generate|set ?up|refactor|update|change|build|remove|delete|rename|migrate|improve|finish|complete|apply|run|go ahead)\b/i;
+const DISCUSSION_OPENER_RE =
+  /^\s*(how|what|why|when|where|which|who|explain|describe|tell me|is|are|do you|should i)\b/i;
+
+/** True when the user's request asks for action (mutations), not discussion. */
+export function requestsAction(text: string): boolean {
+  if (!text || text.length > 4000) return false;
+  if (DISCUSSION_OPENER_RE.test(text)) return false;
+  return ACTION_REQUEST_RE.test(text);
+}
+
+// Degenerate-output backstop. A model (typically a weak or non-multimodal one
+// handed an image it cannot parse) can lock onto one phrase and emit it
+// dozens/hundreds of times. The tool-call loop-guard cannot see this — no
+// tools ran, it is pure prose — so the whole wall of text would land in the
+// chat. Thresholds are deliberately strict: a normal summary that mentions the
+// same file or step a few times never trips it. The phrase must repeat many
+// times AND cover the bulk of the reply.
+const REPEAT_MIN = 6; // occurrences of the same phrase
+const REPEAT_SHARE = 0.6; // ...covering this fraction of the reply
+const REPEAT_UNIT_MAX = 200; // candidate phrases inspected (bounds cost)
+
+/**
+ * Returns the phrase a reply is dominated by, with its occurrence count, or
+ * null for normal prose. Candidates are whole lines and whole sentences; both
+ * are whitespace-normalised so counting is consistent with the normalised
+ * body. Never throws.
+ */
+export function detectDegenerateRepetition(text: string): { phrase: string; count: number } | null {
+  if (!text || text.length < 200) return null;
+  const norm = text.replace(/\s+/g, " ").trim();
+  if (norm.length < 200) return null;
+  const units = new Set<string>();
+  const pushUnit = (raw: string): void => {
+    const u = raw.replace(/\s+/g, " ").trim().replace(/[.!?]+$/, "");
+    if (u.length >= 12 && u.length <= 400) units.add(u);
+  };
+  for (const raw of text.split(/\n+/)) pushUnit(raw);
+  for (const raw of norm.split(/[.!?]+/)) pushUnit(raw);
+  let best: { phrase: string; count: number } | null = null;
+  let checked = 0;
+  for (const u of units) {
+    if (checked++ >= REPEAT_UNIT_MAX) break;
+    let count = 0;
+    let i = norm.indexOf(u, 0);
+    while (i !== -1) {
+      count++;
+      i += u.length;
+      i = norm.indexOf(u, i);
+    }
+    if (count < REPEAT_MIN) continue;
+    if (count * u.length >= REPEAT_SHARE * norm.length && (!best || count > best.count)) {
+      best = { phrase: u, count };
+    }
+  }
+  return best;
+}
+
+// Skill follow-through. When the user invokes /<name>, the frontend expands
+// the skill body into the user message with a fixed marker and the instruction
+// "using tools". Weak models routinely skip the prescribed inspection and jump
+// straight to the skill's output format, answering from memory and then
+// confabulating an excuse ("the tool budget was consumed..."). Worse, they
+// sometimes burn a round on skill_read - re-reading the skill is NOT inspecting
+// the target - which is why compliance is measured against the SPECIFIC tools
+// the skill prescribes, not against "any tool ran". Detected from that already
+// expanded text, so no extra plumbing is needed.
+const SKILL_INVOKED_RE = /User invoked \/([A-Za-z0-9_-]+) - follow these skill instructions/;
+// Read-only tools a skill may prescribe. Global so matchAll can list them.
+const SKILL_INSPECT_RE =
+  /\b(fs_list|fs_read|fs_search|fs_glob|git_status|git_diff|git_log|skill_read|lsp_diagnostics|nexa_read)\b/g;
+
+/** Result of detecting an expanded skill invocation that requires inspection. */
+export interface SkillPrescription {
+  name: string;
+  /** Deduped read-only tools the skill's own body tells the model to run. */
+  tools: string[];
+}
+
+/**
+ * Parses an expanded skill invocation: returns the skill name plus the exact
+ * read-only tools its own instructions prescribe, or null when the message is
+ * not a skill invocation or the skill needs no tool work. Callers enforce that
+ * at least one prescribed tool actually runs before accepting the answer.
+ */
+export function skillPrescribes(userText: string): SkillPrescription | null {
+  if (!userText) return null;
+  const m = userText.match(SKILL_INVOKED_RE);
+  if (!m) return null;
+  const tools = [...new Set([...userText.matchAll(SKILL_INSPECT_RE)].map((x) => x[1]))];
+  if (!tools.length) return null;
+  return { name: m[1], tools };
+}
+
+/**
+ * Backwards-compatible shim: the skill name when inspection is prescribed.
+ */
+export function skillNeedsInspection(userText: string): string | null {
+  return skillPrescribes(userText)?.name ?? null;
+}
+
+// A skill that scopes itself to read-only work (e.g. /rate: "Inspect the
+// target using read-only tools") gets its tool surface confined to exactly
+// the tools it prescribes. Only rate.md matches today; other skills keep the
+// full surface. Checked against the EXPANDED invocation (body inlined), so
+// the wrapper text must not contain the marker phrase.
+const SKILL_READONLY_MARKER_RE = /using read-only tools|read-only inspection/i;
+
+/**
+ * Tool confinement for an expanded skill invocation: `{ skill, tools }` when
+ * the skill scopes itself to read-only work, else null (full surface).
+ * Callers withhold non-listed defs AND refuse the calls — a read-only skill
+ * can neither offer nor trigger a side effect, so no approval dialog can
+ * even appear for out-of-scope tools.
+ */
+export function skillConfinement(userText: string): { skill: string; tools: string[] } | null {
+  const prescribed = skillPrescribes(userText);
+  if (!prescribed) return null;
+  if (!SKILL_READONLY_MARKER_RE.test(userText)) return null;
+  return { skill: prescribed.name, tools: prescribed.tools };
+}
+
+/**
+ * Absolute paths the user typed explicitly (e.g. "fs_list /a/b then analyse").
+ * Used to stop the workspace-root substitution loop: when the user names an
+ * exact path, that path wins over the default workspace root.
+ * Returns deduped absolute paths, capped at 5. Never throws.
+ */
+export function extractExplicitPaths(text: string): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /(\/[^\s"'`,;|()\]{}]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const at = m.index;
+    // Mid-word slash (UX/Performance, X/10): char before is letter/digit — not an absolute path.
+    const prev = at > 0 ? text[at - 1] : " ";
+    if (/[A-Za-z0-9_-]/.test(prev)) continue;
+    const p = m[1].replace(/[.,:;!?)\]}'"`*]+$/, "");
+    if (p.length < 2 || !p.startsWith("/") || p === "/") continue;
+    if (p.length > 512) continue;
+    // Markdown / shell-glob residue, not a path.
+    if (p.includes("*") || p.includes("`")) continue;
+    // Must contain at least one letter — rejects /10, /2-3, /etc fragments.
+    if (!/[A-Za-z]/.test(p)) continue;
+    if (!seen.has(p)) {
+      seen.add(p);
+      out.push(p);
+      if (out.length >= 5) break;
+    }
+  }
+  return out;
 }
 
 /** Returns the narrated tool name for bare `Tool args` lines, else null. */
@@ -533,7 +356,7 @@ function toTextToolCall(item: unknown): ToolCall | null {
  * ("...thanks!\n{\"name\":\"nexa_read\",...}") or fenced JSON after
  * explanation. Stricter than it looks: every candidate must be balanced,
  * valid JSON whose `name` is a real tool. Destructive tools stay safe -
- * they still go through the approval popup, writes still stage to the
+ * they still go through the native approval dialog, writes still stage to the
  * Diff gate. Capped so a pasted doc can't fan out into many calls.
  */
 const MAX_EMBEDDED_CALLS = 3;
@@ -696,8 +519,12 @@ const LOCAL_MODEL_RE =
 // tool-call format, shorter replies. Heuristic on purpose: local endpoints,
 // small-model families and small size tags. Frontier cloud models get the
 // full prompt.
+// Weak-tier signals are MODEL capability hints only: small parameter sizes,
+// small-model families, or small-model edition names. Endpoint host and file
+// format are NOT capability signals — a 35B gguf served from localhost is a
+// strong model, and "localhost" says nothing about what it serves.
 const WEAK_MODEL_RE =
-  /localhost|127\.0\.0\.1|ollama|gpt-oss|deepseek.*distill|llama|qwen|mistral|mixtral|phi[-_]|gemma|gguf|\bmini\b|\bnano\b/i;
+  /gpt-oss|deepseek.*distill|llama|qwen|mistral|mixtral|phi[-_]|gemma|\bmini\b|\bnano\b/i;
 const SMALL_SIZE_RE = /[:\-_](0\.5|1|1\.5|3|7|8|9)b\b/i;
 
 export function isWeakModel(baseUrl: string, model: string): boolean {
@@ -734,44 +561,70 @@ function stashImage(b64: string): string {
   return id;
 }
 
-// Side-effecting tools require explicit user approval. Read-only tools run
-// directly. Shared with chatWithTools so audit events record the decision.
-const GATED_TOOLS = new Set([
-  "shell_run",
-  "browser_navigate",
-  "browser_click",
-  "browser_type",
-  "browser_back",
-  "git_commit",
-  "fs_rename",
-  "fs_delete",
-]);
-
-/** MCP tools (`mcp_*`) always require approval — OpenCode `mcp_* ask` default. */
-export function isGatedTool(name: string): boolean {
-  return GATED_TOOLS.has(name) || isMcpToolName(name);
-}
+// Gating helpers live in ./toolDefs (isGatedTool covers MCP too).
+// runTool adds dynamic lsp gating (ts/rs need approval; py is pure).
 
 export async function runTool(
   name: string,
   args: Record<string, any>,
   policy?: ToolPolicy,
 ): Promise<string> {
+  let approval: Approval | undefined;
   try {
     // Plan-mode backstop (covers prose-recovered calls too): the defs are
     // already withheld above, so anything arriving here is a violation.
-    // Fail-closed, before any approval popup.
+    // Fail-closed, before any approval dialog.
     if (policy?.planMode && !isReadOnlyTool(name)) {
       return `error: plan mode is on - ${name} is disabled this turn (read-only tools only; switch to Build to act)`;
     }
-    if (isGatedTool(name) && policy?.requestApproval) {
-      const ok = await policy.requestApproval(name, args);
-      if (!ok) return `user rejected ${name} - do not retry without changing the plan`;
+    // Skill-confinement backstop: a read-only skill's turn may offer and run
+    // ONLY its prescribed tools. Fail-closed BEFORE any approval dialog, so a
+    // confined turn can never pop a side-effect approval (the /rate turn that
+    // committed + npm-installed is the reason this exists).
+    if (policy?.allowedTools && !policy.allowedTools.tools.includes(name)) {
+      return `error: ${name} is outside this skill's tool scope (/${policy.allowedTools.skill} allows: ${policy.allowedTools.tools.join(", ")}) - finish the skill with its own tools`;
+    }
+    // Native OS dialog first (page JS can trigger it but cannot click it),
+    // backend token second. Unknown MCP tools fail before any dialog/invoke.
+    // No approval handler (headless/routine context) fails closed — no dialog.
+    if (isMcpToolName(name) && !resolveMcpQualified(name)) {
+      return `error: unknown MCP tool ${name} - reload MCP tools first`;
+    }
+    const needsGate =
+      isGatedTool(name) ||
+      ((name === "lsp_diagnostics" || name === "lsp") && lspNeedsApproval(String(args.path ?? "")));
+    if (needsGate) {
+      // Opencode-style auto-approval: workspace-confined operations claim
+      // silently via the TRUSTED runTool layer (never the model) — no dialog.
+      // Anything reaching outside keeps the native dialog below.
+      const auto =
+        policy?.autoApproveWorkspace &&
+        policy.workspaceRoot &&
+        isWorkspaceConfined(name, args, policy.workspaceRoot);
+      if (auto) {
+        approval = await claimFor(actionFor(name), args);
+        policy?.onAutoApproval?.(name);
+      } else {
+        if (!policy?.requestApproval) {
+          return `error: ${name} requires user approval (no approval handler in this context)`;
+        }
+        const got = await policy.requestApproval(name, args);
+        if (!got) return `user rejected ${name} - do not retry without changing the plan`;
+        // Shape-check the Approval: a stale renderer module (zombie window from
+        // before a restart) can hand back a bare boolean instead of {token,
+        // detail}. Sending that on would die backend-side with a confusing
+        // "approval required" — fail here, loudly, instead.
+        if (typeof got.token !== "string" || !got.token || typeof got.detail !== "string") {
+          return `error: approval handshake broken for ${name} (stale app window? quit ALL VTNexa windows/processes and restart the app)`;
+        }
+        approval = { token: got.token, detail: got.detail };
+      }
     }
     if (isMcpToolName(name)) {
       const parts = resolveMcpQualified(name);
+      // Checked above, but re-resolve for TS narrowing.
       if (!parts) return `error: unknown MCP tool ${name} - reload MCP tools first`;
-      const out = await mcpCallTool(parts.server, parts.tool, args ?? {});
+      const out = await mcpCallTool(parts.server, parts.tool, args ?? {}, approval);
       return out.slice(0, 30000);
     }
     switch (name) {
@@ -793,12 +646,56 @@ export async function runTool(
         return JSON.stringify(await skillList());
       case "skill_read":
         return (await skillRead(String(args.name ?? ""))).slice(0, 30000);
+      case "sessions_list": {
+        const all = await sessionsList();
+        return JSON.stringify(
+          all.slice(0, 30).map((s) => ({
+            id: s.id,
+            title: String(s.title ?? "").slice(0, 120),
+            directory: String(s.directory ?? "").slice(0, 300),
+            updated: s.updated ?? 0,
+            message_count: s.message_count ?? 0,
+            preview: String(s.preview ?? "").slice(0, 200),
+          })),
+        ).slice(0, 8000);
+      }
+      case "session_read": {
+        const id = String(args.id ?? "");
+        if (!id) return "error: session_read id is required - pick one from sessions_list";
+        const file = JSON.parse(await sessionGet(id)) as {
+          id?: unknown;
+          title?: unknown;
+          directory?: unknown;
+          updated?: unknown;
+          workspace?: { messages?: unknown };
+        };
+        // Picklist only: messages + meta. Provider keys, drafts, buffers and
+        // usage never leave the session file through this tool.
+        const rawMsgs = Array.isArray(file?.workspace?.messages) ? file.workspace.messages : [];
+        const messages = (rawMsgs as unknown[])
+          .filter(
+            (m): m is { role?: unknown; content?: unknown } =>
+              !!m && typeof m === "object" && (m as { role?: unknown }).role !== "system",
+          )
+          .slice(-20)
+          .map((m) => ({
+            role: String((m as { role?: unknown }).role ?? "?").slice(0, 20),
+            content: String((m as { content?: unknown }).content ?? "").slice(0, 2000),
+          }));
+        return JSON.stringify({
+          id: typeof file?.id === "string" ? file.id : id,
+          title: typeof file?.title === "string" ? file.title.slice(0, 120) : "",
+          directory: typeof file?.directory === "string" ? file.directory.slice(0, 300) : "",
+          updated: typeof file?.updated === "number" ? file.updated : 0,
+          messages,
+        }).slice(0, 12000);
+      }
       case "fs_create":
         return await fsCreate(String(args.path ?? ""), !!args.is_dir);
       case "fs_rename": {
         const oldP = String(args.old_path ?? "");
         const newP = String(args.new_path ?? "");
-        const out = await fsRename(oldP, newP);
+        const out = await fsRename(oldP, newP, approval);
         policy?.onUndoCapture?.({ kind: "rename", oldPath: oldP, newPath: newP });
         return out;
       }
@@ -814,7 +711,7 @@ export async function runTool(
             content = null;
           }
         }
-        await fsDelete(p, recursive);
+        await fsDelete(p, recursive, approval);
         if (content !== null) policy?.onUndoCapture?.({ kind: "delete", path: p, content });
         return `deleted ${args.path}${recursive ? " (directory - not undoable)" : ""}`;
       }
@@ -840,7 +737,7 @@ export async function runTool(
         if (!p) return "error: lsp_diagnostics path is required - e.g. {path: \"/ws/src/App.tsx\"}";
         if (!p.startsWith("/"))
           return `error: lsp_diagnostics path must be absolute inside the workspace (got ${JSON.stringify(p)}). Use fs_list/fs_glob to resolve the full path first.`;
-        return (await lspDiagnostics(p)).slice(0, 10000);
+        return (await lspDiagnostics(p, approval)).slice(0, 10000);
       }
       case "lsp": {
         const p = String(args.path ?? "");
@@ -855,6 +752,7 @@ export async function runTool(
             line: typeof args.line === "number" ? args.line : undefined,
             character: typeof args.character === "number" ? args.character : undefined,
             symbol: typeof args.symbol === "string" ? args.symbol : undefined,
+            approval,
           })
         ).slice(0, 6000);
       }
@@ -863,6 +761,25 @@ export async function runTool(
         const content = String(args.content ?? "");
         if (!path || !path.startsWith("/")) return "error: fs_write path must be absolute";
         if (content.length > 4 * 1024 * 1024) return "error: fs_write content too large (4MB max)";
+        // Auto mode: workspace-confined writes go DIRECTLY (no Diff staging),
+        // with undo captured so /undo still works. Anything else stages.
+        if (
+          policy?.autoApproveWorkspace &&
+          policy.workspaceRoot &&
+          isWorkspaceConfined("fs_write", { path }, policy.workspaceRoot)
+        ) {
+          let before = "";
+          let existed = true;
+          try {
+            before = await fsRead(path);
+          } catch {
+            existed = false;
+          }
+          const direct = await claimFor("fs_write", { path, content });
+          await fsWrite(path, content, direct);
+          policy?.onUndoCapture?.({ kind: "write", path, before, after: content, existedBefore: existed });
+          return `wrote ${path} (${content.length} chars) directly - auto-approved (workspace).`;
+        }
         if (policy?.onProposeWrite) {
           await policy.onProposeWrite(path, content);
           return `staged ${path} (${content.length} chars) to Diff review gate - awaiting user Approve. Do not re-send unless content changes.`;
@@ -873,7 +790,25 @@ export async function runTool(
       case "shell_run": {
         const cmd = String(args.cmd ?? "");
         if (cmd.length > 20000) return "error: cmd too long";
-        return JSON.stringify(await shellRun(args.cwd ?? ".", cmd));
+        return JSON.stringify(await shellRun(args.cwd ?? ".", cmd, approval));
+      }
+      case "shell_bg": {
+        const cmd = String(args.cmd ?? "");
+        if (!cmd) return "error: shell_bg cmd is required";
+        if (cmd.length > 20000) return "error: cmd too long";
+        const id = await shellBg(args.cwd ?? ".", cmd, approval);
+        return `started background job ${id} - poll with shell_poll until status is done; do not start duplicates`;
+      }
+      case "shell_poll": {
+        const id = String(args.job_id ?? "");
+        if (!id) return "error: shell_poll job_id is required - use the id shell_bg returned";
+        const r = await shellPoll(id);
+        return JSON.stringify(r).slice(0, 12000);
+      }
+      case "shell_kill": {
+        const id = String(args.job_id ?? "");
+        if (!id) return "error: shell_kill job_id is required";
+        return await shellKill(id, approval);
       }
       case "git_status":
         return JSON.stringify(await gitStatus(String(args.cwd ?? ".")));
@@ -892,19 +827,21 @@ export async function runTool(
       case "git_commit": {
         const files = Array.isArray(args.files) ? args.files.map((f: unknown) => String(f)) : undefined;
         return JSON.stringify(
-          await gitCommit(String(args.cwd ?? "."), String(args.message ?? ""), files),
+          await gitCommit(String(args.cwd ?? "."), String(args.message ?? ""), files, approval),
         );
       }
       case "browser_navigate":
-        await browserStart(39317, false).catch(() => {});
-        return JSON.stringify(await browserNavigate(args.url));
+        await browserStart().catch(() => {});
+        return JSON.stringify(await browserNavigate(args.url, approval));
       case "browser_snapshot":
-        await browserStart(39317, false).catch(() => {});
+        await browserStart().catch(() => {});
         return JSON.stringify(await browserSnapshot()).slice(0, 6000);
       case "browser_click":
-        return JSON.stringify(await browserClick(Number(args.target_ref)));
+        return JSON.stringify(await browserClick(Number(args.target_ref), approval));
       case "browser_type":
-        return JSON.stringify(await browserType(Number(args.target_ref), args.text ?? "", !!args.submit));
+        return JSON.stringify(
+          await browserType(Number(args.target_ref), args.text ?? "", !!args.submit, approval),
+        );
       case "browser_screenshot": {
         const s = await browserScreenshot();
         const b64 = s.imageBase64 ?? "";
@@ -921,7 +858,7 @@ export async function runTool(
         return JSON.stringify({ url: s.url, note: "screenshot came back empty" });
       }
       case "browser_back":
-        return JSON.stringify(await browserBack());
+        return JSON.stringify(await browserBack(approval));
       case "browser_scroll":
         return JSON.stringify(await browserScroll(Number(args.dx ?? 0), Number(args.dy ?? 600)));
       case "nexa_read": {
@@ -954,8 +891,10 @@ export async function chatWithTools(
     signal?: AbortSignal;
     onUsage?: (u: { input: number; output: number; model: string; cost?: number }) => void;
     onToolActivity?: (a: { name: string; ms: number; ok: boolean }) => void;
+    /** Live reasoning-model thinking stream (OpenAI-compat reasoning_content). */
+    onThinking?: (text: string) => void;
     /** Fires on every repair nudge (narration or denial) - powers auto-banding. */
-    onRepair?: (r: { kind: "narration" | "denial" }) => void;
+    onRepair?: (r: { kind: "narration" | "denial" | "question" | "repetition" | "skill" | "survey" }) => void;
     onAudit?: (e: {
       tool: string;
       args: string;
@@ -971,17 +910,32 @@ export async function chatWithTools(
   // Multi-backend agent loop (OpenAI-compatible, Anthropic, Gemini) with tool
   // calling. Models without tool support (e.g. some Ollama vision models) get
   // a plain-chat retry instead of a hard failure.
-  const MAX_ROUNDS = 8;
+  // Budget: 10 tool rounds per turn. Long shell work goes to background jobs
+  // (shell_bg + shell_poll) so one install doesn't eat the turn; the UI
+  // offers Continue for whatever still doesn't fit.
+  const MAX_ROUNDS = 10;
   // Dynamic MCP tools ride along for this turn only. Capped: every extra tool
   // costs context on every round (OpenCode's main MCP caveat). Plan mode
   // withholds everything non-read-only (plus all MCP extras) up front;
   // runTool enforces the same boundary as backstop.
-  const allTools: ToolDef[] = toolsForMode(TOOL_DEFS, opts?.extraTools ?? [], !!opts?.policy?.planMode);
+  const allTools: ToolDef[] = toolsForMode(
+    TOOL_DEFS,
+    opts?.extraTools ?? [],
+    !!opts?.policy?.planMode,
+    opts?.policy?.allowedTools?.tools,
+  );
   // History window: a long chat currently resends EVERYTHING each turn —
   // unbounded payloads that gateways kill mid-flight ("Load failed").
   // Keep sys + last 20, cutting only at user boundaries so tool
   // request/response pairs are never orphaned (orphans → provider 400).
   const HIST_KEEP = 20;
+  // This turn's operative request, taken from the pristine input BEFORE any
+  // trimming. Loop-guard nudges are injected as role "user" too, so a trimmed
+  // window can leave the model with nudges and no task at all - observed live:
+  // a 23-tool-call analysis turn reached synthesis reporting "no actual task
+  // was given in the conversation - only loop-guard prompts". windowConvo
+  // re-attaches this message whenever trimming would drop it.
+  const taskAnchor = [...messages].reverse().find((m) => m.role === "user");
   // Normalized message shared by all backends. Assistant entries may carry
   // tool_calls; tool results use role "tool" + tool_call_id.
   interface NormMsg {
@@ -999,7 +953,13 @@ export async function chatWithTools(
     const cut = tail.findIndex((m) => m.role === "user");
     if (cut > 0) tail = tail.slice(cut);
     else if (cut < 0) tail = tail.filter((m) => m.role !== "tool");
-    const out = (sys.role === "system" ? [sys, ...tail] : [...tail]) as T[];
+    const head = (sys.role === "system" ? [sys] : []) as T[];
+    // Task anchor: never let trimming drop this turn's request. Identity check
+    // is sound - convo is a shallow copy, so the untrimmed case is a no-op.
+    if (taskAnchor && !tail.includes(taskAnchor as unknown as T)) {
+      head.push(taskAnchor as unknown as T);
+    }
+    const out = [...head, ...tail];
     // Trimming may have dropped tool results while keeping their assistant
     // calls. A dangling tool_calls is a 400 on strict backends, so demote any
     // assistant call without a recorded result back to plain text.
@@ -1055,7 +1015,7 @@ export async function chatWithTools(
   const CONVO_TOOL_CAP = 4000;
   const capForConvo = (out: string) =>
     out.length > CONVO_TOOL_CAP ? out.slice(0, CONVO_TOOL_CAP) + `\n…[trimmed ${out.length - CONVO_TOOL_CAP} chars]` : out;
-  let convo: NormMsg[] = [...messages];
+  const convo: NormMsg[] = [...messages];
   let useTools = true;
   const signal = opts?.signal;
   const abortError = () => {
@@ -1069,9 +1029,37 @@ export async function chatWithTools(
   // Loop guard: weak models re-issue the same calls forever. 3x identical = stuck.
   // Shared bound for repair nudges (narration + capability denial).
   let repairNudges = 0;
+  // Own bound for question redirects: one per turn is enough to break the
+  // ask-instead-of-act loop; after acting, questions are fine unchecked.
+  let questionNudges = 0;
+  // Own bound for skill follow-through: one firm nudge per turn that a skill
+  // was invoked but not actually executed (see skillNeedsInspection).
+  let skillNudges = 0;
+  // Bound for survey-stall redirects: weak models often need a second push
+  // before a recon-only turn converts into its first mutation; two is enough
+  // to convert or prove stubbornness. MAX_ROUNDS bounds the worst case
+  // regardless — after acting, summaries are fine unchecked.
+  let surveyNudges = 0;
   const seen = new Map<string, number>();
   const usedTools: string[] = [];
   let loopNote = "";
+  // Explicit user paths win over the workspace-root default. Collected once
+  // from user messages so the loop-guard nudge can point at the exact path
+  // instead of just halting after 3 identical calls.
+  const explicitPaths: string[] = [
+    ...new Set(
+      messages
+        .filter((m) => m.role === "user" && typeof m.content === "string")
+        .flatMap((m) => extractExplicitPaths(m.content as string)),
+    ),
+  ].slice(0, 5);
+  // This turn's request: the latest user message in the inbound convo. Used
+  // by the survey-stall repair to tell work requests (must end mutated) from
+  // discussion (may end with prose).
+  const turnRequest =
+    [...messages]
+      .reverse()
+      .find((m) => m.role === "user" && typeof m.content === "string")?.content ?? "";
 
   // ---- Provider backends ----
   interface BackendUsage {
@@ -1108,11 +1096,18 @@ export async function chatWithTools(
       if (attempt > 0) await new Promise((r) => setTimeout(r, 1500 * attempt));
       try {
         res = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
-        break;
       } catch (e) {
         if (signal?.aborted) throw abortError();
         lastErr = e;
+        continue;
       }
+      // One silent retry for transient server-side failures (llama.cpp
+      // template/slot hiccups surface as sporadic 500s mid-conversation,
+      // gateways 502/503, endpoints 429). Safe to replay: this throws before
+      // any body byte is consumed, so the request never half-streamed.
+      if (res.ok || (res.status < 500 && res.status !== 429)) break;
+      lastErr = new Error(`provider ${res.status}`);
+      res = null;
     }
     if (!res) {
       const detail =
@@ -1201,6 +1196,7 @@ export async function chatWithTools(
     convo: NormMsg[],
     useTools: boolean,
     onDelta: (text: string) => void,
+    onThinking?: (text: string) => void,
   ): Promise<BackendResult> {
     const url = cfg.baseUrl.replace(/\/$/, "") + "/chat/completions";
     const headers: Record<string, string> = {
@@ -1222,6 +1218,8 @@ export async function chatWithTools(
         usage?: { prompt_tokens?: number; completion_tokens?: number };
       };
       const msg = data.choices?.[0]?.message;
+      const reasoning = (msg as { reasoning_content?: unknown } | undefined)?.reasoning_content;
+      if (typeof reasoning === "string" && reasoning) onThinking?.(reasoning);
       const content = (msg?.content ?? "") as string;
       if (content) onDelta(content);
       const u = data.usage;
@@ -1250,6 +1248,11 @@ export async function chatWithTools(
       }
       const delta = chunk.choices?.[0]?.delta;
       if (!delta) return;
+      // Reasoning models (llama.cpp `--reasoning-format`, Ollama thinking
+      // models, DeepSeek-R1) stream CoT here; without this the UI freezes
+      // blank for the whole thinking phase.
+      const reasoning = (delta as { reasoning_content?: unknown }).reasoning_content;
+      if (typeof reasoning === "string" && reasoning) onThinking?.(reasoning);
       if (typeof delta.content === "string" && delta.content.length > 0) {
         content += delta.content;
         onDelta(delta.content);
@@ -1597,12 +1600,13 @@ export async function chatWithTools(
     convo: NormMsg[],
     useTools: boolean,
     onDelta: (text: string) => void,
+    onThinking?: (text: string) => void,
   ): Promise<BackendResult> {
     const pruned = pruneImages(convo, 2);
     const kind = resolveKind();
     if (kind === "anthropic") return anthropicComplete(pruned, useTools, onDelta);
     if (kind === "gemini") return geminiComplete(pruned, useTools, onDelta);
-    return openaiComplete(pruned, useTools, onDelta);
+    return openaiComplete(pruned, useTools, onDelta, onThinking);
   }
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -1610,7 +1614,7 @@ export async function chatWithTools(
     let content: string;
     let toolCalls: ToolCall[];
     try {
-      const r = await backendComplete(windowConvo(convo), useTools, (delta) => onEvent(delta));
+      const r = await backendComplete(windowConvo(convo), useTools, (delta) => onEvent(delta), opts?.onThinking);
       reportUsage(r.usage);
       content = r.content;
       toolCalls = r.toolCalls;
@@ -1651,6 +1655,59 @@ export async function chatWithTools(
     }
 
     if (toolCalls.length === 0) {
+      // Degenerate-output backstop: a model (often a weak/non-multimodal one
+      // handed an image it cannot parse) can repeat one phrase dozens of
+      // times. The tool-call loop-guard can't see this (no tools ran), so
+      // catch it here — keep a short head of the reply and end the turn with
+      // a diagnostic instead of a wall of garbage.
+      const repeated = detectDegenerateRepetition(content);
+      if (repeated) {
+        opts?.onRepair?.({ kind: "repetition" });
+        const head = content.trim().slice(0, 400);
+        return (
+          `${head}\n\n` +
+          `[stopped: degenerate repetition detected — this model repeated ` +
+          `"${repeated.phrase.slice(0, 80)}" ${repeated.count}x instead of answering. ` +
+          `That usually means the model cannot handle the input (for example an ` +
+          `image sent to a non-vision model). Try a stronger or multimodal model.]`
+        );
+      }
+      // Skill follow-through: a skill was invoked and its instructions
+      // prescribe read-only inspection, but the model jumped straight to the
+      // skill's output format without running any of those tools — answering
+      // from memory and often confabulating an excuse for not looking.
+      // Compliance is measured against the PRESCRIBED tools: a decoy round of
+      // skill_read (re-reading the skill) does not count as inspecting the
+      // target, so it cannot satisfy the requirement. One firm nudge per turn.
+      if (useTools && skillNudges < 1) {
+        const skillMsg = [...convo]
+          .reverse()
+          .find((m) => m.role === "user" && typeof m.content === "string" && SKILL_INVOKED_RE.test(m.content));
+        const prescribed =
+          skillMsg && typeof skillMsg.content === "string" ? skillPrescribes(skillMsg.content) : null;
+        const inspected = prescribed ? prescribed.tools.some((t) => usedTools.includes(t)) : true;
+        if (prescribed && !inspected) {
+          skillNudges++;
+          opts?.onRepair?.({ kind: "skill" });
+          onEvent(
+            `\n[note: invoked /${prescribed.name} but never ran its inspection tools ` +
+              `(${prescribed.tools.join(", ")}) - running them before the answer]\n`,
+          );
+          convo.push({ role: "assistant", content });
+          convo.push({
+            role: "system",
+            content:
+              `[system nudge] You invoked the /${prescribed.name} skill and produced its answer without running ANY of ` +
+              `the inspection tools it prescribes: ${prescribed.tools.join(", ")}. Run those tools NOW with ` +
+              `real tool_calls against the target, then rebuild the answer from what you actually observed. ` +
+              `Note: skill_read does NOT count — re-reading the skill is not inspecting the target. ` +
+              `Never claim you inspected, read, or measured anything you did not — there is no tool budget ` +
+              `and no skill_read cost; the skill text is already in this conversation. Skip the inspection ` +
+              `again and the turn ends with what you have.`,
+          });
+          continue;
+        }
+      }
       // Repair nudges (bounded, shared budget): narration and false
       // capability denials instead of ending the turn and forcing the user
       // to re-prompt.
@@ -1664,9 +1721,9 @@ export async function chatWithTools(
           onEvent(`\n[note: announced ${announced} but made no tool call - asking for the real call]\n`);
           convo.push({ role: "assistant", content });
           convo.push({
-            role: "user",
+            role: "system",
             content:
-              `You announced a ${announced} action but made NO tool call. ` +
+              `[system nudge] You announced a ${announced} action but made NO tool call. ` +
               `Talking about a tool does nothing. Emit the actual ${announced} ` +
               `tool call NOW via tool_calls - no prose, no asking for permission.`,
           });
@@ -1680,15 +1737,62 @@ export async function chatWithTools(
           onEvent(`\n[note: false capability denial - reminding of available tools]\n`);
           convo.push({ role: "assistant", content });
           convo.push({
-            role: "user",
+            role: "system",
             content:
-              `You DO have that capability: shell_run runs commands, ` +
+              `[system nudge] You DO have that capability: shell_run runs commands, ` +
               `fs_list/fs_read read files - side effects just need the user's ` +
-              `popup approval. Never claim to be text-only or unable. Either ` +
+              `native OS dialog approval. Never claim to be text-only or unable. Either ` +
               `emit the real tool call NOW or explain the next approved step.`,
           });
           continue;
         }
+      }
+      // Question repair: authorization-seeking prose ("should I proceed?",
+      // "would you like me to ...?") with zero tools run so far this turn.
+      // One redirect per turn (own budget, independent of narration/denial):
+      // it either breaks the ask-loop or the turn ends visibly stalled.
+      if (useTools && questionNudges < 1 && usedTools.length === 0 && asksAuthQuestion(content)) {
+        questionNudges++;
+        opts?.onRepair?.({ kind: "question" });
+        onEvent(`\n[note: asked for direction instead of acting - redirecting to the tools]\n`);
+        convo.push({ role: "assistant", content });
+        convo.push({
+          role: "system",
+          content:
+            `[system nudge] You asked for direction instead of acting, and no tool has run yet this turn. ` +
+            `Authorization is already handled by a native OS dialog - you never need to ask for it in text. ` +
+            `Emit the real tool call NOW via tool_calls, or write the final answer if there is nothing to do. ` +
+            `Do not ask another question.`,
+        });
+        continue;
+      }
+      // Survey-stall repair: the turn ran ONLY read-only tools (a survey)
+      // and now tries to end on prose, but the user asked for ACTION.
+      // Recon is not completion - redirect into the first mutation (bounded
+      // redirects; mutually exclusive with the question repair, which needs
+      // zero tools run). Skipped in Plan mode, where ending on findings is
+      // the entire job.
+      if (
+        useTools &&
+        !opts?.policy?.planMode &&
+        surveyNudges < 2 &&
+        usedTools.length > 0 &&
+        usedTools.every((t) => isReadOnlyTool(t)) &&
+        requestsAction(turnRequest)
+      ) {
+        surveyNudges++;
+        opts?.onRepair?.({ kind: "survey" });
+        onEvent(`\n[note: surveyed without changing anything - redirecting to the first mutation]\n`);
+        convo.push({ role: "assistant", content });
+        convo.push({
+          role: "system",
+          content:
+            `[system nudge] You inspected with read-only tools (${[...new Set(usedTools)].join(", ")}) but changed nothing, yet the user asked for action. ` +
+            `Recon is not completion: a findings summary is never the final answer to a work request. ` +
+            `Take the first mutating step NOW via tool_calls - fs_write stages to the Diff gate, gated ops pop the native approval dialog automatically; narrate nothing, emit the call. ` +
+            `If genuinely blocked, state the one decision you need instead of a survey.`,
+        });
+        continue;
       }
       return content;
     }
@@ -1696,7 +1800,7 @@ export async function chatWithTools(
     convo.push({ role: "assistant", content, tool_calls: toolCalls });
     const roundImages: string[] = [];
     for (const tc of toolCalls) {
-      let args: Record<string, string> = {};
+      let args: Record<string, string>;
       try {
         args = JSON.parse(tc.function.arguments || "{}");
       } catch {
@@ -1741,7 +1845,30 @@ export async function chatWithTools(
       onEvent(`\n[tool ${tc.function.name} · step ${round + 1}/${MAX_ROUNDS}]\n${out.slice(0, 2000)}\n`);
       convo.push({ role: "tool", tool_call_id: tc.id, content: capForConvo(out) });
       if (signal?.aborted) throw abortError();
-      if ((seen.get(sig) ?? 0) >= 3) {
+      const repeatCount = seen.get(sig) ?? 0;
+      if (repeatCount === 2) {
+        // Second identical call: nudge before the 3rd kills the turn. When
+        // the user named an exact path, point at it — the common failure is
+        // substituting the workspace root for the user-provided subdir.
+        const hint =
+          explicitPaths.length > 0
+            ? ` You repeated \`${tc.function.name}\` with identical arguments twice. The user gave explicit path(s) this turn: ${explicitPaths.join(", ")} — use EXACTLY that path on the next call, do not substitute the workspace root. If a path is outside the workspace, say so instead of retrying.`
+            : ` You repeated \`${tc.function.name}\` with identical arguments twice. Vary the arguments (different path/subdir) or summarize what you already learned — do not emit the identical call a third time.`;
+        // Attach the nudge to the tool result it follows instead of injecting a
+        // synthetic user turn: a role:"user" nudge can be mistaken for (or, when
+        // trimming, displace) the real request - observed live as a model
+        // reporting "only loop-guard prompts". The tool result is what the model
+        // reads immediately before deciding its next call, so the hint lands
+        // exactly where it is needed and stays out of the user channel.
+        const lastMsg = convo[convo.length - 1];
+        if (lastMsg?.role === "tool" && typeof lastMsg.content === "string") {
+          lastMsg.content += `\n\n[system nudge]${hint}`;
+        } else {
+          convo.push({ role: "system", content: `[system nudge]${hint}` });
+        }
+        onEvent(`\n[note: repeated ${tc.function.name} twice — nudging to vary args]\n`);
+      }
+      if (repeatCount >= 3) {
         loopNote = `\n[note: stopped after repeating \`${tc.function.name}\` with identical arguments 3× - loop detected]\n`;
         round = MAX_ROUNDS; // break outer loop, go finalize
         break;
@@ -1764,6 +1891,35 @@ export async function chatWithTools(
   // Only the tail of the convo is sent: 8 rounds of output drown small models.
   // windowConvo keeps tool request/response pairs intact.
   const tail = windowConvo(convo, 14);
+  // Turn digest: a one-line outcome per tool call this turn (kept outside the
+  // windowConvo tail but always injected ahead of it). A trimmed tail can
+  // silently drop the early calls, leaving synthesis with nothing to cite -
+  // the model then reports "no signal" despite `ok` results on record. The
+  // digest guarantees every executed call is citable in the final round.
+  const DIGEST_SNIP = 160;
+  const DIGEST_LINES = 30;
+  const snip = (s: string) =>
+    s.replace(/\s+/g, " ").trim().slice(0, DIGEST_SNIP) +
+    (s.replace(/\s+/g, " ").trim().length > DIGEST_SNIP ? "…" : "");
+  const turnDigestLines: string[] = [];
+  let turnDigestOmitted = 0;
+  for (const tc of convo) {
+    const turn = tc as unknown as NormMsg;
+    if (turn?.role !== "tool" || typeof turn.content !== "string") continue;
+    const prev = convo[convo.indexOf(tc) - 1] as unknown as NormMsg | undefined;
+    const call = prev?.role === "assistant" && Array.isArray(prev.tool_calls) ? prev.tool_calls[0] : undefined;
+    const name = call?.function?.name ?? "tool";
+    let args: string;
+    try {
+      args = JSON.stringify(JSON.parse(call?.function?.arguments || "{}")).slice(0, 120);
+    } catch {
+      args = (call?.function?.arguments || "{}").slice(0, 120);
+    }
+    const failed = /^(error:|user rejected)/.test(turn.content);
+    const line = `${failed ? "FAIL" : "ok"} ${name} ${args} -> ${snip(turn.content)}`;
+    if (turnDigestLines.length < DIGEST_LINES) turnDigestLines.push(line);
+    else turnDigestOmitted++;
+  }
   const counts = [...new Set(usedTools)].map((n) => `${n}×${usedTools.filter((t) => t === n).length}`).join(", ");
   let finErr = "";
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -1771,15 +1927,32 @@ export async function chatWithTools(
     // momentarily down/restarting - instant retries all fail the same way.
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500 * attempt));
     try {
+      const digestMsg =
+        turnDigestLines.length > 0
+          ? ([
+              {
+                role: "system",
+                content:
+                  `Turn digest (all ${turnDigestLines.length + turnDigestOmitted} tool call(s) this turn, ` +
+                  `newest last${turnDigestOmitted > 0 ? `, ${turnDigestOmitted} oldest omitted` : ""}):\n` +
+                  turnDigestLines.join("\n"),
+              },
+            ] as unknown as NormMsg[])
+          : [];
       const fin = await backendComplete(
         [
           ...tail,
+          ...digestMsg,
           {
             role: "user",
             content:
               `${loopNote}Tool budget exhausted. Write your final answer now using only the tool results above. ` +
               `Reply with PLAIN TEXT ONLY - no tool calls, no JSON: what you found/did, and what remains. ` +
-              `Cite the actual tool outputs observed above (paths, results). Do NOT claim confusion, misunderstanding, or missing context when tool results already exist, and do NOT invent tool calls or results beyond this turn's history.` +
+              `Cite the actual tool outputs observed above (paths, results). Do NOT claim confusion, misunderstanding, or missing context when tool results already exist, and do NOT invent tool calls or results beyond this turn's history. ` +
+              `Do not end with a question asking the user how to proceed or what to do — end with what you found/did and the single most useful next step instead.` +
+              (explicitPaths.length > 0 && loopNote
+                ? ` The user gave explicit path(s): ${explicitPaths.join(", ")} — address why they were not used.`
+                : "") +
               (attempt > 0 ? ` This is attempt ${attempt + 1}: your previous reply was not plain text. Text only.` : ""),
           },
         ],
@@ -1788,6 +1961,13 @@ export async function chatWithTools(
       );
       reportUsage(fin.usage);
       const ftext = fin.content.trim();
+      // Same degenerate-output backstop on the final summary round: never
+      // hand back a phrase loop even after tools ran.
+      if (ftext && detectDegenerateRepetition(ftext)) {
+        opts?.onRepair?.({ kind: "repetition" });
+        finErr = "degenerate repetition in final answer";
+        continue;
+      }
       if (ftext) {
         return ftext;
       }

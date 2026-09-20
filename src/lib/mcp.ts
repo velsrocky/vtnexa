@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { Approval } from "./approval";
 import type { ToolDef } from "./providers";
 
 export interface McpServerStatus {
   name: string;
   kind: string;
   enabled: boolean;
+  untrusted?: boolean;
 }
 
 export interface McpToolInfo {
@@ -78,8 +80,23 @@ export async function mcpOAuthLogout(server: string): Promise<void> {
   await invoke("mcp_oauth_logout", { server });
 }
 
-export async function mcpCallTool(server: string, tool: string, args: Record<string, unknown>): Promise<string> {
-  return invoke<string>("mcp_call_tool", { server, tool, args: args ?? {} });
+export async function mcpCallTool(
+  server: string,
+  tool: string,
+  args: Record<string, unknown>,
+  approval?: Approval,
+): Promise<string> {
+  return invoke<string>("mcp_call_tool", {
+    server,
+    tool,
+    args: args ?? {},
+    approval_token: approval?.token ?? null,
+    approval_detail: approval?.detail ?? null,
+  });
+}
+
+export async function mcpWorkspaceTrust(): Promise<{ workspace_servers: string[] }> {
+  return invoke("mcp_workspace_trust");
 }
 
 export async function mcpConfigGet(): Promise<{ servers: Record<string, { type: string; enabled: boolean }> }> {

@@ -31,3 +31,9 @@ public/vs
 *.njsproj
 *.sln
 *.sw?
+
+# Playwright run artifacts
+playwright-report/
+test-results/
+# Test outputs (vitest coverage)
+coverage/
