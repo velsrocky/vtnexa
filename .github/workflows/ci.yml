@@ -64,6 +64,12 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # The tauri build-script only needs the bundle resource paths to exist;
+      # clippy/test never bundle, so the gitignored staging dir gets a stub
+      # here (the release job stages the real sidecar).
+      - name: Stub bundle resource staging dir
+        run: mkdir -p src-tauri/sidecar-stage/browser
+
       - name: rustfmt check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
@@ -106,6 +112,15 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # tauri-action runs the CLI directly, so npm's pre-hooks never fire —
+      # the gitignored sidecar staging has to be built explicitly.
+      - name: Stage browser sidecar
+        run: |
+          cd sidecar/browser
+          pnpm install --prod --ignore-scripts
+          cd ../..
+          pnpm run stage-sidecar
 
       - uses: dtolnay/rust-toolchain@stable
 
