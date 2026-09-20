@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 - 2026-09-21
+
+### Fixed
+- **Cross-platform release builds**: macOS failed to compile (`prctl` /
+  `PR_SET_PDEATHSIG` are Linux-only; the sidecar orphan-guard is now
+  `cfg(target_os = "linux")`, macOS keeps the explicit window-close kill).
+  Windows failed on POSIX-only asset scripts: `stage-sidecar`, `sync-monaco`
+  and `sync-skills` are now small Node scripts (pnpm symlink store flattened
+  with `dereference: true`).
+
 ## 0.4.0 - 2026-09-21
 
 ### Commander autonomy (opencode-style, default ON)
