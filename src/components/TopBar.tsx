@@ -12,6 +12,7 @@ function TopBarInner() {
     mcpOn,
     mcpTools,
     sandboxOk,
+    autoOn,
     themeId,
     onOpenRoutines,
     onOpenMcp,
@@ -27,6 +28,17 @@ function TopBarInner() {
         title={`Review-gate protocol v${APPROVAL_PROTO} (native OS dialogs + bound tokens). If agent approvals misbehave, check this matches the latest commit — a stale window serves old gate code.`}
       >
         gate v{APPROVAL_PROTO}
+      </span>
+      <span
+        className="muted small"
+        style={autoOn ? { color: "#0ea5e9" } : undefined}
+        title={
+          autoOn
+            ? "Autonomy ON - in-workspace tools run with no dialog; anything reaching outside still pops the native approval. Toggle in Settings → Commander autonomy."
+            : "Review-gated mode - every agent side effect is staged for your approval. Toggle in Settings → Commander autonomy."
+        }
+      >
+        ⌾ {autoOn ? "auto" : "gated"}
       </span>
       {sandboxOk === false && (
         <span

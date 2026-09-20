@@ -5,7 +5,17 @@ const invokeMock = vi.hoisted(() =>
 );
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-import { shellBg, shellRun, isTauri, sandboxStatus } from "./tauri";
+import {
+  fsDelete as tauriFsDelete,
+  fsGlob as tauriFsGlob,
+  fsSearch as tauriFsSearch,
+  gitInit,
+  gitLog,
+  isTauri,
+  sandboxStatus,
+  shellBg,
+  shellRun,
+} from "./tauri";
 
 // Regression: shell_run hand-rolled snake_case `approval_token` keys, but
 // Tauri v2 binds command args camelCase — the invoke died with
@@ -62,5 +72,38 @@ describe("isTauri bridge detection", () => {
   it("is true inside the desktop webview", () => {
     (window as any)[key] = {};
     expect(isTauri()).toBe(true);
+  });
+});
+
+describe("wrapper defaults serialize explicitly (never undefined-in-payload)", () => {
+  it("fs_search fills null/false defaults", async () => {
+    invokeMock.mockResolvedValueOnce([] as never);
+    await tauriFsSearch("needle");
+    expect(invokeMock).toHaveBeenCalledWith("fs_search", {
+      query: "needle",
+      path: null,
+      glob: null,
+      caseSensitive: false,
+      regex: false,
+    });
+  });
+
+  it("fs_glob / fs_delete / git_log defaults", async () => {
+    await tauriFsGlob("**/*.ts");
+    expect(invokeMock).toHaveBeenCalledWith("fs_glob", { pattern: "**/*.ts", path: null });
+    await tauriFsDelete("/w/x");
+    expect(invokeMock).toHaveBeenCalledWith("fs_delete", {
+      path: "/w/x",
+      recursive: false,
+      approvalToken: null,
+      approvalDetail: null,
+    });
+    await gitLog("/w");
+    expect(invokeMock).toHaveBeenCalledWith("git_log", { cwd: "/w", limit: null });
+  });
+
+  it("git_init passes cwd through", async () => {
+    await gitInit("/w");
+    expect(invokeMock).toHaveBeenCalledWith("git_init", { cwd: "/w" });
   });
 });

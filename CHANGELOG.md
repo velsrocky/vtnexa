@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-09-21
 
 ### Commander autonomy (opencode-style, default ON)
 - **Approval only for outside access.** Workspace-confined operations (file
@@ -34,6 +34,14 @@
   user role.
 
 ### Tooling & quality
+- **Injection surface narrowed:** browser page text now enters the model
+  context behind an explicit `untrusted web page content` fence; the top bar
+  always shows the active autonomy mode (`⌾ auto` / `⌾ gated`) so the trust
+  model in force is never implicit.
+- **Branch coverage** further improved (73.3% → 74.8%; 460 tests): hook-level
+  suites for trusted-path management, editor-tab lifecycle (dirty guards,
+  rename/delete retargeting), workspace switching/browse flows, preview
+  variants and tauri wrapper defaults.
 - **Sandbox visibility:** new `sandbox_status` backend command +
   `useSandboxStatus` probe; the top bar shows a `⚠ no shell sandbox` chip
   when firejail is absent or the probe fails (fail-closed display), so the

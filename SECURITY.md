@@ -59,7 +59,10 @@ against — in auto mode first, since that is the default.
   approval dialogs, but it cannot confirm them — an unattended dialog blocks
   the turn instead of approving. **In auto mode (default) this protection
   covers only outside-workspace actions:** injected instructions CAN drive
-  in-workspace writes and shell with no popup. Treat unexpected dialogs as
+  in-workspace writes and shell with no popup. The top bar shows the current
+  mode (`⌾ auto` / `⌾ gated`) next to the gate version so the active trust
+  model is always visible. Browser page text enters the model context behind
+  an explicit `untrusted web page content` fence. Treat unexpected dialogs as
   hostile and reject them; point Commander at untrusted content only in
   review-gated mode.
 - **Renderer compromise (XSS) is NOT contained:** arbitrary JavaScript in the

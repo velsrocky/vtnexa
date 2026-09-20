@@ -95,3 +95,43 @@ describe("useEditor composition", () => {
     expect(h.wsOf().buffers["/w/a.txt"]).toBe("v2");
   });
 });
+
+describe("useEditor preview variants", () => {
+  it("wraps an empty editor with the (no file) footer", async () => {
+    setInvokeImpl(async () => "");
+    const h = setup({}, "preview");
+    await act(async () => {});
+    expect(h.result.current.previewDoc).toContain("(no file)");
+  });
+
+  it("passes raw HTML through unconverted", async () => {
+    setInvokeImpl(async () => "");
+    const h = setup(
+      {
+        tabs: ["/w/p.html"],
+        buffers: { "/w/p.html": "<h1>Raw</h1>" },
+        originals: { "/w/p.html": "<h1>Raw</h1>" },
+        openPath: "/w/p.html",
+      },
+      "preview",
+    );
+    await act(async () => {});
+    expect(h.result.current.previewDoc).toBe("<h1>Raw</h1>");
+  });
+
+  it("escapes non-markup source files", async () => {
+    setInvokeImpl(async () => "");
+    const h = setup(
+      {
+        tabs: ["/w/m.rs"],
+        buffers: { "/w/m.rs": "fn main() { println!(\"hi\"); }" },
+        originals: { "/w/m.rs": "fn main() { println!(\"hi\"); }" },
+        openPath: "/w/m.rs",
+      },
+      "preview",
+    );
+    await act(async () => {});
+    expect(h.result.current.previewDoc).toContain("fn main()");
+    expect(h.result.current.previewDoc).toContain("/w/m.rs");
+  });
+});

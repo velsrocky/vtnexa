@@ -12,7 +12,7 @@ export default defineConfig({
       include: ["src/lib/**/*.ts", "src/hooks/**/*.ts"],
       exclude: ["src/**/*.test.ts", "src/**/*.d.ts"],
       // Ratchet: roughly where the suite measures today; CI fails on drops.
-      thresholds: { statements: 82, branches: 70, functions: 80, lines: 85 },
+      thresholds: { statements: 84, branches: 72, functions: 84, lines: 87 },
     },
   },
 });

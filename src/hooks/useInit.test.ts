@@ -6,6 +6,9 @@ import { newWorkspace } from "../lib/utils";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
+const dialogStub = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialogStub.open }));
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (cmd: string, args?: unknown) =>
     (globalThis as unknown as { __invokeImpl: (c: string, a?: unknown) => Promise<unknown> }).__invokeImpl(cmd, args),
@@ -145,5 +148,85 @@ describe("useInit.changeWorkspace", () => {
     });
     expect(h.deps.wsCommitted.current).toBe("");
     expect(h.notes.join("")).toMatch(/workspace change failed/);
+  });
+});
+
+describe("useInit changeWorkspace", () => {
+  it("saves the old session and reloads every domain in order", async () => {
+    localStorage.setItem("vtai.workspaceRoot", "/w1");
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "workspace_root") return "/w1";
+      if (cmd === "set_workspace_root") return String(args.path);
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup();
+    await flush();
+    h.order.length = 0;
+    await act(async () => {
+      await h.result.current.changeWorkspace("/w2");
+    });
+    expect(h.order).toEqual(["save", "nexa", "session", "routines", "skills", "conventions"]);
+    expect(localStorage.getItem("vtai.workspaceRoot")).toBe("/w2");
+  });
+
+  it("ignores empty or unchanged targets and reports failures", async () => {
+    localStorage.setItem("vtai.workspaceRoot", "/w1");
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "workspace_root") return "/w1";
+      if (cmd === "set_workspace_root") {
+        if (String(args.path) === "/w9") return Promise.reject("denied");
+        return String(args.path);
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup();
+    await flush();
+    h.order.length = 0;
+    await act(async () => {
+      await h.result.current.changeWorkspace("  ");
+      await h.result.current.changeWorkspace("/w1");
+    });
+    expect(h.order).toEqual([]);
+    await act(async () => {
+      await h.result.current.changeWorkspace("/w9");
+    });
+    expect(h.notes.join("")).toContain("workspace change failed: denied");
+  });
+});
+
+describe("useInit browseWorkspace", () => {
+  it("explains in the shell log when the folder picker is unavailable", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "workspace_root") return "/w1";
+      if (cmd === "set_workspace_root") return "/w1";
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup();
+    await flush();
+    await act(async () => {
+      await h.result.current.browseWorkspace();
+    });
+    expect(h.notes.join("")).toContain("browse unavailable");
+  });
+
+  it("routes the picked directory through changeWorkspace", async () => {
+    (globalThis as any).window.__TAURI_INTERNALS__ = {};
+    dialogStub.open.mockResolvedValueOnce("/picked");
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "workspace_root") return "/w1";
+      if (cmd === "set_workspace_root") return String(args.path);
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup();
+    await flush();
+    h.order.length = 0;
+    await act(async () => {
+      await h.result.current.browseWorkspace();
+    });
+    expect(dialogStub.open).toHaveBeenCalledWith(
+      expect.objectContaining({ directory: true }),
+    );
+    expect(h.order).toContain("session");
+    delete (globalThis as any).window.__TAURI_INTERNALS__;
   });
 });
