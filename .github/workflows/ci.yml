@@ -64,11 +64,12 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # The tauri build-script only needs the bundle resource paths to exist;
-      # clippy/test never bundle, so the gitignored staging dir gets a stub
-      # here (the release job stages the real sidecar).
-      - name: Stub bundle resource staging dir
-        run: mkdir -p src-tauri/sidecar-stage/browser
+      # The tauri build-script validates bundle resource paths exist
+      # (sidecar-stage/ and ../dist are gitignored build outputs); clippy and
+      # test never bundle, so empty stubs suffice (release stages the real
+      # sidecar and builds dist via beforeBuildCommand).
+      - name: Stub gitignored bundle resource paths
+        run: mkdir -p dist src-tauri/sidecar-stage/browser
 
       - name: rustfmt check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
