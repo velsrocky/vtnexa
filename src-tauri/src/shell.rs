@@ -5,7 +5,6 @@ use crate::util::{truncate_chars, MAX_CMD_BYTES, MAX_OUT_CHARS};
 use crate::workspace::{checked_path, root_snapshot, WorkspaceRoots};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -16,9 +15,7 @@ pub struct ShellResult {
 }
 
 pub(crate) fn run_capped(cmd: &str, dir: &std::path::Path) -> Result<ShellResult, String> {
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
+    let mut child = sandbox::platform_shell_cmd(cmd)
         .current_dir(dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -425,7 +422,21 @@ pub(crate) fn shell_run(
     // Single execution path: firejail-wrapped when installed (OS-level
     // confinement), always capped by coreutils `timeout` (kills runaways).
     // The payload runs exactly once — never sandbox-then-direct.
-    let output = match sandbox::exec_command(&cmd, 30, &dir).output() {
+    // POSIX: firejail when installed, coreutils `timeout` otherwise.
+    // Windows: neither binary exists (its timeout.exe is interactive), so
+    // the pure-Rust kill loop in run_capped enforces the same 30s cap
+    // through the same platform shell.
+    exec_backend(&cmd, &dir)
+}
+
+#[cfg(windows)]
+fn exec_backend(cmd: &str, dir: &std::path::Path) -> Result<ShellResult, String> {
+    run_capped(cmd, dir)
+}
+
+#[cfg(not(windows))]
+fn exec_backend(cmd: &str, dir: &std::path::Path) -> Result<ShellResult, String> {
+    let output = match sandbox::exec_command(cmd, 30, dir).output() {
         Ok(o) => {
             if o.status.code() == Some(124) {
                 return Err("shell_run: timed out after 30s".to_string());
@@ -433,7 +444,7 @@ pub(crate) fn shell_run(
             o
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return run_capped(&cmd, &dir);
+            return run_capped(cmd, dir);
         }
         Err(e) => return Err(e.to_string()),
     };

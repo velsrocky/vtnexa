@@ -41,9 +41,30 @@ pub(crate) fn sandbox_status() -> bool {
     firejail_available()
 }
 
+/// The platform's non-interactive shell invocation for one command string:
+/// `sh -c` everywhere POSIX exists, `cmd.exe /C` on Windows (where `sh`,
+/// coreutils `timeout` and firejail do not exist).
+pub(crate) fn platform_shell_cmd(cmd: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("cmd.exe");
+        c.args(["/C", cmd]);
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(cmd);
+        c
+    }
+}
+
 /// The single execution path for `sh -c cmd`: firejail-wrapped when firejail
 /// is installed, `timeout`-wrapped otherwise. Runs the payload exactly once;
 /// callers must not execute the command a second time without the sandbox.
+/// POSIX only — Windows foreground execution goes through `run_capped`
+/// (pure-Rust kill-after-timeout), which needs none of these binaries.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn exec_command(cmd: &str, timeout_secs: u64, cwd: &std::path::Path) -> Command {
     let secs = format!("{timeout_secs}s");
     if firejail_available() {
@@ -81,8 +102,8 @@ pub(crate) fn exec_bg_command(cmd: &str, cwd: &std::path::Path) -> Command {
         c.current_dir(cwd).arg("--").arg("sh").arg("-c").arg(cmd);
         c
     } else {
-        let mut c = Command::new("sh");
-        c.arg("-c").arg(cmd).current_dir(cwd);
+        let mut c = platform_shell_cmd(cmd);
+        c.current_dir(cwd);
         c
     }
 }
