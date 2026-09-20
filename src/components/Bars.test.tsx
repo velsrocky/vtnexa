@@ -18,6 +18,7 @@ function stubCtx(over: Partial<AppContextValue> = {}): AppContextValue {
       mcpOn: true,
       mcpTools: 5,
       sandboxOk: true,
+      autoOn: true,
       themeId: "graphite",
       onOpenRoutines: vi.fn(),
       onOpenMcp: vi.fn(),
@@ -97,6 +98,19 @@ describe("bars read from AppContext", () => {
       </AppContextProvider>,
     );
     expect(screen.queryByText(/no shell sandbox/)).toBeNull();
+  });
+
+  it("TopBar shows the autonomy mode (auto vs gated)", () => {
+    const base = stubCtx();
+    const { rerender } = renderWith(base, <TopBar />);
+    expect(screen.getByText("⌾ auto")).toBeTruthy();
+    const gated: AppContextValue = { ...base, top: { ...base.top, autoOn: false } };
+    rerender(
+      <AppContextProvider value={gated}>
+        <TopBar />
+      </AppContextProvider>,
+    );
+    expect(screen.getByText("⌾ gated")).toBeTruthy();
   });
 
   it("WorkspaceBar edits root/cwd and browses", () => {
