@@ -12,7 +12,6 @@ env:
 
 jobs:
   frontend:
-    name: Frontend (lint · typecheck · test · e2e)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +40,6 @@ jobs:
           pnpm e2e
 
   backend:
-    name: Backend (fmt · clippy · test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
