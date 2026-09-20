@@ -249,10 +249,12 @@ pub async fn browser_start(
     })?;
 
     let mut cmd = Command::new("node");
-    // No orphaned sidecars: on Unix the kernel kills the child if WE die for
-    // any reason (crash included). Normal window-close is handled explicitly
-    // in run()'s on_window_event.
-    #[cfg(unix)]
+    // No orphaned sidecars: on Linux the kernel kills the child if WE die for
+    // any reason (crash included). macOS has no prctl - window-close kill
+    // (run()'s on_window_event) is the cleanup path there; on Windows the
+    // sidecar is spawned with a job-object-less CreateProcess but the same
+    // explicit-kill path applies.
+    #[cfg(target_os = "linux")]
     unsafe {
         cmd.pre_exec(|| {
             if libc::prctl(
