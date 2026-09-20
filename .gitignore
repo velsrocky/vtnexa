@@ -35,3 +35,5 @@ public/vs
 # Playwright run artifacts
 playwright-report/
 test-results/
+# Test outputs (vitest coverage)
+coverage/

@@ -17,6 +17,7 @@ function stubCtx(over: Partial<AppContextValue> = {}): AppContextValue {
       scheduledCount: 2,
       mcpOn: true,
       mcpTools: 5,
+      sandboxOk: true,
       themeId: "graphite",
       onOpenRoutines: vi.fn(),
       onOpenMcp: vi.fn(),
@@ -74,6 +75,28 @@ describe("bars read from AppContext", () => {
     fireEvent.click(screen.getByTitle("Settings (trusted paths, etc)"));
     expect(ctx.top.onOpenSettings).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByText(/New Window/));
+  });
+
+  it("TopBar warns only when the shell sandbox is confirmed absent", () => {
+    const base = stubCtx();
+    const withSandbox = (sandboxOk: boolean | null): AppContextValue => ({
+      ...base,
+      top: { ...base.top, sandboxOk },
+    });
+    const { rerender } = renderWith(withSandbox(false), <TopBar />);
+    expect(screen.getByText(/no shell sandbox/)).toBeTruthy();
+    rerender(
+      <AppContextProvider value={withSandbox(true)}>
+        <TopBar />
+      </AppContextProvider>,
+    );
+    expect(screen.queryByText(/no shell sandbox/)).toBeNull();
+    rerender(
+      <AppContextProvider value={withSandbox(null)}>
+        <TopBar />
+      </AppContextProvider>,
+    );
+    expect(screen.queryByText(/no shell sandbox/)).toBeNull();
   });
 
   it("WorkspaceBar edits root/cwd and browses", () => {

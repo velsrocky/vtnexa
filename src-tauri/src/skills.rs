@@ -1,7 +1,7 @@
 use crate::util::truncate_chars;
-use tauri::Manager;
 use crate::workspace::{root_snapshot, WorkspaceRoots};
 use serde::Serialize;
+use tauri::Manager;
 
 // ---- Project skills (.vtnexa/skills/*.md) ----
 // Identity is the filename stem (no frontmatter parsing, no collisions).
@@ -23,7 +23,10 @@ pub(crate) fn valid_skill_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-pub(crate) fn skill_entries(dir: &std::path::Path, out: &mut std::collections::HashMap<String, SkillInfo>) {
+pub(crate) fn skill_entries(
+    dir: &std::path::Path,
+    out: &mut std::collections::HashMap<String, SkillInfo>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -162,4 +165,3 @@ pub(crate) fn skill_read(
     }
     Err(format!("skill_read: no skill named {:?}", name))
 }
-

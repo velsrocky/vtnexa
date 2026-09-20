@@ -76,9 +76,9 @@ test.describe("Commander agent turn (e2e, mocked backend)", () => {
     await chatInput.fill("list the project");
     await page.getByRole("button", { name: "Send" }).click();
 
-    // The finalized answer (rating buttons present - the streaming message is
-    // replaced on completion). Renders as markdown and mentions the tool.
-    const commander = page.locator(".msg.assistant", { has: page.getByRole("button", { name: "👍" }) });
+    // The finalized answer (the streaming message is replaced on
+    // completion). Renders as markdown and mentions the tool.
+    const commander = page.locator(".msg.assistant", { hasText: "The project holds package.json" });
     await expect(commander).toContainText("The project holds package.json", { timeout: 30000 });
     await expect(commander.locator(".md strong")).toContainText("fs_list");
 
@@ -88,11 +88,6 @@ test.describe("Commander agent turn (e2e, mocked backend)", () => {
       await summary.click();
       await expect(page.locator(".toolcards, .toolcard")).toContainText("fs_list");
     }
-
-    // Rating the answer does not error and marks the button.
-    const up = commander.getByRole("button", { name: "👍" });
-    await up.click();
-    await expect(up).toHaveClass(/active/);
 
     // Audit tab records the auto-approved read.
     await page.getByRole("button", { name: /Audit/ }).click();

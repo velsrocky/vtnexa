@@ -17,13 +17,18 @@ pub(crate) struct RateLimiter {
 
 impl Default for RateLimiter {
     fn default() -> Self {
-        Self { window_turns: Mutex::new(HashMap::new()) }
+        Self {
+            window_turns: Mutex::new(HashMap::new()),
+        }
     }
 }
 
 impl RateLimiter {
     pub fn check_turn(&self, window_id: &str) -> Result<(), String> {
-        let mut turns = self.window_turns.lock().map_err(|e| format!("lock error: {e}"))?;
+        let mut turns = self
+            .window_turns
+            .lock()
+            .map_err(|e| format!("lock error: {e}"))?;
         let now = Instant::now();
 
         let window_turns = turns.entry(window_id.to_string()).or_insert_with(Vec::new);

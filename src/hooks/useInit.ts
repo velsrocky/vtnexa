@@ -3,6 +3,7 @@ import type { Workspace } from "../types";
 import {
   setWorkspaceRoot as setWsRootBackend,
   workspaceRoot as getWsRoot,
+  isTauri,
 } from "../lib/tauri";
 import { isWithin } from "../lib/utils";
 import { WS_KEY } from "./useWorkspace";
@@ -61,6 +62,13 @@ export function useInit(opts: {
   }
 
   async function browseWorkspace() {
+    if (!isTauri()) {
+      opts.updateWs((w) => ({
+        ...w,
+        shellOut: w.shellOut + `\nbrowse unavailable: the folder picker needs the desktop app window (this looks like a plain browser tab) — open VTNexa itself, or type the path directly`,
+      }));
+      return;
+    }
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const sel = await open({ directory: true, multiple: false, defaultPath: opts.workspaceRoot || undefined });

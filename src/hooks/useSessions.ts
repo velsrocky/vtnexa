@@ -202,7 +202,7 @@ export function useSessions(opts: {
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounced autosave: timer resets only on ws/workspace/currentId changes, not on every persistCurrent identity change
+     
   }, [opts.ws, opts.workspaceRoot, currentId, persistCurrent]);
 
   return {

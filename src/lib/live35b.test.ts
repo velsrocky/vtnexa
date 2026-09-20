@@ -1,3 +1,4 @@
+// @vitest-environment node
 // LIVE integration harness: drives the app's real chatWithTools against a
 // local llama.cpp server. Opt-in only: LIVE_35B=1 pnpm exec vitest run src/lib/live35b.test.ts
 // The ONLY seam mocked is Tauri invoke (approvals auto-granted, tool results

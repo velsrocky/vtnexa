@@ -6,17 +6,20 @@ Pre-1.0: tag `v0.x.y` from `main`; CI must be green on the tag.
    `src-tauri/Cargo.toml` (keep them in sync; the binary reads Cargo's).
 2. **Clean tree + green bar**
    ```sh
-   pnpm exec tsc --noEmit && pnpm test && pnpm build
-   cargo test --manifest-path src-tauri/Cargo.toml --lib
-   cargo clippy --manifest-path src-tauri/Cargo.toml --lib --tests -- -D warnings
-   cargo fmt --manifest-path src-tauri/Cargo.toml --check
+   pnpm lint && pnpm exec tsc --noEmit
+   pnpm exec vitest run --coverage
+   pnpm e2e
+   pnpm build
+   cargo test --manifest-path src-tauri/Cargo.toml
+   cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+   cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
    ```
 3. **Build bundles**
    ```sh
    pnpm tauri build          # .deb + AppImage under src-tauri/target/release/bundle/
    ```
-   macOS/Windows artifacts need their respective runners (CI or a manual
-   build on that OS) — note in the release what's actually shipped.
+   Tag pushes build all three platforms in CI (linux/windows/macos matrix);
+   note in the release what's actually shipped.
 4. **Smoke the installed build** (not `tauri dev`):
    - `vtnexa --version` / `--help`
    - open a workspace, one Commander turn with a tool call, approve a diff,

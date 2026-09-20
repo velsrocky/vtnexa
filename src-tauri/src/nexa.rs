@@ -31,7 +31,9 @@ fn read_capped(path: &std::path::Path, max: usize, what: &str) -> Result<String,
     }
     let s = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("__not_found__".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err("__not_found__".to_string())
+        }
         Err(e) => return Err(e.to_string()),
     };
     if s.len() > max {
@@ -45,7 +47,10 @@ fn read_capped(path: &std::path::Path, max: usize, what: &str) -> Result<String,
     Ok(s)
 }
 
-pub(crate) fn nexa_path_for(root: &std::path::Path, kind: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn nexa_path_for(
+    root: &std::path::Path,
+    kind: &str,
+) -> Result<std::path::PathBuf, String> {
     Ok(root.join(".nexa").join(nexa_filename(kind)?))
 }
 
@@ -156,7 +161,10 @@ pub(crate) fn valid_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-pub(crate) fn session_file_for(root: &std::path::Path, id: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn session_file_for(
+    root: &std::path::Path,
+    id: &str,
+) -> Result<std::path::PathBuf, String> {
     if !valid_session_id(id) {
         return Err("session: invalid id (letters, numbers, -, _; 64 max)".to_string());
     }

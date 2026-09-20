@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
 // @ts-expect-error no @types/node in this repo (see vite.config.ts)
 import { readdirSync, readFileSync } from "node:fs";

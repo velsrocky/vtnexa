@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { normalizeTrustedPattern, validateTrustedPattern } from "./useTrustedPaths";
 import { TOOL_DEFS } from "../lib/providers";

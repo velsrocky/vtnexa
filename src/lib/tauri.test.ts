@@ -5,7 +5,7 @@ const invokeMock = vi.hoisted(() =>
 );
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
-import { shellBg, shellRun } from "./tauri";
+import { shellBg, shellRun, isTauri, sandboxStatus } from "./tauri";
 
 // Regression: shell_run hand-rolled snake_case `approval_token` keys, but
 // Tauri v2 binds command args camelCase — the invoke died with
@@ -37,5 +37,30 @@ describe("tauri wrapper wire format", () => {
     await shellBg("/ws", "pnpm test", { token: "t2", detail: "pnpm test" });
     const [, args] = invokeMock.mock.calls[0];
     expect(args).toMatchObject({ approvalToken: "t2", approvalDetail: "pnpm test" });
+  });
+
+  it("sandbox_status reads the boolean verbatim", async () => {
+    invokeMock.mockResolvedValueOnce(false as never);
+    expect(await sandboxStatus()).toBe(false);
+    expect(invokeMock).toHaveBeenCalledWith("sandbox_status");
+  });
+});
+
+describe("isTauri bridge detection", () => {
+  const key = "__TAURI_INTERNALS__" as const;
+  const prev = (window as any)[key];
+  afterEach(() => {
+    if (prev === undefined) delete (window as any)[key];
+    else (window as any)[key] = prev;
+  });
+
+  it("is false in a plain browser tab (no bridge, no crash)", () => {
+    delete (window as any)[key];
+    expect(isTauri()).toBe(false);
+  });
+
+  it("is true inside the desktop webview", () => {
+    (window as any)[key] = {};
+    expect(isTauri()).toBe(true);
   });
 });

@@ -24,8 +24,8 @@ pub(crate) use shell::shell_deny_reason;
 pub(crate) use util::{truncate_chars, write_atomic, MAX_CMD_BYTES, MAX_OUT_CHARS};
 pub(crate) use workspace::{checked_path, root_snapshot, WorkspaceRoots};
 
-use tauri::Manager;
 use pty::PtyStore;
+use tauri::Manager;
 use window::next_window_label;
 use workspace::AppSettings;
 
@@ -141,6 +141,7 @@ pub fn run() {
             git::git_log,
             git::git_init,
             shell::shell_run,
+            sandbox::sandbox_status,
             shell_jobs::shell_bg,
             shell_jobs::shell_poll,
             shell_jobs::shell_kill,

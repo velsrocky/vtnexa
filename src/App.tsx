@@ -20,7 +20,6 @@ import WorkspaceBar from "./components/WorkspaceBar";
 import SessionBar from "./components/SessionBar";
 import { invoke } from "@tauri-apps/api/core";
 import { baseName, didExhaustBudget } from "./lib/utils";
-import { loadFeedback, rateMessage, ratingMap } from "./lib/feedback";
 import { useGit } from "./hooks/useGit";
 import { useWorkspaceState, windowLabel, ptyId } from "./hooks/useWorkspaceState";
 import { useAgentTurn } from "./hooks/useAgentTurn";
@@ -36,6 +35,8 @@ import { useWorkspace } from "./hooks/useWorkspace";
 import { useInit } from "./hooks/useInit";
 import { useRoutines } from "./hooks/useRoutines";
 import { useMcp } from "./hooks/useMcp";
+import { useAutoApprove } from "./hooks/useAutoApprove";
+import { useSandboxStatus } from "./hooks/useSandboxStatus";
 import { AppContextProvider, type AppContextValue } from "./context/AppContext";
 
 // One OS window = one independent VTNexa instance. Multiple windows are
@@ -43,9 +44,10 @@ import { AppContextProvider, type AppContextValue } from "./context/AppContext";
 // backend), separate PTYs, separate sessions, separate everything.
 export default function App() {
   const [auditNote, setAuditNote] = useState("");
-  const [ratings, setRatings] = useState<Record<string, 1 | -1>>(() => ratingMap(loadFeedback()));
   const { themeId, setThemeId, theme, leftW, rightW, onResizerDown, skillH, onSkillResizerDown } = usePrefs();
   const [showSettings, setShowSettings] = useState(false);
+  const { autoApproveWorkspace, setAutoApproveWorkspace } = useAutoApprove();
+  const sandboxOk = useSandboxStatus();
 
   const {
     ws,
@@ -262,6 +264,7 @@ export default function App() {
     flushStreamFrame,
     planMode: ws.planMode,
     pushUndo,
+    autoApproveWorkspace,
   });
 
   const {
@@ -424,6 +427,7 @@ export default function App() {
         scheduledCount: routines.filter((r) => r.enabled && r.everyMs > 0).length,
         mcpOn,
         mcpTools,
+        sandboxOk,
         themeId,
         onOpenRoutines: () => setShowRoutines(true),
         onOpenMcp: () => setShowMcp(true),
@@ -459,11 +463,14 @@ export default function App() {
         onRefresh: () => void refreshSessions(),
       },
     }),
+    // useState setters (setShowMcp, setShowRoutines, setThemeId) are stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       workspaceRoot,
       routines,
       mcpOn,
       mcpTools,
+      sandboxOk,
       themeId,
       editCfg,
       provHist,
@@ -519,7 +526,11 @@ export default function App() {
         />
       )}
       {showSettings && (
-        <SettingsModal onClose={() => setShowSettings(false)} />
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          autoApproveWorkspace={autoApproveWorkspace}
+          onAutoApproveChange={setAutoApproveWorkspace}
+        />
       )}
       <AppContextProvider value={barCtx}>
         <TopBar />
@@ -631,28 +642,6 @@ export default function App() {
           onTogglePlan={() => updateWs((w) => ({ ...w, planMode: !w.planMode }))}
           showContinue={didExhaustBudget(ws.messages)}
           onContinue={continueTurn}
-          ratings={ratings}
-          onRateMessage={(messageId, rating) => {
-            const msgs = ws.messages;
-            const idx = msgs.findIndex((m) => m.id === messageId);
-            const answer = idx >= 0 ? msgs[idx].content : "";
-            let prompt = "";
-            for (let i = idx - 1; i >= 0; i--) {
-              if (msgs[i].role === "user") {
-                prompt = msgs[i].content;
-                break;
-              }
-            }
-            const next = rateMessage({
-              messageId,
-              sessionId,
-              model: ws.provider.model,
-              rating,
-              prompt,
-              answer,
-            });
-            setRatings(ratingMap(next));
-          }}
           padText={padText}
           setPadText={setPadText}
           planText={planText}

@@ -16,6 +16,7 @@ export interface TopBarSlice {
   scheduledCount: number;
   mcpOn: boolean;
   mcpTools: number;
+  sandboxOk: boolean | null;
   themeId: ThemeId;
   onOpenRoutines: () => void;
   onOpenMcp: () => void;

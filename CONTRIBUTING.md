@@ -16,12 +16,13 @@ pnpm tauri dev
 ## The green bar (what CI runs)
 
 ```sh
+pnpm lint                  # eslint --max-warnings 0
 pnpm exec tsc --noEmit     # types
-pnpm test                  # vitest (139 tests, jsdom)
-pnpm build                 # tsc + vite bundle
-cargo test --manifest-path src-tauri/Cargo.toml --lib
-cargo clippy --manifest-path src-tauri/Cargo.toml --lib --tests -- -D warnings
-cargo fmt --manifest-path src-tauri/Cargo.toml --check
+pnpm exec vitest run --coverage   # unit tests + coverage ratchet
+pnpm e2e                   # playwright (chromium) against the web build
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
 
 ## Layout

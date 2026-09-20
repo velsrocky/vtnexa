@@ -42,7 +42,9 @@ export function useTrustedPaths() {
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(paths));
-    } catch {}
+    } catch {
+      /* persistence is best-effort */
+    }
   }, [paths]);
 
   function addPath(pattern: string, reason: string) {

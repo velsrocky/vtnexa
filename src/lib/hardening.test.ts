@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { isGatedTool, isReadOnlyTool, toolsForMode } from "./toolDefs";
 import { actionFor, detailFor, lspNeedsApproval } from "./approval";

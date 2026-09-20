@@ -34,6 +34,13 @@ pub(crate) fn firejail_available() -> bool {
     std::path::Path::new(FIREJAIL_PATH).exists()
 }
 
+/// UI status chip: true when agent shell commands get firejail confinement,
+/// false when they degrade to the screening-only path.
+#[tauri::command]
+pub(crate) fn sandbox_status() -> bool {
+    firejail_available()
+}
+
 /// The single execution path for `sh -c cmd`: firejail-wrapped when firejail
 /// is installed, `timeout`-wrapped otherwise. Runs the payload exactly once;
 /// callers must not execute the command a second time without the sandbox.
@@ -112,5 +119,13 @@ mod tests {
         assert!(joined.contains("-c"));
         // Bg jobs are bounded by the 30min poll-kill, not `timeout 30s`.
         assert!(!joined.contains("\"30s\""));
+    }
+
+    #[test]
+    fn sandbox_status_matches_binary_presence() {
+        assert_eq!(
+            sandbox_status(),
+            std::path::Path::new(FIREJAIL_PATH).exists()
+        );
     }
 }

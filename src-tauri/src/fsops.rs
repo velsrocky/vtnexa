@@ -72,11 +72,15 @@ pub(crate) fn fs_write(
     approval_detail: String,
 ) -> Result<(), String> {
     let safe = checked_path(&state, window.label(), path, "fs_write")?;
-    let trusted_paths = settings.0.lock().map(|s| s.trusted_paths.clone()).unwrap_or_default();
-    
+    let trusted_paths = settings
+        .0
+        .lock()
+        .map(|s| s.trusted_paths.clone())
+        .unwrap_or_default();
+
     // Skip approval for trusted paths (reduces UX verbosity)
     let needs_approval = !is_trusted_path(&safe, &trusted_paths);
-    
+
     if needs_approval {
         let token: Option<String> = if approval_token.is_empty() {
             None

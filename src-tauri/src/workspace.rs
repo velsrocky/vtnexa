@@ -100,7 +100,10 @@ pub(crate) fn is_trusted_path(path: &std::path::Path, trusted_paths: &[TrustedPa
         }
         // Contiguous component-subsequence match: "docs" matches
         // /ws/docs/a and /ws/x/docs/a, but NOT /ws/mydocs/a or /ws/docs2/a.
-        if comps.windows(pat.len()).any(|w| w.iter().zip(&pat).all(|(a, b)| a == b)) {
+        if comps
+            .windows(pat.len())
+            .any(|w| w.iter().zip(&pat).all(|(a, b)| a == b))
+        {
             return true;
         }
     }
@@ -116,7 +119,10 @@ pub(crate) fn default_root() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
 }
 
-pub(crate) fn root_snapshot(state: &tauri::State<'_, WorkspaceRoots>, label: &str) -> std::path::PathBuf {
+pub(crate) fn root_snapshot(
+    state: &tauri::State<'_, WorkspaceRoots>,
+    label: &str,
+) -> std::path::PathBuf {
     let g = state.0.lock().ok();
     if let Some(r) = g.as_ref().and_then(|m| m.get(label)) {
         return r.clone();
@@ -284,10 +290,19 @@ mod tests {
             reason: String::new(),
         }];
         assert!(is_trusted_path(std::path::Path::new("/ws/docs/a.md"), &tps));
-        assert!(is_trusted_path(std::path::Path::new("/ws/x/docs/a.md"), &tps));
+        assert!(is_trusted_path(
+            std::path::Path::new("/ws/x/docs/a.md"),
+            &tps
+        ));
         // Substring lookalikes must NOT match.
-        assert!(!is_trusted_path(std::path::Path::new("/ws/mydocs/a.md"), &tps));
-        assert!(!is_trusted_path(std::path::Path::new("/ws/docs2/a.md"), &tps));
+        assert!(!is_trusted_path(
+            std::path::Path::new("/ws/mydocs/a.md"),
+            &tps
+        ));
+        assert!(!is_trusted_path(
+            std::path::Path::new("/ws/docs2/a.md"),
+            &tps
+        ));
         assert!(!is_trusted_path(std::path::Path::new("/ws/src/a.md"), &tps));
 
         let multi = vec![TrustedPath {
@@ -320,7 +335,10 @@ mod tests {
             pattern: "/".to_string(),
             reason: String::new(),
         }];
-        assert!(!is_trusted_path(std::path::Path::new("/ws/docs/a.md"), &legacy));
+        assert!(!is_trusted_path(
+            std::path::Path::new("/ws/docs/a.md"),
+            &legacy
+        ));
     }
 
     #[cfg(unix)]

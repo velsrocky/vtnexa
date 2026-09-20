@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runTool, toolsForMode, type ToolDef } from "./providers";
 import { setMcpToolCache } from "./mcp";
@@ -326,5 +327,118 @@ describe("past sessions", () => {
     const PLAN = { requestApproval: async () => TOK, planMode: true };
     expect(await runTool("sessions_list", {}, PLAN)).toContain("Fresh scaffold");
     expect(await runTool("session_read", { id: "s1" }, PLAN)).toContain("did it");
+  });
+});
+
+describe("workspace auto-approval (opencode-style)", () => {
+  const autoPolicy = (over: Record<string, any> = {}) => ({
+    autoApproveWorkspace: true,
+    workspaceRoot: "/w",
+    requestApproval: async () => {
+      throw new Error("dialog must not appear for confined ops");
+    },
+    ...over,
+  });
+
+  it("confined shell claims silently, never popping a dialog", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_claim") return "tok-auto";
+      if (cmd === "shell_run") return { stdout: "hi", stderr: "", code: 0 };
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const out = await runTool("shell_run", { cwd: "/w", cmd: "npm test" }, autoPolicy());
+    expect(JSON.parse(out).stdout).toBe("hi");
+    expect(calls.map((c) => c.cmd)).toEqual(["approval_claim", "shell_run"]);
+    expect((calls[1].args as any).approvalToken).toBe("tok-auto");
+  });
+
+  it("shell reaching outside still pops the dialog", async () => {
+    let dialogs = 0;
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "shell_run") return { stdout: "", stderr: "", code: 0 };
+      throw new Error(`unexpected ${cmd}`);
+    });
+    await runTool("shell_run", { cwd: "/w", cmd: "cat ~/.ssh/id_rsa" }, autoPolicy({
+      requestApproval: async () => { dialogs++; return TOK; },
+    }));
+    expect(dialogs).toBe(1);
+    expect(calls.map((c) => c.cmd)).toEqual(["shell_run"]);
+  });
+
+  it("confined fs_write writes directly with undo captured", async () => {
+    const undos: any[] = [];
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") return "old content";
+      if (cmd === "approval_claim") return "tok-auto";
+      if (cmd === "fs_write") return undefined;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const out = await runTool(
+      "fs_write",
+      { path: "/w/a.txt", content: "new content" },
+      autoPolicy({ onUndoCapture: (e: any) => undos.push(e) }),
+    );
+    expect(out).toMatch(/wrote \/w\/a\.txt.*directly/);
+    expect(undos).toEqual([
+      { kind: "write", path: "/w/a.txt", before: "old content", after: "new content", existedBefore: true },
+    ]);
+    expect(calls.map((c) => c.cmd)).toEqual(["fs_read", "approval_claim", "fs_write"]);
+  });
+
+  it("direct write of a new file marks existedBefore false", async () => {
+    const undos: any[] = [];
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") throw new Error("not found");
+      if (cmd === "approval_claim") return "tok-auto";
+      if (cmd === "fs_write") return undefined;
+      throw new Error(`unexpected ${cmd}`);
+    });
+    await runTool(
+      "fs_write",
+      { path: "/w/new.txt", content: "x" },
+      autoPolicy({ onUndoCapture: (e: any) => undos.push(e) }),
+    );
+    expect(undos[0].existedBefore).toBe(false);
+  });
+
+  it("outside-root fs_write falls back to Diff staging", async () => {
+    const staged: any[] = [];
+    setInvokeImpl(async () => {
+      throw new Error("must not invoke for unconfined write");
+    });
+    const out = await runTool(
+      "fs_write",
+      { path: "/etc/x.txt", content: "x" },
+      autoPolicy({ onProposeWrite: async (p: string, c: string) => { staged.push([p, c]); } }),
+    );
+    expect(out).toMatch(/staged .* Diff review gate/);
+    expect(staged).toEqual([["/etc/x.txt", "x"]]);
+    expect(calls).toEqual([]);
+  });
+
+  it("browser and MCP tools always keep the dialog", async () => {
+    setMcpToolCache([
+      { server: "demo", name: "add", qualified_name: "mcp_demo_add", description: "", input_schema: {} },
+    ]);
+    setInvokeImpl(async () => ({}));
+    let dialogs = 0;
+    const counting = autoPolicy({ requestApproval: async () => { dialogs++; return TOK; } });
+    await runTool("browser_navigate", { url: "https://x.test" }, counting);
+    await runTool("mcp_demo_add", { a: 1 }, counting);
+    expect(dialogs).toBe(2);
+  });
+
+  it("disabled flag preserves the old gated behavior", async () => {
+    let dialogs = 0;
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "shell_run") return { stdout: "", stderr: "", code: 0 };
+      throw new Error(`unexpected ${cmd}`);
+    });
+    await runTool("shell_run", { cwd: "/w", cmd: "ls" }, {
+      autoApproveWorkspace: false,
+      workspaceRoot: "/w",
+      requestApproval: async () => { dialogs++; return TOK; },
+    });
+    expect(dialogs).toBe(1);
   });
 });

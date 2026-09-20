@@ -123,7 +123,10 @@ pub(crate) fn full_detail_binding(raw: &str) -> (usize, u64) {
     (t.len(), h.finish())
 }
 
-fn validate_issue(action: &str, detail: &Option<String>) -> Result<(String, String, usize, u64), String> {
+fn validate_issue(
+    action: &str,
+    detail: &Option<String>,
+) -> Result<(String, String, usize, u64), String> {
     let action = action.trim().to_string();
     if action.is_empty() || action.len() > MAX_ACTION_LEN {
         return Err("approval: invalid action".to_string());

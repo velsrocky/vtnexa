@@ -11,6 +11,7 @@ function TopBarInner() {
     scheduledCount,
     mcpOn,
     mcpTools,
+    sandboxOk,
     themeId,
     onOpenRoutines,
     onOpenMcp,
@@ -27,6 +28,15 @@ function TopBarInner() {
       >
         gate v{APPROVAL_PROTO}
       </span>
+      {sandboxOk === false && (
+        <span
+          className="muted small"
+          style={{ color: "#d97706" }}
+          title="firejail not found - agent shell commands run with backend screening only, no OS-level confinement. Install firejail for read-only system paths and a private /tmp."
+        >
+          ⚠ no shell sandbox
+        </span>
+      )}
       <div className="lanes">
         <span className="muted small" title={`Window: ${windowLabel}`}>
           {workspaceLabel || "(no workspace)"}

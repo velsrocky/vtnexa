@@ -1,8 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Approval } from "./approval";
 
-function approvalArgs(a?: Approval): { approval_token: string | null; approval_detail: string | null } {
-  return { approval_token: a?.token ?? null, approval_detail: a?.detail ?? null };
+// Tauri v2 binds command args camelCase (same trap as shell_run): snake_case
+// keys here silently bound to None (dropped approvals) or failed outright
+// ("missing required key targetRef" on clicks).
+function approvalArgs(a?: Approval): { approvalToken: string | null; approvalDetail: string | null } {
+  return { approvalToken: a?.token ?? null, approvalDetail: a?.detail ?? null };
 }
 
 export interface BrowserElement {
@@ -62,7 +65,7 @@ export async function browserSnapshot(): Promise<BrowserSnapshot> {
 }
 
 export async function browserClick(target_ref: number, approval?: Approval): Promise<unknown> {
-  return invoke("browser_click", { target_ref, ...approvalArgs(approval) });
+  return invoke("browser_click", { targetRef: target_ref, ...approvalArgs(approval) });
 }
 
 export async function browserType(
@@ -71,7 +74,7 @@ export async function browserType(
   submit = false,
   approval?: Approval,
 ): Promise<unknown> {
-  return invoke("browser_type", { target_ref, text, submit, ...approvalArgs(approval) });
+  return invoke("browser_type", { targetRef: target_ref, text, submit, ...approvalArgs(approval) });
 }
 
 export async function browserScreenshot(): Promise<{

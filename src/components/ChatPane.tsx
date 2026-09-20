@@ -94,7 +94,7 @@ export function StreamingBody({ content, thinking }: { content: string; thinking
   );
 }
 
-export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, showContinue, onContinue, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote, ratings, onRateMessage }: {
+export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, showContinue, onContinue, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote }: {
   ws: Workspace;
   busy: boolean;
   sideTab: SideTab;
@@ -123,8 +123,6 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
   nexaState: NexaState;
   auditNote: string;
   setAuditNote: (v: string) => void;
-  ratings?: Record<string, 1 | -1>;
-  onRateMessage?: (messageId: string, rating: 1 | -1) => void;
 }) {
   const hist = useInputHistory();
   function onInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -194,24 +192,6 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
                 <div className={`msg ${m.role}`}>
                   <div className="msg-head">
                     <b>{m.role === "user" ? "You" : m.role === "assistant" ? "Commander" : "Note"}</b>
-                    {m.role === "assistant" && m.id !== "stream" && onRateMessage && (
-                      <span className="rate" title="Rate this answer - helps improve Commander">
-                        <button
-                          className={ratings?.[m.id] === 1 ? "active" : ""}
-                          onClick={() => onRateMessage(m.id, 1)}
-                          title="Good answer"
-                        >
-                          👍
-                        </button>
-                        <button
-                          className={ratings?.[m.id] === -1 ? "active" : ""}
-                          onClick={() => onRateMessage(m.id, -1)}
-                          title="Bad answer"
-                        >
-                          👎
-                        </button>
-                      </span>
-                    )}
                   </div>
                   {m.role === "assistant" ? (
                     m.id === "stream" ? (

@@ -31,4 +31,3 @@ pub(crate) fn create_window(app: tauri::AppHandle) -> Result<String, String> {
         .map_err(|e| format!("create_window: {e}"))?;
     Ok(label)
 }
-

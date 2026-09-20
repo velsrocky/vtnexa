@@ -9,8 +9,13 @@ export interface AuditEntry {
   hash?: string;
 }
 
+// Canonical serialization: explicit field order, independent of JSON key
+// order on disk. (An array-replacer was previously used here; it dropped
+// every entry's fields and hashed "[{}]" no matter what the log contained.)
 export async function computeHash(entries: AuditEntry[]): Promise<string> {
-  const payload = JSON.stringify(entries, Object.keys(entries).sort());
+  const payload = JSON.stringify(
+    entries.map((e) => [e.timestamp ?? "", e.windowLabel ?? "", e.tool ?? "", e.status ?? "", e.detail ?? ""]),
+  );
   const buffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
   return Array.from(new Uint8Array(buffer))
     .map(b => b.toString(16).padStart(2, '0'))
@@ -40,9 +45,9 @@ export async function exportAuditLog(entries: AuditEntry[]): Promise<string> {
 
 export async function verifyAuditExport(data: string): Promise<{ valid: boolean; hash: string | null }> {
   try {
-    const payload = JSON.parse(data);
-    const expectedHash = payload.hash;
-    const entries = payload.entries.filter((e: any) => !e.hash);
+    const payload = JSON.parse(data) as { hash?: string; entries?: (AuditEntry & { hash?: string })[] };
+    const expectedHash = payload.hash ?? null;
+    const entries = (payload.entries ?? []).filter((e) => !e.hash);
     const computedHash = await computeHash(entries);
     return { valid: computedHash === expectedHash, hash: expectedHash };
   } catch {

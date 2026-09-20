@@ -24,9 +24,10 @@ test:
 	cargo test --manifest-path src-tauri/Cargo.toml
 
 lint:
+	pnpm lint
 	pnpm exec tsc --noEmit
-	pnpm exec eslint src/ --ext .ts,.tsx || true
-	cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+	cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+	cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 clean:
 	rm -rf dist

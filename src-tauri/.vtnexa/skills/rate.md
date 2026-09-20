@@ -14,3 +14,5 @@ Provide a concise, 1–10 score and summary for the workspace or a specific comp
     - `Strengths:` 2–3 bullet points
     - `Weaknesses:` 2–3 bullet points
     - `Suggestion:` one concrete next step
+
+This format applies to this response only — no extra sections, no commentary about the skill itself.

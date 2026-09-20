@@ -2,7 +2,15 @@ import { useState } from "react";
 import { useTrustedPaths } from "../hooks/useTrustedPaths";
 import { invoke } from "@tauri-apps/api/core";
 
-export default function SettingsModal({ onClose }: { onClose: () => void }) {
+export default function SettingsModal({
+  onClose,
+  autoApproveWorkspace,
+  onAutoApproveChange,
+}: {
+  onClose: () => void;
+  autoApproveWorkspace: boolean;
+  onAutoApproveChange: (v: boolean) => void;
+}) {
   const { paths, addPath, removePath } = useTrustedPaths();
   const [pattern, setPattern] = useState("");
   const [reason, setReason] = useState("");
@@ -37,6 +45,22 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="settings-modal">
+      <div style={{display:'flex',justifyContent:'space-between'}}>
+        <h3>Commander autonomy</h3>
+      </div>
+      <label style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 16 }}>
+        <input
+          type="checkbox"
+          checked={autoApproveWorkspace}
+          onChange={(e) => onAutoApproveChange(e.target.checked)}
+        />
+        <span>
+          Auto-approve in-workspace operations (opencode-style).
+          {autoApproveWorkspace
+            ? " File writes, shell, git and renames inside the workspace run free; only outside access pops a dialog."
+            : " Every side effect pops an approval dialog (review-gated)."}
+        </span>
+      </label>
       <div style={{display:'flex',justifyContent:'space-between'}}>
         <h3>Trusted Paths</h3>
         <button onClick={onClose}>×</button>

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Commander autonomy (opencode-style, default ON)
+- **Approval only for outside access.** Workspace-confined operations (file
+  writes, shell, renames, deletes, commits, typechecks) run with NO dialog;
+  anything reaching outside (`~`, sudo, piped-to-shell, outside absolutes,
+  browser/MCP tools) keeps the native dialog. New `workspaceScope.ts`
+  confinement checker (component-boundary paths, quote-aware shell scanner,
+  benign `/dev` nodes exempt). Toggle in Settings → Commander autonomy;
+  review-gated mode restores per-action approval + Diff staging.
+- **Agent writes go direct in auto mode** (no Diff staging), with undo
+  captured so `/undo` still works. Auto-claimed approvals are tagged `auto`
+  (never `approved`) in the audit log. Backend deny-list, confinement and
+  credential blocks still apply — README/SECURITY rewritten honestly around
+  the new trust model (workspace = trust boundary in auto mode).
+- **Read-only skills are tool-confined.** Skills scoping themselves to
+  read-only work (only `/rate` today) can neither be offered nor trigger
+  side-effect tools — refused fail-closed before any dialog (the turn that
+  committed + npm-installed during a rating is why this exists).
+- **Rating buttons removed** (👍/👎 + local feedback store deleted) along
+  with their e2e assertions.
+
 ### Tests
 - **Long-turn integration coverage**: a hook-level replay of the messy live
   turn (30 messages of history, 10 tool rounds with parallel calls, a repeated
@@ -13,7 +33,53 @@
   it fails if the task anchor is removed, and fails if nudges return to the
   user role.
 
+### Tooling & quality
+- **Sandbox visibility:** new `sandbox_status` backend command +
+  `useSandboxStatus` probe; the top bar shows a `⚠ no shell sandbox` chip
+  when firejail is absent or the probe fails (fail-closed display), so the
+  screening-only degradation is never silent.
+- **Real linting**: ESLint 9 flat config (typescript-eslint recommended,
+  react-hooks, react-refresh) wired into `pnpm lint` with
+  `--max-warnings 0`; all 53 pre-existing errors fixed (useless escapes and
+  assignments, empty catches, untyped `Record<string, any>` policy
+  signatures narrowed to `unknown`), wire-format JSON modules carry scoped
+  documented disables instead of blanket rule-off.
+- **Audit export verification was a no-op**: `computeHash` used an
+  array-replacer in `JSON.stringify`, which serialized every entry to `{}` —
+  any tampered export re-hashed to the same digest and "verified". Replaced
+  with a canonical field-tuple serialization; tamper-evidence test suite
+  added (field mutation, entry deletion, key reordering, malformed input).
+- **CI rewritten**: was a workflow whose lint step always passed
+  (`eslint || true` with eslint not installed), whose Rust jobs would fail
+  without Tauri system deps, and which never ran the e2e suite. Now three
+  jobs — frontend (lint, typecheck, vitest+coverage ratchet, Playwright e2e
+  in chromium), backend (rustfmt, clippy `-D warnings`, cargo test, cached),
+  release (tauri-action, drafts only on `v*` tags) — all with
+  `--frozen-lockfile` and pnpm pinned via `packageManager`.
+- **Vitest**: `vmThreads` + `isolate: false` (jsdom-per-file churn warning
+  gone), DOM-less suites pinned to the `node` environment, coverage provider
+  (`@vitest/coverage-v8`) actually installed and ratcheted at
+  75/62/75/78.
+- **Rust**: whole crate formatted with `cargo fmt` and enforced in CI.
+- **Branch coverage push** (67.6% → 73.3%; statements 80.7% → 85.8%, ratchet
+  raised to 82/70/80/85): full `preview.ts` suite (language map, CSP wrapper,
+  sanitizer hostility cases), `browser.ts` port/approval wiring, and new
+  `chatWithTools` round-trips pinning the toAnthropic (system/image merging,
+  streamed `input_json_delta`, `tool_result`, orphan drop) and toGemini
+  (`system_instruction`, UPPERCASE schema, `functionCall`/`functionResponse`,
+  malformed-args guard) wire formats.
+- **Dependabot** for npm, cargo and GitHub Actions (weekly, grouped).
+  Release CI now builds Linux + Windows + macOS on tags.
+- Dead code removed: unused duplicate of `ToolPolicy`/`ToolDef`
+  (`src/lib/agent/types.ts`), empty `src/test-setup.ts`.
+
 ### Fixed
+- **Approved browser actions never reached the backend**: the `browser_*`
+  wrappers still sent snake_case `approval_token`/`approval_detail` and
+  `target_ref`, but Tauri v2 binds camelCase — the same class of wire bug
+  previously fixed for `shell_run`. Options silently bound to `None`
+  (dropped approvals), required `u32` args failed outright. Wrappers
+  corrected; wire-format regression tests added (`browser.test.ts`).
 - **Synthetic nudges no longer masquerade as the user**: loop-guard,
   skill-follow-through, narration, denial and question repairs were injected as
   role "user" messages, which both crowded the user channel (a live model

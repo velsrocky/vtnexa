@@ -37,8 +37,10 @@ export async function approvalIssue(action: string, detail?: string): Promise<Ap
 }
 
 /** Direct-gesture path: no dialog. Only for handlers that fire on real user
- *  clicks (Diff Approve, commit buttons, tree ops, manual browser driving).
- *  The agent turn pipeline must never call this — runTool uses issue only. */
+ *  clicks (Diff Approve, commit buttons, tree ops, manual browser driving)
+ *  plus runTool's workspace auto-approval (opencode-style): the TRUSTED
+ *  frontend claims for workspace-confined agent ops after ITS OWN
+ *  confinement check — the model never sees tokens and never calls this. */
 export async function approvalClaim(action: string, detail?: string): Promise<Approval> {
   const d = (detail ?? "").slice(0, 4000);
   const token = await invoke<string>("approval_claim", { action, detail: d, proto: APPROVAL_PROTO });

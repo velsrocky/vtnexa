@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- this module re-types
+   persisted session JSON field by field (defensive restore); the inputs are
+   genuinely untyped reads from disk. */
 import { useEffect, useRef } from "react";
 import { DEFAULT_PROVIDER, type AuditEvent, type CenterTab, type WorkspaceUsage, type ProviderConfig, type SideTab, type Workspace } from "../types";
 import { keyGet, sessionLoad, sessionSave } from "../lib/tauri";

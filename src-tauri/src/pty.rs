@@ -1,4 +1,3 @@
-
 use crate::workspace::{checked_path, root_snapshot, WorkspaceRoots};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
@@ -240,7 +239,11 @@ mod tests {
         // pty_* is user-gesture only: the agent gate must never claim it,
         // otherwise a future refactor could route agent output into a shell.
         for a in ["pty_spawn", "pty_write", "pty_resize", "pty_kill"] {
-            assert!(!crate::approvals::is_privileged(a), "{} must stay user-only", a);
+            assert!(
+                !crate::approvals::is_privileged(a),
+                "{} must stay user-only",
+                a
+            );
         }
     }
 }

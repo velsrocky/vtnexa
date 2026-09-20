@@ -71,6 +71,9 @@ export function useDiffGate(opts: {
       return;
     }
     updateWs((w) => ({ ...w, undoStack: undo, redoStack: redo }));
+    // Deliberately keyed on the incoming stacks only: reading ws.* in deps
+    // would re-fire this effect on every workspace change (and clobber it).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [undoStack, redoStack]);
 
   function note(text: string) {
@@ -119,8 +122,8 @@ export function useDiffGate(opts: {
     path: string;
     original: string;
   }): Promise<{ proceed: boolean; current: string; existed: boolean }> {
-    let current = "";
-    let existed = true;
+    let current: string;
+    const existed = true;
     try {
       current = await fsRead(d.path);
     } catch (e) {

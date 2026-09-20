@@ -1,4 +1,3 @@
-
 // ---- OS keychain for provider API keys ----
 // Keys at rest belong in the platform credential store (Secret Service /
 // Keychain / Credential Manager), not plaintext. Accounts are namespaced per

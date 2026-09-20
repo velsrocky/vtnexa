@@ -2,6 +2,20 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Approval } from "./approval";
 import type { FileEntry } from "../types";
 
+/** True inside the desktop app window. Plain browser tabs (localhost:1420
+ *  opened directly, preview builds) have no Tauri bridge — every invoke
+ *  fails there with `Cannot read properties of undefined (reading 'invoke')`,
+ *  so callers needing native UI (folder picker) must check first and say so. */
+export function isTauri(): boolean {
+  try {
+    return (
+      typeof window !== "undefined" && !!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+    );
+  } catch {
+    return false;
+  }
+}
+
 function approvalArgs(a?: Approval): { approvalToken: string | null; approvalDetail: string | null } {
   return { approvalToken: a?.token ?? null, approvalDetail: a?.detail ?? null };
 }
@@ -141,6 +155,12 @@ export interface ShellPoll {
   stdout_tail: string;
   stderr_tail: string;
   elapsed_ms: number;
+}
+
+/** True when firejail is installed and agent shell commands get OS-level
+ *  confinement; false means they run screening-only (top bar shows a chip). */
+export async function sandboxStatus(): Promise<boolean> {
+  return invoke<boolean>("sandbox_status");
 }
 
 export async function shellBg(cwd: string, cmd: string, approval?: Approval): Promise<string> {

@@ -133,7 +133,7 @@ export const TOOL_DEFS: ToolDef[] = [
     function: {
       name: "fs_create",
       description:
-        "Create an empty file (parents included) or, with is_dir=true, a directory. Errors if it exists. Read-only-ish, auto-approved.",
+        "Create an EMPTY placeholder file (zero bytes, parents included) or, with is_dir=true, a directory. Errors if it exists. It puts NO content in the file - to create a file WITH content, use fs_write instead. Read-only-ish, auto-approved.",
       parameters: {
         type: "object",
         properties: { path: { type: "string" }, is_dir: { type: "boolean" } },
@@ -230,7 +230,7 @@ export const TOOL_DEFS: ToolDef[] = [
     function: {
       name: "fs_write",
       description:
-        "PROPOSE a file write (staged to Diff review gate, needs user Approve - does NOT write directly). First fs_read the file, then send the COMPLETE new content. Absolute path. Never re-send identical content.",
+        "Write a file with the COMPLETE new content (creates parents and the file itself if missing - this is also how you create files with content). First fs_read the file when it exists, then send the full new content. Auto mode: writes DIRECTLY. Review-gated mode: stages to the Diff tab for user Approve (never writes directly). Absolute path. Never re-send identical content.",
       parameters: {
         type: "object",
         properties: { path: { type: "string" }, content: { type: "string" } },
