@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4
+- Fixed unsigned-macOS release, part 2: the conditional signing-export step
+  ran under PowerShell on windows-latest (bash syntax ParserError). Now
+  explicitly `shell: bash` with heredoc env writing (multiline-safe).
+
 ## 0.4.3
 - Fixed unsigned-macOS release: tauri-action treats a set-but-empty
   `APPLE_CERTIFICATE` as "please sign" and dies importing an empty
