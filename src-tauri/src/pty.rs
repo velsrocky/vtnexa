@@ -90,7 +90,10 @@ pub(crate) fn pty_spawn(
     };
     let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
 
+    #[cfg(not(windows))]
     let mut cmd = CommandBuilder::new("bash");
+    #[cfg(windows)]
+    let mut cmd = CommandBuilder::new("cmd.exe");
     cmd.cwd(&dir);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -99,7 +102,7 @@ pub(crate) fn pty_spawn(
     // slave no longer needed in parent after spawn (dropped here)
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.try_clone_writer().map_err(|e| e.to_string())?;
+    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let pid = child.process_id();
 
     {
