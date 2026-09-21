@@ -1,6 +1,6 @@
 [package]
 name = "vtnexa"
-version = "0.4.2"
+version = "0.4.3"
 description = "VTNexa — private, review-gated agentic workspace"
 authors = ["you"]
 edition = "2021"

@@ -123,14 +123,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: tauri-apps/tauri-action@v1
+      # Signing is opt-in: tauri-action treats a SET-but-empty APPLE_CERTIFICATE
+      # as "sign me" and dies importing nothing, so only non-empty secrets are
+      # exported. While unset the release ships unsigned (SmartScreen /
+      # Gatekeeper warn; see docs/RELEASE.md "Signing & updater"). When the
+      # updater private key IS set, also add `createUpdaterArtifacts: "true"`
+      # below after enabling the updater plugin in tauri.conf.json.
+      - name: Export signing credentials when configured
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Signing is opt-in: while these secrets are unset the release
-          # ships unsigned (SmartScreen/Gatekeeper warn; see docs/RELEASE.md
-          # "Signing & updater" for the one-time setup). When the private key
-          # IS set, also add `createUpdaterArtifacts: "true"` here after
-          # enabling the updater plugin in tauri.conf.json.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -139,6 +139,17 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for v in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            val="${!v}"
+            if [ -n "$val" ]; then
+              printf '%s=%s\n' "$v" "$val" >> "$GITHUB_ENV"
+            fi
+          done
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: v__VERSION__
           releaseName: "VTNexa v__VERSION__"
