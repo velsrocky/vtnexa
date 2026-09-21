@@ -4887,7 +4887,7 @@ dependencies = [
 name = "vtnexa"
 version = "0.4.1"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "keyring",
  "libc",
  "portable-pty",
