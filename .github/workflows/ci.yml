@@ -139,11 +139,14 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # NOTE: default step shell is PowerShell on windows-latest; force bash
+        # (values like private keys are multiline - heredoc keeps them intact).
+        shell: bash
         run: |
           for v in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             val="${!v}"
             if [ -n "$val" ]; then
-              printf '%s=%s\n' "$v" "$val" >> "$GITHUB_ENV"
+              printf '%s<<GITHUB_ENV_EOF\n%s\nGITHUB_ENV_EOF\n' "$v" "$val" >> "$GITHUB_ENV"
             fi
           done
 
