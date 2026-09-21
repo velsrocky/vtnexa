@@ -1,6 +1,18 @@
 # Changelog
 
+## 0.4.2
+- keyring 3 -> 4: the OAuth token store read path treated *any* keychain
+  error as fatal, which broke MCP tool discovery on boxes without a secret
+  service (CI caught it, keyring-4 changed error taxonomy). No-daemon now
+  reads as "no token", same as provider keys. Dependabot #12 superseded.
+- New `platform-tests` workflow: cargo tests on Windows + macOS on main-push
+  and weekly (compile was proven, runtime never was).
+- Releases: signing secrets passed through to tauri-action as opt-in;
+  RELEASE.md documents the signing/updater one-time setup.
+
 ## 0.4.1 - 2026-09-21
+
+
 
 ### Fixed
 - **Cross-platform release builds**: the macOS build failed to compile

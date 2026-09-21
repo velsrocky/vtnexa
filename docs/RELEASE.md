@@ -34,6 +34,29 @@ Pre-1.0: tag `v0.x.y` from `main`; CI must be green on the tag.
 6. **Post-release:** close the milestone, update README if install paths
    changed.
 
+## Signing & updater (opt-in, one-time setup)
+
+Releases ship **unsigned** today (Windows SmartScreen and macOS Gatekeeper
+will warn). The workflow already passes every signing secret through to
+tauri-action when present (`TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]`,
+`APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE[_PASSWORD]`, `APPLE_ID`,
+`APPLE_PASSWORD`, `APPLE_TEAM_ID`) - they are no-ops while unset.
+
+1. **Updater keypair** (one time, keep private key offline):
+   ```sh
+   pnpm tauri signer generate -w ~/.tauri/vtnexa.key
+   ```
+   Add the result to repo settings → Secrets → Actions as
+   `TAURI_SIGNING_PRIVATE_KEY` (+ passphrase as
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`).
+2. **macOS signing** (needs an Apple Developer account): export a
+   Developer ID certificate and set the `APPLE_*` secrets above.
+3. **Enable the updater plugin**: add `tauri-plugin-updater` to the
+   frontend/backend, point it at the release feed, and add
+   `createUpdaterArtifacts: "true"` to the release job in ci.yml.
+4. Verify: the next tagged release should attach `.sig` files and show
+   a signed identity in `codesign -dv` / `signtool verify` output.
+
 ## Notes
 
 - AppImage can't be built on Arch-based distros without extra libs; on
