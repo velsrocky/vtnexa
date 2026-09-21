@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.3
+- Fixed unsigned-macOS release: tauri-action treats a set-but-empty
+  `APPLE_CERTIFICATE` as "please sign" and dies importing an empty
+  keychain. Signing credentials are now exported to the job environment
+  only when the secret is actually set (export step writes $GITHUB_ENV).
+
 ## 0.4.2
 - keyring 3 -> 4: the OAuth token store read path treated *any* keychain
   error as fatal, which broke MCP tool discovery on boxes without a secret
