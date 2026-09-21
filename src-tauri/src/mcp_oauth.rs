@@ -90,8 +90,16 @@ pub(crate) fn tokens_live(tokens: &OAuthTokens) -> bool {
 
 fn load_blob(server: &str) -> Result<Option<StoredBlob>, String> {
     let account = oauth_account(server)?;
-    let entry = keyring::Entry::new(crate::KEY_SERVICE, &account)
-        .map_err(|e| format!("keyring unavailable: {}", e))?;
+    // A keychain that cannot be REACHED means no token - not a failure.
+    // Anything downstream still gets correct behavior (server treated as
+    // unauthenticated, re-auth flow offered), and tool discovery never dies
+    // on CI boxes / fresh installs without a secret service. keyring v4
+    // changed error taxonomy (NoStorageAccess/NoMatchingEntry vs NoEntry),
+    // so match on capability, not variant.
+    let entry = match keyring::Entry::new(crate::KEY_SERVICE, &account) {
+        Ok(e) => e,
+        Err(_) => return Ok(None),
+    };
     match entry.get_password() {
         Ok(raw) => {
             let blob: StoredBlob = serde_json::from_str(&raw).map_err(|_| {
@@ -103,7 +111,7 @@ fn load_blob(server: &str) -> Result<Option<StoredBlob>, String> {
             Ok(Some(blob))
         }
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("keyring unavailable: {}", e)),
+        Err(_) => Ok(None),
     }
 }
 

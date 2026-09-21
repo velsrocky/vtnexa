@@ -1,0 +1,48 @@
+name: Platform Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1" # Mondays: Windows/macOS runtime unit tests before anything else touches them
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# CI proves the app COMPILES on all three OSes; this proves the Rust
+# backend's tests actually PASS on them (shell screening, approvals,
+# keychain, PTY plumbing all have platform code paths). PRs run Linux
+# only; Windows/macOS run on main-push and weekly so the runner bill
+# stays sane.
+jobs:
+  runtime:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Stub gitignored bundle resource paths
+        run: |
+          New-Item -ItemType Directory -Force -Path dist, src-tauri/sidecar-stage/browser | Out-Null
+        if: matrix.os == 'windows-latest'
+
+      - name: Stub gitignored bundle resource paths (unix)
+        run: mkdir -p dist src-tauri/sidecar-stage/browser
+        if: matrix.os != 'windows-latest'
+
+      - name: Cargo tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
