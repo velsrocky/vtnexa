@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { loader } from "@monaco-editor/react";
 if (import.meta.env.MODE === "development") {
   loader.config({ paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.56.0/min/vs" } });
@@ -7,14 +7,16 @@ if (import.meta.env.MODE === "development") {
 }
 import "./App.css";
 import type { CenterTab, SideTab } from "./types";
-import RoutinesModal from "./components/RoutinesModal";
-import McpModal from "./components/McpModal";
+const RoutinesModal = lazy(() => import("./components/RoutinesModal"));
+const McpModal = lazy(() => import("./components/McpModal"));
+const SettingsModal = lazy(() => import("./components/SettingsModal"));
+// Heavy: monaco + xterm + browser pane live here — split off so the
+// initial chunk stays lean and the warning limit means something.
+const EditorPane = lazy(() => import("./components/EditorPane"));
 import GitPane from "./components/GitPane";
 import FileTree from "./components/FileTree";
 import ChatPane from "./components/ChatPane";
-import EditorPane from "./components/EditorPane";
 import TopBar from "./components/TopBar";
-import SettingsModal from "./components/SettingsModal";
 import ProviderBar from "./components/ProviderBar";
 import WorkspaceBar from "./components/WorkspaceBar";
 import SessionBar from "./components/SessionBar";
@@ -500,39 +502,45 @@ export default function App() {
   return (
     <div className="shell">
       {showRoutines && (
-        <RoutinesModal
-          routines={routines}
-          newRoutine={newRoutine}
-          setNewRoutine={setNewRoutine}
-          persistRoutines={persistRoutines}
-          addRoutine={addRoutine}
-          runRoutine={runRoutine}
-          onClose={() => setShowRoutines(false)}
-        />
+        <Suspense fallback={<div className="settings-modal">Loading…</div>}>
+          <RoutinesModal
+            routines={routines}
+            newRoutine={newRoutine}
+            setNewRoutine={setNewRoutine}
+            persistRoutines={persistRoutines}
+            addRoutine={addRoutine}
+            runRoutine={runRoutine}
+            onClose={() => setShowRoutines(false)}
+          />
+        </Suspense>
       )}
       {showMcp && (
-        <McpModal
-          mcpOn={mcpOn}
-          setMcpOn={(on) => void setMcpOn(on)}
-          servers={mcpServers}
-          toolCount={mcpTools}
-          errorCount={mcpErrors}
-          loading={mcpLoading}
-          signingIn={mcpSigningIn}
-          note={mcpNote}
-          onToggleServer={(name, on) => void setMcpServerOn(name, on)}
-          onSignIn={(name) => void signInMcp(name)}
-          onSignOut={(name) => void signOutMcp(name)}
-          onRefresh={() => void refreshMcp()}
-          onClose={() => setShowMcp(false)}
-        />
+        <Suspense fallback={<div className="settings-modal">Loading…</div>}>
+          <McpModal
+            mcpOn={mcpOn}
+            setMcpOn={(on) => void setMcpOn(on)}
+            servers={mcpServers}
+            toolCount={mcpTools}
+            errorCount={mcpErrors}
+            loading={mcpLoading}
+            signingIn={mcpSigningIn}
+            note={mcpNote}
+            onToggleServer={(name, on) => void setMcpServerOn(name, on)}
+            onSignIn={(name) => void signInMcp(name)}
+            onSignOut={(name) => void signOutMcp(name)}
+            onRefresh={() => void refreshMcp()}
+            onClose={() => setShowMcp(false)}
+          />
+        </Suspense>
       )}
       {showSettings && (
-        <SettingsModal
-          onClose={() => setShowSettings(false)}
-          autoApproveWorkspace={autoApproveWorkspace}
-          onAutoApproveChange={setAutoApproveWorkspace}
-        />
+        <Suspense fallback={<div className="settings-modal">Loading…</div>}>
+          <SettingsModal
+            onClose={() => setShowSettings(false)}
+            autoApproveWorkspace={autoApproveWorkspace}
+            onAutoApproveChange={setAutoApproveWorkspace}
+          />
+        </Suspense>
       )}
       <AppContextProvider value={barCtx}>
         <TopBar />
@@ -565,7 +573,8 @@ export default function App() {
         />
         <div className="resizer" onMouseDown={onResizerDown("left")} title="Drag to resize panels" />
 
-        <EditorPane
+        <Suspense fallback={<div className="editor-pane">Loading editor…</div>}>
+          <EditorPane
           ws={ws}
           ptyId={ptyId}
           busy={busy}
@@ -622,6 +631,7 @@ export default function App() {
           themeId={themeId}
           onHResizerDown={onHResizerDown}
         />
+        </Suspense>
         <div className="resizer" onMouseDown={onResizerDown("right")} title="Drag to resize panels" />
 
         <ChatPane

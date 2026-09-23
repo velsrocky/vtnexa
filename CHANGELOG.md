@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.0
+- **Auto-updates**: `tauri-plugin-updater` wired end to end (backend
+  plugin + capability, `plugins.updater` feed + embedded public key,
+  `createUpdaterArtifacts` in bundle config and CI, `useUpdater` hook
+  with Check / Download & install in Settings → Updates). Add
+  `TAURI_SIGNING_PRIVATE_KEY` to Actions secrets and tagged releases
+  attach `.sig` + `latest.json`.
+- **Bundle split**: the 819 kB single chunk is gone — `manualChunks`
+  (rolldown function form) + lazy `EditorPane`/modals. Largest chunk
+  now ~332 kB (xterm), initial `index` ~163 kB.
+- Stable 1.0: versions synced (`package.json`, `Cargo.toml`,
+  `tauri.conf.json`); full bar green (lint, typecheck, 464 vitest,
+  70 Rust, clippy, fmt, 5 Playwright e2e).
+
 ## 0.4.4
 - Fixed unsigned-macOS release, part 2: the conditional signing-export step
   ran under PowerShell on windows-latest (bash syntax ParserError). Now
