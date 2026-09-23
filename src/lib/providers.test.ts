@@ -303,6 +303,63 @@ describe("runTool", () => {
     expect(out).toMatch(/^error:.*outside workspace \/home\/u\/projects\/test/);
     expect(out).not.toMatch(/\/ws(?!\/)/);
   });
+  // Live 1.0.3 report: 3 approved junk shell dialogs (~5s of user attention
+  // on empty/"<command>"/outside-cwd calls the backend was bound to refuse).
+  it("refuses junk shell calls before any approval dialog", async () => {
+    let dialogs = 0;
+    setInvokeImpl(async () => ({}));
+    const pol = {
+      workspaceRoot: "/w",
+      requestApproval: async () => {
+        dialogs++;
+        return TOK;
+      },
+    };
+    await expect(runTool("shell_run", { cmd: "", cwd: "/w" }, pol)).resolves.toMatch(/cmd is empty/);
+    await expect(runTool("shell_run", { cmd: "<command>", cwd: "/w" }, pol)).resolves.toMatch(/placeholder/);
+    await expect(runTool("shell_run", { cmd: "empty_or_invalid_cmd", cwd: "/w" }, pol)).resolves.toMatch(
+      /placeholder/,
+    );
+    await expect(runTool("shell_run", { cmd: "ls", cwd: "/path/to/workspace" }, pol)).resolves.toMatch(
+      /cwd outside workspace/,
+    );
+    expect(dialogs).toBe(0);
+  });
+  it("still pops the dialog for real shell commands", async () => {
+    let dialogs = 0;
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "shell_run") return { stdout: "x", stderr: "", code: 0 };
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const out = await runTool("shell_run", { cmd: "ls -la", cwd: "/w" }, {
+      workspaceRoot: "/w",
+      requestApproval: async () => {
+        dialogs++;
+        return TOK;
+      },
+    });
+    expect(dialogs).toBe(1);
+    expect(out).toContain("x");
+  });
+  // Live 1.0.3 report: 8 failures, 0 progress, all 10 rounds burned by a
+  // model failing differently every round (no identical-call loop to catch).
+  it("ends the turn after consecutive failures instead of burning all rounds", async () => {
+    setInvokeImpl(async () => {
+      throw new Error("fs_list: outside workspace /w (got /nope)");
+    });
+    const events: string[] = [];
+    const calls = stubFetch((_url, _init, prev) => {
+      if (prev.length < 5) {
+        return openAITools([{ id: `f${prev.length}`, name: "fs_list", args: { path: `/nope${prev.length}` } }]);
+      }
+      return openAIText("giving up gracefully");
+    });
+    // "hi" is discussion, not action: no survey-stall redirect muddies the count.
+    await chatWithTools(CFG, [{ role: "user", content: "hi" }], (e) => events.push(e));
+    expect(events.join("")).toMatch(/consecutive failures — ending turn early/);
+    // 4 failing rounds + finalize synthesis, not 10 rounds + finalize.
+    expect(calls).toHaveLength(5);
+  });
 });
 
 describe("chatWithTools", () => {

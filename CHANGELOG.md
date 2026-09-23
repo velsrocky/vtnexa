@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.4
+- **Junk shell calls die before the dialog**: empty/placeholder cmds
+  (`""`, `<command>`, echoed-back error text) and outside-workspace cwds
+  return errors with no native popup. Real commands (even `~`/sudo/pipes)
+  still pop the dialog untouched.
+- **Consecutive-failure breaker**: 4 straight failed tool calls with no
+  success ends the turn early with a citable note, instead of burning all
+  10 rounds on a model failing differently every time.
+
 ## 1.0.3
 - **Placeholder paths banned explicitly**: `/path/to/…` (model habit,
   not our text) joins `/workspace/…`, `/ws/…`, `/example/…` on the

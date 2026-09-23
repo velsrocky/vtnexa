@@ -40,7 +40,7 @@ import {
   browserType,
 } from "./browser";
 import { actionFor, claimFor, lspNeedsApproval, type Approval } from "./approval";
-import { isWorkspaceConfined } from "./workspaceScope";
+import { isPathInsideRoot, isWorkspaceConfined } from "./workspaceScope";
 import { isMcpToolName, mcpCallTool, resolveMcpQualified } from "./mcp";
 import { isGatedTool, isReadOnlyTool, toolsForMode } from "./toolDefs";
 
@@ -608,6 +608,25 @@ export async function runTool(
     if (policy?.allowedTools && !policy.allowedTools.tools.includes(name)) {
       return `error: ${name} is outside this skill's tool scope (/${policy.allowedTools.skill} allows: ${policy.allowedTools.tools.join(", ")}) - finish the skill with its own tools`;
     }
+    // Fail-closed shell validation BEFORE any approval dialog: a weak model
+    // in freefall burns user attention on dialogs the backend will refuse
+    // (observed live: empty cmd, "<command>", echoed-back error text,
+    // /path/to/workspace cwd — 3 approved junk dialogs, ~5s of user time).
+    // Junk never reaches the dialog. Real commands (even ~ / sudo / pipes)
+    // still go to the dialog untouched — only the never-legitimate is cut.
+    if (name === "shell_run" || name === "shell_bg") {
+      const cmd = String(args.cmd ?? "");
+      if (!cmd.trim()) {
+        return `error: ${name} cmd is empty - send the real command, never "" or error text echoed back. ${pathHint(policy)}.`;
+      }
+      if (/^(<[^>]*>|\{[^}]*\}|empty_or_invalid_cmd)$/i.test(cmd.trim())) {
+        return `error: ${name} cmd ${JSON.stringify(cmd.trim())} is a placeholder, not a command - send the real command.`;
+      }
+      const cwd = String(args.cwd ?? "");
+      if (cwd.startsWith("/") && policy?.workspaceRoot && !isPathInsideRoot(cwd, policy.workspaceRoot)) {
+        return `error: ${name} cwd outside workspace ${policy.workspaceRoot} (got ${JSON.stringify(cwd)}) - use the workspace root or cwd. No dialog shown; fix the path and re-send.`;
+      }
+    }
     // Native OS dialog first (page JS can trigger it but cannot click it),
     // backend token second. Unknown MCP tools fail before any dialog/invoke.
     // No approval handler (headless/routine context) fails closed — no dialog.
@@ -1124,6 +1143,13 @@ export async function chatWithTools(
   // to convert or prove stubbornness. MAX_ROUNDS bounds the worst case
   // regardless — after acting, summaries are fine unchecked.
   let surveyNudges = 0;
+  // Consecutive-failure breaker: the identical-call loop-guard can't see a
+  // model failing DIFFERENTLY every round (observed live: placeholder path,
+  // echoed-back error text, empty cmd — 8 failures, 0 progress, all 10
+  // rounds burned). Four straight error: results with no success ends the
+  // turn; rejections don't count (a user decision, not model failure).
+  let consecutiveFailures = 0;
+  const MAX_CONSECUTIVE_FAILURES = 4;
   const seen = new Map<string, number>();
   const usedTools: string[] = [];
   let loopNote = "";
@@ -1956,6 +1982,17 @@ export async function chatWithTools(
         loopNote = `\n[note: stopped after repeating \`${tc.function.name}\` with identical arguments 3× - loop detected]\n`;
         round = MAX_ROUNDS; // break outer loop, go finalize
         break;
+      }
+      if (failed) {
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          loopNote = `\n[note: stopped after ${MAX_CONSECUTIVE_FAILURES} consecutive failed tool calls with no success - the approach is not working]\n`;
+          onEvent(`\n[note: ${MAX_CONSECUTIVE_FAILURES} consecutive failures — ending turn early]\n`);
+          round = MAX_ROUNDS; // break outer loop, go finalize
+          break;
+        }
+      } else if (!rejected) {
+        consecutiveFailures = 0;
       }
     }
     // Runs even on loop-break (break exits only the inner loop): the final
