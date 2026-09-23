@@ -25,6 +25,10 @@ export interface ToolPolicy {
    *  outside the workspace keeps the native dialog. Requires workspaceRoot. */
   autoApproveWorkspace?: boolean;
   workspaceRoot?: string;
+  /** Turn cwd: relative fs paths resolve against this (else workspaceRoot).
+   *  Resolution is reported in the tool result; the backend still enforces
+   *  workspace confinement, so this is convenience, not a boundary. */
+  cwd?: string;
   /** Fires when runTool auto-claimed (no dialog) — lets the caller tag audits. */
   onAutoApproval?: (tool: string) => void;
   /** Skill confinement (from skillConfinement): the turn may offer and run

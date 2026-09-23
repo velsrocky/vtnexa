@@ -7,7 +7,7 @@ export const TOOL_DEFS: ToolDef[] = [
     function: {
       name: "fs_list",
       description:
-        "List directory entries. Absolute path inside the workspace, read-only. Use this (not fs_read) for directories and to discover file names. Good: {path: \"/ws/src\"}. Bad: {path: \"src\"} (relative - rejected).",
+        "List directory entries. Read-only. path may be absolute, relative (resolved against the turn cwd), or omitted (lists the workspace root). Use this (not fs_read) for directories and to discover file names.",
       parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
     },
   },
@@ -16,7 +16,7 @@ export const TOOL_DEFS: ToolDef[] = [
     function: {
       name: "fs_read",
       description:
-        "Read a text file BEFORE editing it. Absolute path inside the workspace, read-only, 2MB max. Files only - for directories use fs_list. Good: {path: \"/ws/src/App.tsx\"}. Bad: {path: \"App.tsx\"} (relative - rejected); {path: \"/ws/src\"} (a directory - use fs_list).",
+        "Read a text file BEFORE editing it. path may be absolute or relative (resolved against the turn cwd). Read-only, 2MB max. Files only - for directories use fs_list (path may be omitted for the workspace root).",
       parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
     },
   },
