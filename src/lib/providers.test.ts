@@ -193,6 +193,22 @@ describe("runTool", () => {
     );
     expect(out).toMatch(/^error:.*outside workspace/);
   });
+  // Live 1.0.2 report: "hello world" arrived as "" and the model repeated
+  // the empty write 3×. The result must flag the empty file loudly.
+  it("flags empty auto direct-writes so dropped content gets re-sent", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_claim") return "tok-test";
+      if (cmd === "fs_read") throw new Error("nope");
+      if (cmd === "fs_write") return {};
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const out = await runTool(
+      "fs_write",
+      { path: "/w/sub/x.txt", content: "" },
+      { autoApproveWorkspace: true, workspaceRoot: "/w" },
+    );
+    expect(out).toMatch(/now EMPTY.*re-send the FULL content/);
+  });
   it("returns no-gate direct-write failures as tool errors instead of throwing", async () => {
     setInvokeImpl(async () => {
       throw new Error("backend down");

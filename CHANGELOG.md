@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3
+- **Placeholder paths banned explicitly**: `/path/to/…` (model habit,
+  not our text) joins `/workspace/…`, `/ws/…`, `/example/…` on the
+  never-use list with the reason (every one of them fails).
+- **Empty writes flagged loudly**: a 0-char direct write now reports
+  the file is EMPTY and asks for the full content, instead of an `ok`
+  the model repeats into a 3× identical-write loop.
+
 ## 1.0.2
 - **Path grounding for weak models**: relative fs paths resolve against
   the turn cwd (reported, so the model learns the real root) instead of
