@@ -34,28 +34,31 @@ Pre-1.0: tag `v0.x.y` from `main`; CI must be green on the tag.
 6. **Post-release:** close the milestone, update README if install paths
    changed.
 
-## Signing & updater (opt-in, one-time setup)
+## Signing & updater (one-time setup, then automatic)
 
-Releases ship **unsigned** today (Windows SmartScreen and macOS Gatekeeper
-will warn). The workflow already passes every signing secret through to
-tauri-action when present (`TAURI_SIGNING_PRIVATE_KEY[_PASSWORD]`,
-`APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE[_PASSWORD]`, `APPLE_ID`,
-`APPLE_PASSWORD`, `APPLE_TEAM_ID`) - they are no-ops while unset.
+The updater is **wired**: `tauri-plugin-updater` (backend + capability +
+`@tauri-apps/plugin-updater` hook in Settings → Updates), the update feed
+(`.../releases/latest/download/latest.json`) and the public key in
+`src-tauri/tauri.conf.json`, plus `createUpdaterArtifacts` in both the
+bundle config and the release job. What remains is secrets:
 
-1. **Updater keypair** (one time, keep private key offline):
+1. **Updater private key** (required for `.sig` artifacts — without it the
+   release builds but ships no signed update):
    ```sh
-   pnpm tauri signer generate -w ~/.tauri/vtnexa.key
+   # a fresh keypair was minted while wiring this; if lost, rotate:
+   pnpm exec tauri signer generate -w ~/.tauri/vtnexa.key
    ```
-   Add the result to repo settings → Secrets → Actions as
+   Add the private key content to repo settings → Secrets → Actions as
    `TAURI_SIGNING_PRIVATE_KEY` (+ passphrase as
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`).
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if set). If you rotate the key,
+   replace the `pubkey` in `src-tauri/tauri.conf.json` with the new
+   `.pub` value or clients will reject the feed.
 2. **macOS signing** (needs an Apple Developer account): export a
-   Developer ID certificate and set the `APPLE_*` secrets above.
-3. **Enable the updater plugin**: add `tauri-plugin-updater` to the
-   frontend/backend, point it at the release feed, and add
-   `createUpdaterArtifacts: "true"` to the release job in ci.yml.
-4. Verify: the next tagged release should attach `.sig` files and show
-   a signed identity in `codesign -dv` / `signtool verify` output.
+   Developer ID certificate and set the `APPLE_*` secrets (see ci.yml).
+   Until then macOS ships unsigned (Gatekeeper warns) but the updater
+   signature still verifies.
+3. Verify: the next tagged release should attach `.sig` + `latest.json`
+   and Settings → Updates → Check should offer the new version.
 
 ## Notes
 

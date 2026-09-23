@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useTrustedPaths } from "../hooks/useTrustedPaths";
+import { useUpdater } from "../hooks/useUpdater";
 import { invoke } from "@tauri-apps/api/core";
 
 export default function SettingsModal({
@@ -12,6 +13,7 @@ export default function SettingsModal({
   onAutoApproveChange: (v: boolean) => void;
 }) {
   const { paths, addPath, removePath } = useTrustedPaths();
+  const updater = useUpdater();
   const [pattern, setPattern] = useState("");
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +92,25 @@ export default function SettingsModal({
         />
         <button type="submit">Add</button>
       </form>
+      <div style={{display:'flex',justifyContent:'space-between',marginTop:16}}>
+        <h3>Updates</h3>
+      </div>
+      <p>
+        {updater.status === "idle" && "Check for signed updates from GitHub releases."}
+        {updater.status === "checking" && "Checking for updates…"}
+        {updater.status === "up-to-date" && "VTNexa is up to date."}
+        {updater.status === "available" && `Update available: v${updater.version}.`}
+        {updater.status === "downloading" && `Downloading…${updater.progress ?? 0}%`}
+        {updater.status === "ready" && "Update installed — restart VTNexa to apply it."}
+        {updater.status === "error" && `Update check failed: ${updater.error}`}
+        {updater.status === "unavailable" && "Updater unavailable in this build (browser preview)."}
+      </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => void updater.checkForUpdates()}>Check for updates</button>
+        {updater.status === "available" && (
+          <button onClick={() => void updater.downloadAndInstall()}>Download &amp; install</button>
+        )}
+      </div>
     </div>
   );
 }

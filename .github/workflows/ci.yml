@@ -159,3 +159,4 @@ jobs:
           releaseBody: "See the changelog for what shipped."
           releaseDraft: true
           prerelease: false
+          createUpdaterArtifacts: "true"
