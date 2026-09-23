@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.5
+- **Placeholder paths refused up front**: `path/to/…` segments and
+  `<…>` brackets are recognized as model placeholders (not real paths)
+  and refused with a list-the-root-first teaching error — before
+  resolution or backend. Deliberately tight: a real `examples/` dir
+  still passes.
+
 ## 1.0.4
 - **Junk shell calls die before the dialog**: empty/placeholder cmds
   (`""`, `<command>`, echoed-back error text) and outside-workspace cwds

@@ -343,8 +343,7 @@ describe("runTool", () => {
   });
   // Live 1.0.3 report: 8 failures, 0 progress, all 10 rounds burned by a
   // model failing differently every round (no identical-call loop to catch).
-  it("ends the turn after consecutive failures instead of burning all rounds", async () => {
-    setInvokeImpl(async () => {
+  it("ends the turn after consecutive failures instead of burning all rounds", async () => {    setInvokeImpl(async () => {
       throw new Error("fs_list: outside workspace /w (got /nope)");
     });
     const events: string[] = [];
@@ -359,6 +358,32 @@ describe("runTool", () => {
     expect(events.join("")).toMatch(/consecutive failures — ending turn early/);
     // 4 failing rounds + finalize synthesis, not 10 rounds + finalize.
     expect(calls).toHaveLength(5);
+  });
+  // Live 1.0.4 report: the model emitted the literal placeholder
+  // "path/to/your/file" (resolved, then "No such file" from the backend).
+  it("refuses placeholder paths before resolution or backend", async () => {
+    setInvokeImpl(async () => {
+      throw new Error("must not reach backend for placeholders");
+    });
+    const pol = { workspaceRoot: "/w", cwd: "/w/sub" };
+    await expect(runTool("fs_read", { path: "path/to/your/file" }, pol)).resolves.toMatch(
+      /looks like a placeholder.*workspace root \/w/,
+    );
+    await expect(runTool("fs_list", { path: "/path/to/x" }, pol)).resolves.toMatch(/looks like a placeholder/);
+    await expect(runTool("fs_write", { path: "/path/to/hello.txt", content: "hi" }, pol)).resolves.toMatch(
+      /looks like a placeholder/,
+    );
+  });
+  it("does not flag real paths resembling placeholders", async () => {
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "fs_list") return [{ name: "x", is_dir: false }];
+      if (cmd === "fs_read") return "content";
+      throw new Error(`unexpected ${cmd}:${args?.path}`);
+    });
+    const pol = { workspaceRoot: "/w", cwd: "/w/sub" };
+    // "examples/" is a real dir name, not a placeholder.
+    await expect(runTool("fs_list", { path: "examples" }, pol)).resolves.toMatch(/"x"|x/);
+    await expect(runTool("fs_read", { path: "examples/x.ts" }, pol)).resolves.toMatch(/content/);
   });
 });
 
