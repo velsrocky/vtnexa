@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.2
+- **Path grounding for weak models**: relative fs paths resolve against
+  the turn cwd (reported, so the model learns the real root) instead of
+  burning rounds on "must be absolute"; bare `fs_list` lists the
+  workspace root. `fs_write` stays explicit-absolute, but its error now
+  hands over the exact path to copy. All path hints carry the real root
+  and cwd — the `/ws` placeholder (which models copied verbatim) is gone
+  from tool descriptions, errors, and prompts.
+
 ## 1.0.1
 - **Blank confirm dialog fixed**: the in-window modal used `--fg`, a
   variable that doesn't exist — the fallback near-white text was

@@ -248,16 +248,44 @@ describe("runTool", () => {
     expect(isWeakModel("http://localhost:8080/v1", "/models/Ornith-1.5-35B-Q4_K_M.gguf")).toBe(false);
     expect(isWeakModel("http://127.0.0.1:8080/v1", "Qwen3-32B-Q4_K_M.gguf")).toBe(true); // family, not host/format
   });
-  it("rejects relative fs paths with a self-correcting hint", async () => {
-    let invoked = false;
-    setInvokeImpl(async () => {
-      invoked = true;
+  // Live 1.0.1 report: weak models burn whole turns on path errors
+  // (relative "hello.txt", hallucinated /workspace/..., bare fs_list {}).
+  // Read tools resolve/default; write errors hand over the exact path.
+  it("grounds weak-model fs paths instead of burning rounds", async () => {
+    const seen: string[] = [];
+    setInvokeImpl(async (cmd, args?: any) => {
+      seen.push(`${cmd}:${args?.path ?? ""}`);
+      if (cmd === "fs_list") return [{ name: "hello.txt", is_dir: false }];
+      if (cmd === "fs_read") return "hello world";
       return {};
     });
-    await expect(runTool("fs_list", { path: "src" })).resolves.toMatch(/must be absolute/);
-    await expect(runTool("fs_read", { path: "App.tsx" })).resolves.toMatch(/fs_list\/fs_glob/);
-    await expect(runTool("fs_list", {})).resolves.toMatch(/path is required/);
-    expect(invoked).toBe(false);
+    const pol = { workspaceRoot: "/home/u/projects/test", cwd: "/home/u/projects/test/qwen2.5" };
+    // Bare fs_list lists the workspace root (was: usage error).
+    await expect(runTool("fs_list", {}, pol)).resolves.toMatch(/hello\.txt/);
+    expect(seen).toContain("fs_list:/home/u/projects/test");
+    // Relative read resolves against cwd and says so.
+    await expect(runTool("fs_read", { path: "hello.txt" }, pol)).resolves.toMatch(
+      /hello world.*resolved from relative "hello\.txt"/,
+    );
+    expect(seen).toContain("fs_read:/home/u/projects/test/qwen2.5/hello.txt");
+    // Relative write still refuses (explicit-absolute for mutations) but
+    // hands over the exact path to copy.
+    await expect(runTool("fs_write", { path: "hello.txt", content: "hi" }, pol)).resolves.toMatch(
+      /must be absolute.*\/home\/u\/projects\/test\/qwen2\.5\/hello\.txt/,
+    );
+    expect(seen.every((s) => !s.startsWith("fs_write"))).toBe(true);
+  });
+  it("names the real root/cwd in path errors, never a placeholder", async () => {
+    setInvokeImpl(async () => {
+      throw new Error(
+        "fs_list: outside workspace /home/u/projects/test (got /workspace/hello, nearest existing ancestor resolves outside)",
+      );
+    });
+    const pol = { workspaceRoot: "/home/u/projects/test", cwd: "/home/u/projects/test/qwen2.5" };
+    // Absolute but outside: the backend refusal surfaces verbatim (no throw).
+    const out = await runTool("fs_list", { path: "/workspace/hello" }, pol);
+    expect(out).toMatch(/^error:.*outside workspace \/home\/u\/projects\/test/);
+    expect(out).not.toMatch(/\/ws(?!\/)/);
   });
 });
 
