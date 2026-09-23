@@ -829,6 +829,12 @@ export async function runTool(
             return `error: fs_write failed for ${path}: ${msg.slice(0, 300)} - use a path inside workspace ${policy.workspaceRoot}, or ask the user to switch workspace/cwd.`;
           }
           policy?.onUndoCapture?.({ kind: "write", path, before, after: content, existedBefore: existed });
+          // Empty writes are the classic dropped-content failure (observed
+          // live: "hello world" became "" 3×). Say the file is empty LOUDLY
+          // so the model re-sends the full content instead of repeating "".
+          if (content.length === 0) {
+            return `wrote ${path} (0 chars - the file is now EMPTY; if content was intended, re-send the FULL content, do not repeat an empty write).`;
+          }
           return `wrote ${path} (${content.length} chars) directly - auto-approved (workspace).`;
         }
         if (policy?.onProposeWrite) {
@@ -847,6 +853,9 @@ export async function runTool(
         }
         try {
           await fsWrite(path, content);
+          if (content.length === 0) {
+            return `ok (direct write - no review gate configured; ${path} is now EMPTY - re-send full content if that was unintended)`;
+          }
           return "ok (direct write - no review gate configured)";
         } catch (e) {
         // No-gate fallback (tests/headless): same contract as every other
