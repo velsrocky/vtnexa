@@ -401,7 +401,10 @@ describe("workspace auto-approval (opencode-style)", () => {
     expect(undos[0].existedBefore).toBe(false);
   });
 
-  it("outside-root fs_write falls back to Diff staging", async () => {
+  // Staging an outside-root path only queues a dead pending diff whose
+  // Approve can never succeed (live 1.0.0 report: 11 identical ✗ lines).
+  // Refuse in-turn so the model corrects the path instead.
+  it("outside-root fs_write is refused, never staged as a dead diff", async () => {
     const staged: any[] = [];
     setInvokeImpl(async () => {
       throw new Error("must not invoke for unconfined write");
@@ -411,8 +414,8 @@ describe("workspace auto-approval (opencode-style)", () => {
       { path: "/etc/x.txt", content: "x" },
       autoPolicy({ onProposeWrite: async (p: string, c: string) => { staged.push([p, c]); } }),
     );
-    expect(out).toMatch(/staged .* Diff review gate/);
-    expect(staged).toEqual([["/etc/x.txt", "x"]]);
+    expect(out).toMatch(/^error:.*outside workspace/);
+    expect(staged).toEqual([]);
     expect(calls).toEqual([]);
   });
 

@@ -54,7 +54,10 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
           <div
             style={{
               background: "var(--bg, #1e1e1e)",
-              color: "var(--fg, #eee)",
+              // NOTE: the variable is --text (see App.css per-theme blocks).
+              // --fg never existed, so the fallback #eee rendered near-white
+              // text on light themes (Paper) — the "empty dialog" reports.
+              color: "var(--text, #eee)",
               border: "1px solid var(--border, #555)",
               borderRadius: 8,
               padding: "16px 20px",

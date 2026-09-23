@@ -216,6 +216,56 @@ describe("useDiffGate.approveDiff", () => {
     expect(h.wsOf().shellOut).toMatch(/approve write failed.*detail mismatch/);
     expect(h.calls.audits).toMatchObject([{ tool: "fs_write", ok: false }]);
   });
+
+  // Live 1.0.0 report: /workspace/hello.txt staged, every Approve failed
+  // backend-side (11 identical ✗ lines). A deterministic refusal must drop
+  // the dead diff instead of leaving a permanently failing Approve button.
+  it("drops the staged diff when drift-read refuses it as outside-workspace", async () => {
+    let writes = 0;
+    let claims = 0;
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") throw new Error("fs_read: outside workspace /w (got /workspace/hello.txt)");
+      if (cmd === "approval_claim") {
+        claims++;
+        return "tok-test";
+      }
+      if (cmd === "fs_write") {
+        writes++;
+        return {};
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    (window as any).confirm = vi.fn(() => {
+      throw new Error("confirm must not be asked for a doomed write");
+    });
+    const h = setup({ pendingDiff: { path: "/workspace/hello.txt", content: "hi", original: "" } });
+    await act(async () => {
+      await h.result.current.approveDiff();
+    });
+    expect(writes).toBe(0);
+    expect(claims).toBe(0);
+    expect(h.wsOf().pendingDiff).toBeNull();
+    expect(h.wsOf().shellOut).toMatch(/outside the workspace - staged diff dropped/);
+  });
+
+  it("drops the staged diff when the write itself is refused as outside-workspace", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "fs_read") return "old";
+      if (cmd === "approval_claim") return "tok-test";
+      if (cmd === "fs_write") throw new Error("fs_write: outside workspace /w (got /workspace/hello.txt)");
+      throw new Error(`unexpected ${cmd}`);
+    });
+    // Drift sees staged "" vs on-disk "old": confirm the overwrite so the
+    // test reaches the refused write (the point under test).
+    (window as any).confirm = vi.fn(() => true);
+    const h = setup({ pendingDiff: { path: "/workspace/hello.txt", content: "hi", original: "" } });
+    await act(async () => {
+      await h.result.current.approveDiff();
+    });
+    expect(h.wsOf().pendingDiff).toBeNull();
+    expect(h.wsOf().shellOut).toMatch(/staged diff dropped, nothing was written/);
+    expect(h.calls.audits).toMatchObject([{ tool: "fs_write", ok: false }]);
+  });
 });
 
 describe("useDiffGate.approveAndCommit", () => {

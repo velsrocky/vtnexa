@@ -128,6 +128,19 @@ export function useDiffGate(opts: {
       current = await fsRead(d.path);
     } catch (e) {
       const msg = String(e);
+      // Deterministic refusal: the staged path can never be written (model
+      // hallucinated a path outside the workspace). Don't ask "apply anyway"
+      // for a write that is guaranteed to fail — drop the dead diff loudly.
+      if (/outside workspace/i.test(msg)) {
+        updateWs((w) => ({
+          ...w,
+          pendingDiff: null,
+          shellOut:
+            w.shellOut +
+            `\n✗ ${d.path} is outside the workspace - staged diff dropped, nothing was written. Use a path inside the workspace.`,
+        }));
+        return { proceed: false, current: "", existed: false };
+      }
       // File gone: safe to write (it's a new file). Permission/locked: warn.
       if (msg.includes("No such file or directory") || msg.includes("not exist")) {
         return { proceed: true, current: "", existed: false };
@@ -169,6 +182,32 @@ export function useDiffGate(opts: {
       ms: 0,
       note: "verify mismatch after apply",
     });
+  }
+
+  // A backend outside-workspace refusal is deterministic: keeping the
+  // pending diff would leave a permanently failing Approve button behind
+  // (observed live: 11 identical ✗ lines). Drop the dead diff loudly.
+  function dropDeadDiff(action: string, path: string, err: unknown) {
+    const msg = String(err instanceof Error ? err.message : err);
+    updateWs((w) => ({
+      ...w,
+      pendingDiff: null,
+      shellOut:
+        w.shellOut +
+        `\n✗ ${action} failed for ${path}: ${msg.slice(0, 300)} - staged diff dropped, nothing was written. Use a path inside the workspace.`,
+    }));
+    opts.logAudit({
+      tool: "fs_write",
+      args: JSON.stringify({ path }).slice(0, 1000),
+      decision: "approved",
+      ok: false,
+      ms: 0,
+      note: `${action} failed (dead diff dropped): ${msg.slice(0, 200)}`,
+    });
+  }
+
+  function isDeadDiff(err: unknown): boolean {
+    return /outside workspace/i.test(String(err instanceof Error ? err.message : err));
   }
 
   function noteApplyFailure(action: string, path: string, err: unknown, diag?: string) {
@@ -218,6 +257,10 @@ export function useDiffGate(opts: {
     try {
       await fsWrite(d.path, d.content, approval);
     } catch (e) {
+      if (isDeadDiff(e)) {
+        dropDeadDiff("approve write", d.path, e);
+        return;
+      }
       noteApplyFailure("approve write", d.path, e, approvalDiag(approval));
       return;
     }
@@ -257,6 +300,10 @@ export function useDiffGate(opts: {
     try {
       await fsWrite(d.path, d.content, approval);
     } catch (e) {
+      if (isDeadDiff(e)) {
+        dropDeadDiff("approve+commit write", d.path, e);
+        return;
+      }
       noteApplyFailure("approve+commit write", d.path, e, approvalDiag(approval));
       return;
     }
