@@ -580,6 +580,20 @@ export function resolveModelPath(raw: string, policy?: ToolPolicy): { path: stri
   return { path: `${base}/${rel}`, note: ` (resolved from relative ${JSON.stringify(raw)})` };
 }
 
+/** Placeholder paths models emit when ungrounded ("path/to/your/file",
+ *  "/path/to/x", "<path>"). Refused with a teaching error before
+ *  resolution/backend ever sees them. Tight on purpose: only path/to
+ *  segments and angle brackets — a real dir named "examples/" must pass. */
+export function placeholderPathError(raw: string, tool: string, policy?: ToolPolicy): string | null {
+  if (!raw) return null;
+  const segs = raw.toLowerCase().split("/");
+  const hasPathTo = segs.some((s, i) => s === "path" && segs[i + 1] === "to");
+  if (!raw.includes("<") && !raw.includes(">") && !hasPathTo) return null;
+  return (
+    `error: ${tool} path ${JSON.stringify(raw)} looks like a placeholder, not a real path - ` +
+    `${pathHint(policy)}. List the workspace root first (fs_list with no path), then use a real path from the listing.`
+  );
+}
 /** Concrete "where to point" hint with the real root/cwd — never a
  *  placeholder. Weak models copy-paste these verbatim, which is the point. */
 function pathHint(policy?: ToolPolicy): string {
@@ -676,6 +690,8 @@ export async function runTool(
         // burning a round on a usage error (observed live). Relative
         // resolves against cwd and says so, teaching the real root.
         const raw = String(args.path ?? "");
+        const ph = placeholderPathError(raw, "fs_list", policy);
+        if (ph) return ph;
         const { path: p, note } = resolveModelPath(raw, policy);
         if (!p) return `error: fs_list path is required - ${pathHint(policy)}`;
         if (!p.startsWith("/"))
@@ -686,6 +702,8 @@ export async function runTool(
       case "fs_read": {
         const raw = String(args.path ?? "");
         if (!raw) return `error: fs_read path is required - ${pathHint(policy)}`;
+        const ph = placeholderPathError(raw, "fs_read", policy);
+        if (ph) return ph;
         const { path: p, note } = resolveModelPath(raw, policy);
         if (!p.startsWith("/"))
           return `error: fs_read path must be absolute inside the workspace (got ${JSON.stringify(raw)}). ${pathHint(policy)} — try that exact path.`;
@@ -766,6 +784,8 @@ export async function runTool(
       }
       case "fs_search": {
         const rawPath = args.path ? String(args.path) : "";
+        const phS = rawPath ? placeholderPathError(rawPath, "fs_search", policy) : null;
+        if (phS) return phS;
         const p = rawPath ? resolveModelPath(rawPath, policy).path : undefined;
         const res = await fsSearch(
           String(args.query ?? ""),
@@ -778,6 +798,8 @@ export async function runTool(
       }
       case "fs_glob": {
         const rawPath = args.path ? String(args.path) : "";
+        const phG = rawPath ? placeholderPathError(rawPath, "fs_glob", policy) : null;
+        if (phG) return phG;
         const p = rawPath ? resolveModelPath(rawPath, policy).path : undefined;
         const res = await fsGlob(
           String(args.pattern ?? ""),
@@ -788,6 +810,8 @@ export async function runTool(
       case "lsp_diagnostics": {
         const raw = String(args.path ?? "");
         if (!raw) return `error: lsp_diagnostics path is required - ${pathHint(policy)}`;
+        const ph = placeholderPathError(raw, "lsp_diagnostics", policy);
+        if (ph) return ph;
         const { path: p, note } = resolveModelPath(raw, policy);
         if (!p.startsWith("/"))
           return `error: lsp_diagnostics path must be absolute inside the workspace (got ${JSON.stringify(raw)}). ${pathHint(policy)} — try that exact path.`;
@@ -797,6 +821,8 @@ export async function runTool(
         const raw = String(args.path ?? "");
         const op = String(args.op ?? "");
         if (!raw || !op) return `error: lsp needs op + path - ${pathHint(policy)}`;
+        const ph = placeholderPathError(raw, "lsp", policy);
+        if (ph) return ph;
         const { path: p, note } = resolveModelPath(raw, policy);
         if (!p.startsWith("/"))
           return `error: lsp path must be absolute inside the workspace (got ${JSON.stringify(raw)}). ${pathHint(policy)} — try that exact path.`;
@@ -814,6 +840,8 @@ export async function runTool(
       case "fs_write": {
         const path = String(args.path ?? "");
         const content = String(args.content ?? "");
+        const phW = placeholderPathError(path, "fs_write", policy);
+        if (phW) return phW;
         // Writes stay explicit-absolute (no silent resolution: a wrongly
         // guessed directory would create the file in the wrong place), but
         // the error hands over the exact path to copy — weak models recover
