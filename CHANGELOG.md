@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1
+- **Blank confirm dialog fixed**: the in-window modal used `--fg`, a
+  variable that doesn't exist — the fallback near-white text was
+  invisible on light themes (Paper). Now `var(--text, …)`.
+- **Dead staged diffs eliminated**: `fs_write` to a path outside the
+  workspace is refused in-turn (model corrects the path immediately)
+  instead of staging a diff whose Approve can never succeed; drift and
+  approve paths drop the dead diff loudly instead of stacking ✗ lines.
+  Direct-write failures (auto and no-gate) return tool errors rather
+  than throwing and killing the turn.
+
 ## 1.0.0
 - **Auto-updates**: `tauri-plugin-updater` wired end to end (backend
   plugin + capability, `plugins.updater` feed + embedded public key,

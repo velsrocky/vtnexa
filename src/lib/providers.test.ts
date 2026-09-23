@@ -160,6 +160,45 @@ describe("runTool", () => {
     expect(staged).toEqual({ path: "/w/a.txt", content: "hello" });
     expect(wrote).toBe(false);
   });
+  // Live 1.0.0 report: the model staged /workspace/hello.txt (hallucinated
+  // container path) and every Approve click failed backend-side, queuing a
+  // dead pending diff. Staging must refuse up front, in-turn.
+  it("refuses to stage fs_write outside the workspace instead of queuing a dead diff", async () => {
+    setInvokeImpl(async () => {
+      throw new Error("must not reach backend");
+    });
+    let staged: { path: string; content: string } | null = null;
+    const out = await runTool(
+      "fs_write",
+      { path: "/workspace/hello.txt", content: "hi" },
+      {
+        workspaceRoot: "/home/u/projects/test",
+        onProposeWrite: async (path, content) => { staged = { path, content }; },
+      },
+    );
+    expect(out).toMatch(/^error:.*outside workspace/);
+    expect(staged).toBeNull();
+  });
+  it("returns auto direct-write failures as tool errors instead of throwing", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_claim") return "tok-test";
+      if (cmd === "fs_read") throw new Error("nope");
+      if (cmd === "fs_write") throw new Error("fs_write: outside workspace /w (got /w/../x)");
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const out = await runTool(
+      "fs_write",
+      { path: "/w/sub/x.txt", content: "hi" },
+      { autoApproveWorkspace: true, workspaceRoot: "/w" },
+    );
+    expect(out).toMatch(/^error:.*outside workspace/);
+  });
+  it("returns no-gate direct-write failures as tool errors instead of throwing", async () => {
+    setInvokeImpl(async () => {
+      throw new Error("backend down");
+    });
+    await expect(runTool("fs_write", { path: "/w/a.txt", content: "hi" })).resolves.toMatch(/^error:/);
+  });
   it("refuses oversized fs_write payloads", async () => {
     const out = await runTool("fs_write", { path: "/w/a.txt", content: "x".repeat(5 * 1024 * 1024) });
     expect(out).toMatch(/^error:/);

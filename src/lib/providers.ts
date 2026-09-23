@@ -776,17 +776,41 @@ export async function runTool(
             existed = false;
           }
           const direct = await claimFor("fs_write", { path, content });
-          await fsWrite(path, content, direct);
+          try {
+            await fsWrite(path, content, direct);
+          } catch (e) {
+            // A refused direct write must read as a failed tool call the
+            // model can recover from — never an exception that kills the turn.
+            const msg = String(e instanceof Error ? e.message : e);
+            return `error: fs_write failed for ${path}: ${msg.slice(0, 300)} - use a path inside workspace ${policy.workspaceRoot}, or ask the user to switch workspace/cwd.`;
+          }
           policy?.onUndoCapture?.({ kind: "write", path, before, after: content, existedBefore: existed });
           return `wrote ${path} (${content.length} chars) directly - auto-approved (workspace).`;
         }
         if (policy?.onProposeWrite) {
+          // Fail fast in-turn: staging a path the backend will refuse only
+          // produces a dead pending diff and N doomed Approve clicks
+          // (observed live: /workspace/... vs the real workspace root).
+          // An error string lets the model correct the path this turn.
+          if (
+            policy.workspaceRoot &&
+            !isWorkspaceConfined("fs_write", { path }, policy.workspaceRoot)
+          ) {
+            return `error: fs_write path outside workspace ${policy.workspaceRoot} (got ${path}) - use a path inside the workspace, or ask the user to switch workspace/cwd. Do not re-send this path.`;
+          }
           await policy.onProposeWrite(path, content);
           return `staged ${path} (${content.length} chars) to Diff review gate - awaiting user Approve. Do not re-send unless content changes.`;
         }
-        await fsWrite(path, content);
-        return "ok (direct write - no review gate configured)";
+        try {
+          await fsWrite(path, content);
+          return "ok (direct write - no review gate configured)";
+        } catch (e) {
+        // No-gate fallback (tests/headless): same contract as every other
+        // tool — failures read as tool errors, never thrown exceptions.
+        const msg = String(e instanceof Error ? e.message : e);
+        return `error: fs_write failed for ${path}: ${msg.slice(0, 300)}`;
       }
+    }
       case "shell_run": {
         const cmd = String(args.cmd ?? "");
         if (cmd.length > 20000) return "error: cmd too long";
