@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runTool, toolsForMode, type ToolDef } from "./providers";
 import { setMcpToolCache } from "./mcp";
+import { mcpApprovalDetail } from "./approval";
 
 // Cross-layer gate proof: policy decision -> runTool -> backend invoke.
 // A rejected side-effecting tool must NEVER reach its backend (no spawn, no
@@ -89,15 +90,26 @@ describe("approved MCP forwards exact server/tool/args", () => {
       { server: "demo", name: "get.Issue", qualified_name: "mcp_demo_get_issue", description: "", input_schema: {} },
     ]);
     setInvokeImpl(async () => "42");
-    const out = await runTool("mcp_demo_get_issue", { a: 1 }, { requestApproval: async () => TOK });
+    const detail = mcpApprovalDetail("demo", "get.Issue", { a: 1 });
+    let requested: { tool: string; args: Record<string, unknown> } | undefined;
+    const out = await runTool("mcp_demo_get_issue", { a: 1 }, {
+      requestApproval: async (tool, args) => {
+        requested = { tool, args };
+        return { ...TOK, detail };
+      },
+    });
     expect(out).toBe("42");
+    expect(requested).toEqual({
+      tool: "mcp_call_tool",
+      args: { server: "demo", tool: "get.Issue", args: { a: 1 } },
+    });
     expect(calls.map((c) => c.cmd)).toEqual(["mcp_call_tool"]);
     expect(calls[0].args).toEqual({
       server: "demo",
       tool: "get.Issue",
       args: { a: 1 },
-      approval_token: "tok-test",
-      approval_detail: "{}",
+      approvalToken: "tok-test",
+      approvalDetail: detail,
     });
   });
   it("unknown MCP errors without invoking", async () => {
@@ -363,6 +375,34 @@ describe("workspace auto-approval (opencode-style)", () => {
     }));
     expect(dialogs).toBe(1);
     expect(calls.map((c) => c.cmd)).toEqual(["shell_run"]);
+  });
+
+  it("resolves relative Windows model paths before confined execution", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "approval_claim") return "tok-auto";
+      if (cmd === "fs_read") throw new Error("not found");
+      if (cmd === "fs_delete") return {};
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const out = await runTool(
+      "fs_delete",
+      { path: "..\\shared\\file.ts" },
+      {
+        autoApproveWorkspace: true,
+        workspaceRoot: "C:\\Repo",
+        cwd: "C:\\Repo\\feature",
+      },
+    );
+    expect(out).toBe("deleted C:\\Repo\\shared\\file.ts");
+    expect(calls[calls.length - 1]).toEqual({
+      cmd: "fs_delete",
+      args: {
+        path: "C:\\Repo\\shared\\file.ts",
+        recursive: false,
+        approvalToken: "tok-auto",
+        approvalDetail: '{"path":"..\\\\shared\\\\file.ts"}',
+      },
+    });
   });
 
   it("confined fs_write writes directly with undo captured", async () => {

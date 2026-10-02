@@ -1,9 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Approval } from "./approval";
 
-// Tauri v2 binds command args camelCase (same trap as shell_run): snake_case
-// keys here silently bound to None (dropped approvals) or failed outright
-// ("missing required key targetRef" on clicks).
 function approvalArgs(a?: Approval): { approvalToken: string | null; approvalDetail: string | null } {
   return { approvalToken: a?.token ?? null, approvalDetail: a?.detail ?? null };
 }
@@ -14,6 +11,7 @@ export interface BrowserElement {
   name: string;
   href?: string;
   inputType?: string;
+  value?: string;
 }
 
 export interface BrowserSnapshot {
@@ -24,44 +22,102 @@ export interface BrowserSnapshot {
   elements: BrowserElement[];
 }
 
-let browserPort = 39317;
+export interface BrowserRuntimeStatus {
+  ready: boolean;
+  source?: string | null;
+  path?: string | null;
+  version?: string | null;
+}
+
+export interface BrowserEngineStatus {
+  ready: boolean;
+  engine: string;
+  channel?: string | null;
+  path?: string | null;
+  source?: string | null;
+  error?: string;
+  remediation?: string;
+}
+
+export interface BrowserStatus {
+  ok?: boolean;
+  ready?: boolean;
+  running?: boolean;
+  headless?: boolean;
+  baseUrl?: string | null;
+  port?: number | null;
+  pageUrl?: string | null;
+  blockedTarget?: string | null;
+  profilePath?: string | null;
+  runtime?: BrowserRuntimeStatus;
+  node?: BrowserRuntimeStatus;
+  browser?: BrowserEngineStatus;
+  missing?: string[];
+  remediation?: string[];
+  error?: string;
+}
+
+let browserPort = 0;
+
+function setPortIfValid(port: number | null | undefined) {
+  if (typeof port === "number" && Number.isInteger(port) && port > 0 && port <= 65535) {
+    browserPort = port;
+  }
+}
+
+function portFromSidecarUrl(baseUrl: string | null | undefined): number | null {
+  if (!baseUrl) return null;
+  try {
+    const parsed = new URL(baseUrl);
+    const port = Number.parseInt(parsed.port, 10);
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+function adoptStatusPort(status: BrowserStatus | null | undefined) {
+  if (!status) return;
+  setPortIfValid(status.port ?? portFromSidecarUrl(status.baseUrl));
+}
 
 export function setBrowserPort(port: number) {
-  browserPort = port;
+  setPortIfValid(port);
 }
 
 export function getBrowserPort(): number {
   return browserPort;
 }
 
-export async function browserStart(headless = false): Promise<{ ok?: boolean; baseUrl?: string; error?: string }> {
-  const result = await browserStatus();
-  if (result.running) {
-    setBrowserPort(parseInt(result.url?.split(':')[2] || '39317', 10));
-    return { ok: true, baseUrl: result.url };
+export async function browserPreflight(): Promise<BrowserStatus> {
+  return invoke<BrowserStatus>("browser_preflight", {});
+}
+
+export async function browserStart(headless = false): Promise<BrowserStatus> {
+  const status = await browserStatus();
+  if (status.running) {
+    adoptStatusPort(status);
+    return { ...status, ok: true };
   }
-  const r = (await invoke("browser_start", { port: browserPort, headless })) as { ok?: boolean; baseUrl?: string; error?: string } | null;
-  if (r?.baseUrl) {
-    const parsedPort = parseInt(r.baseUrl.split(':')[2] || '39317', 10);
-    if (!Number.isNaN(parsedPort)) setBrowserPort(parsedPort);
-  }
-  return r || { ok: false, error: "unknown error" };
+  const result = await invoke<BrowserStatus>("browser_start", { headless });
+  adoptStatusPort(result);
+  return result ?? { ok: false, error: "browser_start returned no status; choose Recheck" };
 }
 
 export async function browserStop(): Promise<unknown> {
   return invoke("browser_stop", {});
 }
 
-export async function browserStatus(): Promise<{ running?: boolean; url?: string }> {
-  return invoke("browser_status", {});
+export async function browserStatus(): Promise<BrowserStatus> {
+  return invoke<BrowserStatus>("browser_status", {});
 }
 
-export async function browserNavigate(url: string, approval?: Approval): Promise<{ url?: string; title?: string }> {
+export async function browserNavigate(url: string, approval?: Approval): Promise<{ url?: string; pageUrl?: string; title?: string }> {
   return invoke("browser_navigate", { url, ...approvalArgs(approval) });
 }
 
 export async function browserSnapshot(): Promise<BrowserSnapshot> {
-  return invoke("browser_snapshot", {});
+  return invoke<BrowserSnapshot>("browser_snapshot", {});
 }
 
 export async function browserClick(target_ref: number, approval?: Approval): Promise<unknown> {
@@ -81,6 +137,7 @@ export async function browserScreenshot(): Promise<{
   imageBase64?: string;
   mimeType?: string;
   url?: string;
+  pageUrl?: string;
 }> {
   return invoke("browser_screenshot", {});
 }

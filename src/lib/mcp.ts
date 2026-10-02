@@ -1,11 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Approval } from "./approval";
+import { mcpApprovalDetail, type Approval } from "./approval";
 import type { ToolDef } from "./providers";
 
 export interface McpServerStatus {
   name: string;
   kind: string;
+  type?: string;
   enabled: boolean;
+  configured: boolean;
+  configured_enabled: boolean;
+  trusted: boolean;
+  consent_required: boolean;
+  workspace_controlled: boolean;
+  fingerprint: string;
   untrusted?: boolean;
 }
 
@@ -86,12 +93,16 @@ export async function mcpCallTool(
   args: Record<string, unknown>,
   approval?: Approval,
 ): Promise<string> {
+  const expectedDetail = mcpApprovalDetail(server, tool, args ?? {});
+  if (approval && approval.detail !== expectedDetail) {
+    throw new Error("MCP approval detail does not match the resolved server, tool, and arguments");
+  }
   return invoke<string>("mcp_call_tool", {
     server,
     tool,
     args: args ?? {},
-    approval_token: approval?.token ?? null,
-    approval_detail: approval?.detail ?? null,
+    approvalToken: approval?.token ?? null,
+    approvalDetail: approval?.detail ?? expectedDetail,
   });
 }
 
@@ -99,7 +110,7 @@ export async function mcpWorkspaceTrust(): Promise<{ workspace_servers: string[]
   return invoke("mcp_workspace_trust");
 }
 
-export async function mcpConfigGet(): Promise<{ servers: Record<string, { type: string; enabled: boolean }> }> {
+export async function mcpConfigGet(): Promise<{ servers: Record<string, McpServerStatus> }> {
   return invoke("mcp_config_get");
 }
 
@@ -110,12 +121,21 @@ export async function mcpConfigGet(): Promise<{ servers: Record<string, { type: 
 let toolCache: McpToolInfo[] = [];
 
 export function setMcpToolCache(tools: McpToolInfo[]): void {
-  toolCache = tools ?? [];
+  const next = tools ?? [];
+  const names = new Set<string>();
+  for (const tool of next) {
+    if (names.has(tool.qualified_name)) {
+      throw new Error(`duplicate MCP qualified tool name: ${tool.qualified_name}`);
+    }
+    names.add(tool.qualified_name);
+  }
+  toolCache = next;
 }
 
 export function resolveMcpQualified(qualified: string): { server: string; tool: string } | null {
   const exact = toolCache.find((t) => t.qualified_name === qualified);
   if (exact) return { server: exact.server, tool: exact.name };
+  if (/_(?:[0-9a-f]{8})$/i.test(qualified)) return null;
   // Fallback: derive server by prefix, pass the fragment through as the tool
   // name (works when upstream names were already clean).
   const servers = [...new Set(toolCache.map((t) => t.server))];
@@ -143,14 +163,16 @@ export function toMcpToolDefs(tools: McpToolInfo[]): ToolDef[] {
  * match (tool names may contain underscores). Returns null when no known
  * server matches.
  */
-export function splitQualifiedName(qualified: string, servers: string[]): { server: string; tool: string } | null {  if (!isMcpToolName(qualified)) return null;
+export function splitQualifiedName(qualified: string, servers: string[]): { server: string; tool: string } | null {
+  if (!isMcpToolName(qualified)) return null;
   const rest = qualified.slice("mcp_".length);
-  // Longest first so `my` doesn't shadow `my_mcp`.
   const sorted = [...servers].sort((a, b) => b.length - a.length);
   for (const s of sorted) {
-    const prefix = `${s.toLowerCase()}_`;
+    const prefix = `${s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")}_`;
     if (rest.toLowerCase().startsWith(prefix)) {
-      const tool = rest.slice(prefix.length);
+      let tool = rest.slice(prefix.length);
+      const hash = tool.match(/_(?:[0-9a-f]{8})$/i);
+      if (hash) tool = tool.slice(0, -hash[0].length);
       if (tool) return { server: s, tool };
     }
   }

@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.6
+This release lands the subsystems that were sitting uncommitted and hardens
+release + security around them.
+
+- **Real process-tree control**: shell, background jobs, PTY and MCP children
+  are now captured as their own process group on POSIX (`setsid`, kill the
+  whole tree) and under a Windows Job Object, so a timed-out or cancelled
+  command cannot leak surviving descendants. `timeout`-wrapped foreground and
+  the 30-minute background poll-kill share one execution path.
+- **MCP host**: local (stdio) and remote (Streamable HTTP) servers, with
+  command allowlisting, per-server trust bound to a config fingerprint,
+  explicit-env isolation for stdio children, response/body limits, and SSRF
+  guards on remote redirects. (Verified by real-subprocess + mock-HTTP tests;
+  local stdio is exercised end to end.)
+- **Browser use sidecar**: a loopback, bearer-token HTTP API in front of a
+  real Chromium instance — private/loopback targets are refused at navigate
+  and at every network policy layer (DNS pinning, CONNECT, redirect), and
+  snapshots are secret-masked.
+- **Release-verifier fix**: `verify-release.mjs` no longer rejects a valid
+  updater key whose hex comment dropped a leading zero (~6% of `tauri signer
+  generate` ids start with 0x00-0x0F). Verification uses the payload key-id
+  bytes, so the decorative comment now accepts 1-16 hex; a non-hex comment is
+  still rejected.
+- **Production CSP tightened**: packaged `script-src` is `'self'` (no
+  `unsafe-inline`, no CDN — Monaco ships locally); the relaxed dev policy is
+  isolated into `devCsp`. Verified against the real app through the WebDriver
+  smoke.
+- **Real-backend UI smoke in CI**: new `tauri-driver` smoke drives the actual
+  app (first-run → workspace via real IPC → workbench → Settings) on Linux
+  (Xvfb) and Windows; `release-preflight` now depends on the Linux job. A
+  flaky pre-commit gate is fixed by serializing `test:node`.
+
 ## 1.0.5
 - **Placeholder paths refused up front**: `path/to/…` segments and
   `<…>` brackets are recognized as model placeholders (not real paths)

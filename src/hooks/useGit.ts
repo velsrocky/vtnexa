@@ -9,6 +9,7 @@ import {
   type GitLogEntry,
 } from "../lib/tauri";
 import { claimFor } from "../lib/approval";
+import { joinPath } from "../lib/path";
 
 // Git tab state + actions for this window: status/diff/log/commit.
 export function useGit(opts: {
@@ -42,7 +43,7 @@ export function useGit(opts: {
       const s = selPath ?? sel;
       if (s) {
         try {
-          const abs = st.root.replace(/\/$/, "") + "/" + s;
+          const abs = joinPath(st.root, s);
           setDiffText(await gitDiff(r, abs));
         } catch (e) {
           setDiffText(`diff failed: ${e}`);
@@ -66,7 +67,7 @@ export function useGit(opts: {
     const r = opts.getRoot();
     if (!r || !root) return;
     try {
-      setDiffText(await gitDiff(r, root.replace(/\/$/, "") + "/" + relPath));
+      setDiffText(await gitDiff(r, joinPath(root, relPath)));
     } catch (e) {
       setDiffText(`diff failed: ${e}`);
     }
@@ -83,7 +84,7 @@ export function useGit(opts: {
       setNote("nothing to commit");
       return;
     }
-    const absFiles = files.map((f) => root.replace(/\/$/, "") + "/" + f.path);
+    const absFiles = files.map((f) => joinPath(root, f.path));
     const t0 = Date.now();
     try {
       const res = await gitCommit(r, m, absFiles, await claimFor("git_commit", { cwd: r, message: m, files: absFiles }));

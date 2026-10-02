@@ -39,8 +39,18 @@ import {
   browserStart,
   browserType,
 } from "./browser";
-import { actionFor, claimFor, lspNeedsApproval, type Approval } from "./approval";
-import { isPathInsideRoot, isWorkspaceConfined } from "./workspaceScope";
+import { actionFor, claimFor, lspNeedsApproval, mcpApprovalDetail, type Approval } from "./approval";
+import {
+  extractAbsolutePaths,
+  isAbsolutePath,
+  isAbsolutePathNative,
+  isPathInsideRootNative,
+  joinPath,
+  normalizePath,
+  pathSegments,
+  resolvePathNative,
+} from "./path";
+import { isWorkspaceConfinedNative } from "./workspaceScope";
 import { isMcpToolName, mcpCallTool, resolveMcpQualified } from "./mcp";
 import { isGatedTool, isReadOnlyTool, toolsForMode } from "./toolDefs";
 
@@ -255,30 +265,7 @@ export function skillConfinement(userText: string): { skill: string; tools: stri
  * Returns deduped absolute paths, capped at 5. Never throws.
  */
 export function extractExplicitPaths(text: string): string[] {
-  if (!text) return [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const re = /(\/[^\s"'`,;|()\]{}]+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) {
-    const at = m.index;
-    // Mid-word slash (UX/Performance, X/10): char before is letter/digit — not an absolute path.
-    const prev = at > 0 ? text[at - 1] : " ";
-    if (/[A-Za-z0-9_-]/.test(prev)) continue;
-    const p = m[1].replace(/[.,:;!?)\]}'"`*]+$/, "");
-    if (p.length < 2 || !p.startsWith("/") || p === "/") continue;
-    if (p.length > 512) continue;
-    // Markdown / shell-glob residue, not a path.
-    if (p.includes("*") || p.includes("`")) continue;
-    // Must contain at least one letter — rejects /10, /2-3, /etc fragments.
-    if (!/[A-Za-z]/.test(p)) continue;
-    if (!seen.has(p)) {
-      seen.add(p);
-      out.push(p);
-      if (out.length >= 5) break;
-    }
-  }
-  return out;
+  return extractAbsolutePaths(text);
 }
 
 /** Returns the narrated tool name for bare `Tool args` lines, else null. */
@@ -571,13 +558,29 @@ function stashImage(b64: string): string {
  *  still enforces confinement — this is convenience, never a boundary. */
 export function resolveModelPath(raw: string, policy?: ToolPolicy): { path: string; note: string } {
   const root = policy?.workspaceRoot ?? "";
-  const base =
-    policy?.cwd && policy.cwd.startsWith("/") ? policy.cwd.replace(/\/+$/, "") : root.replace(/\/+$/, "");
+  const base = policy?.cwd && isAbsolutePath(policy.cwd) ? policy.cwd : root;
   if (!raw) return { path: root, note: "" };
-  if (raw.startsWith("/")) return { path: raw, note: "" };
-  const rel = raw.replace(/^\.\/+/, "").replace(/\0/g, "");
-  if (!base) return { path: rel, note: "" };
-  return { path: `${base}/${rel}`, note: ` (resolved from relative ${JSON.stringify(raw)})` };
+  if (isAbsolutePath(raw)) return { path: normalizePath(raw), note: "" };
+  const relative = raw.replace(/\0/g, "");
+  if (!base) return { path: normalizePath(relative), note: "" };
+  return { path: joinPath(base, relative), note: ` (resolved from relative ${JSON.stringify(raw)})` };
+}
+
+export async function resolveModelPathNative(
+  raw: string,
+  policy?: ToolPolicy,
+): Promise<{ path: string; note: string }> {
+  const root = policy?.workspaceRoot ?? "";
+  const base = policy?.cwd && isAbsolutePath(policy.cwd) ? policy.cwd : root;
+  if (!raw) return { path: root, note: "" };
+  const relative = raw.replace(/\0/g, "");
+  if (!base) return { path: await resolvePathNative(relative), note: "" };
+  const path = await resolvePathNative(relative, base);
+  const absolute = await isAbsolutePathNative(path);
+  return {
+    path: absolute ? await resolvePathNative(path) : path,
+    note: isAbsolutePath(relative) ? "" : ` (resolved from relative ${JSON.stringify(raw)})`,
+  };
 }
 
 /** Placeholder paths models emit when ungrounded ("path/to/your/file",
@@ -586,7 +589,7 @@ export function resolveModelPath(raw: string, policy?: ToolPolicy): { path: stri
  *  segments and angle brackets — a real dir named "examples/" must pass. */
 export function placeholderPathError(raw: string, tool: string, policy?: ToolPolicy): string | null {
   if (!raw) return null;
-  const segs = raw.toLowerCase().split("/");
+  const segs = pathSegments(raw.toLowerCase());
   const hasPathTo = segs.some((s, i) => s === "path" && segs[i + 1] === "to");
   if (!raw.includes("<") && !raw.includes(">") && !hasPathTo) return null;
   return (
@@ -598,7 +601,7 @@ export function placeholderPathError(raw: string, tool: string, policy?: ToolPol
  *  placeholder. Weak models copy-paste these verbatim, which is the point. */
 function pathHint(policy?: ToolPolicy): string {
   const root = policy?.workspaceRoot || "(workspace root unknown - call fs_list with no path)";
-  const cwd = policy?.cwd && policy.cwd.startsWith("/") ? policy.cwd : null;
+  const cwd = policy?.cwd && isAbsolutePath(policy.cwd) ? policy.cwd : null;
   return cwd && cwd !== root ? `workspace root ${root}, cwd ${cwd}` : `workspace root ${root}`;
 }
 
@@ -637,51 +640,57 @@ export async function runTool(
         return `error: ${name} cmd ${JSON.stringify(cmd.trim())} is a placeholder, not a command - send the real command.`;
       }
       const cwd = String(args.cwd ?? "");
-      if (cwd.startsWith("/") && policy?.workspaceRoot && !isPathInsideRoot(cwd, policy.workspaceRoot)) {
+      if (
+        isAbsolutePath(cwd) &&
+        policy?.workspaceRoot &&
+        !(await isPathInsideRootNative(cwd, policy.workspaceRoot))
+      ) {
         return `error: ${name} cwd outside workspace ${policy.workspaceRoot} (got ${JSON.stringify(cwd)}) - use the workspace root or cwd. No dialog shown; fix the path and re-send.`;
       }
     }
-    // Native OS dialog first (page JS can trigger it but cannot click it),
-    // backend token second. Unknown MCP tools fail before any dialog/invoke.
-    // No approval handler (headless/routine context) fails closed — no dialog.
-    if (isMcpToolName(name) && !resolveMcpQualified(name)) {
+    const mcpParts = isMcpToolName(name) ? resolveMcpQualified(name) : null;
+    if (isMcpToolName(name) && !mcpParts) {
       return `error: unknown MCP tool ${name} - reload MCP tools first`;
     }
     const needsGate =
       isGatedTool(name) ||
       ((name === "lsp_diagnostics" || name === "lsp") && lspNeedsApproval(String(args.path ?? "")));
     if (needsGate) {
-      // Opencode-style auto-approval: workspace-confined operations claim
-      // silently via the TRUSTED runTool layer (never the model) — no dialog.
-      // Anything reaching outside keeps the native dialog below.
+      const approvalTool = mcpParts ? "mcp_call_tool" : name;
+      const approvalArgs = mcpParts
+        ? { server: mcpParts.server, tool: mcpParts.tool, args: args ?? {} }
+        : args;
       const auto =
+        !mcpParts &&
         policy?.autoApproveWorkspace &&
         policy.workspaceRoot &&
-        isWorkspaceConfined(name, args, policy.workspaceRoot);
+        (await isWorkspaceConfinedNative(
+          name,
+          args,
+          policy.workspaceRoot,
+          policy.cwd,
+        ));
       if (auto) {
-        approval = await claimFor(actionFor(name), args);
+        approval = await claimFor(actionFor(approvalTool), approvalArgs);
         policy?.onAutoApproval?.(name);
       } else {
         if (!policy?.requestApproval) {
           return `error: ${name} requires user approval (no approval handler in this context)`;
         }
-        const got = await policy.requestApproval(name, args);
+        const got = await policy.requestApproval(approvalTool, approvalArgs);
         if (!got) return `user rejected ${name} - do not retry without changing the plan`;
-        // Shape-check the Approval: a stale renderer module (zombie window from
-        // before a restart) can hand back a bare boolean instead of {token,
-        // detail}. Sending that on would die backend-side with a confusing
-        // "approval required" — fail here, loudly, instead.
         if (typeof got.token !== "string" || !got.token || typeof got.detail !== "string") {
           return `error: approval handshake broken for ${name} (stale app window? quit ALL VTNexa windows/processes and restart the app)`;
         }
         approval = { token: got.token, detail: got.detail };
       }
     }
-    if (isMcpToolName(name)) {
-      const parts = resolveMcpQualified(name);
-      // Checked above, but re-resolve for TS narrowing.
-      if (!parts) return `error: unknown MCP tool ${name} - reload MCP tools first`;
-      const out = await mcpCallTool(parts.server, parts.tool, args ?? {}, approval);
+    if (mcpParts) {
+      const expectedDetail = mcpApprovalDetail(mcpParts.server, mcpParts.tool, args ?? {});
+      if (!approval || approval.detail !== expectedDetail) {
+        return `error: MCP approval detail does not match the resolved server, tool, and arguments`;
+      }
+      const out = await mcpCallTool(mcpParts.server, mcpParts.tool, args ?? {}, approval);
       return out.slice(0, 30000);
     }
     switch (name) {
@@ -692,9 +701,9 @@ export async function runTool(
         const raw = String(args.path ?? "");
         const ph = placeholderPathError(raw, "fs_list", policy);
         if (ph) return ph;
-        const { path: p, note } = resolveModelPath(raw, policy);
+        const { path: p, note } = await resolveModelPathNative(raw, policy);
         if (!p) return `error: fs_list path is required - ${pathHint(policy)}`;
-        if (!p.startsWith("/"))
+        if (!(await isAbsolutePathNative(p)))
           return `error: fs_list path must be absolute inside the workspace (got ${JSON.stringify(raw)}). ${pathHint(policy)} — try that exact path.`;
         const out = JSON.stringify(await fsList(p));
         return note ? `${out}${note}` : out;
@@ -704,8 +713,8 @@ export async function runTool(
         if (!raw) return `error: fs_read path is required - ${pathHint(policy)}`;
         const ph = placeholderPathError(raw, "fs_read", policy);
         if (ph) return ph;
-        const { path: p, note } = resolveModelPath(raw, policy);
-        if (!p.startsWith("/"))
+        const { path: p, note } = await resolveModelPathNative(raw, policy);
+        if (!(await isAbsolutePathNative(p)))
           return `error: fs_read path must be absolute inside the workspace (got ${JSON.stringify(raw)}). ${pathHint(policy)} — try that exact path.`;
         return (await fsRead(p)).slice(0, 60000) + note;
       }
@@ -757,36 +766,64 @@ export async function runTool(
           messages,
         }).slice(0, 12000);
       }
-      case "fs_create":
-        return await fsCreate(String(args.path ?? ""), !!args.is_dir);
+      case "fs_create": {
+        const raw = String(args.path ?? "");
+        if (!raw) return `error: fs_create path is required - ${pathHint(policy)}`;
+        const ph = placeholderPathError(raw, "fs_create", policy);
+        if (ph) return ph;
+        const { path } = await resolveModelPathNative(raw, policy);
+        if (!(await isAbsolutePathNative(path))) {
+          return `error: fs_create path must be absolute (got ${JSON.stringify(raw)}). ${pathHint(policy)}.`;
+        }
+        return fsCreate(path, !!args.is_dir);
+      }
       case "fs_rename": {
-        const oldP = String(args.old_path ?? "");
-        const newP = String(args.new_path ?? "");
-        const out = await fsRename(oldP, newP, approval);
-        policy?.onUndoCapture?.({ kind: "rename", oldPath: oldP, newPath: newP });
+        const oldRaw = String(args.old_path ?? "");
+        const newRaw = String(args.new_path ?? "");
+        if (!oldRaw || !newRaw) return `error: fs_rename needs old_path and new_path - ${pathHint(policy)}`;
+        const oldPh = placeholderPathError(oldRaw, "fs_rename.old_path", policy);
+        if (oldPh) return oldPh;
+        const newPh = placeholderPathError(newRaw, "fs_rename.new_path", policy);
+        if (newPh) return newPh;
+        const { path: oldPath } = await resolveModelPathNative(oldRaw, policy);
+        const { path: newPath } = await resolveModelPathNative(newRaw, policy);
+        if (!(await isAbsolutePathNative(oldPath)) || !(await isAbsolutePathNative(newPath))) {
+          return `error: fs_rename paths must be absolute (got ${JSON.stringify(oldRaw)}, ${JSON.stringify(newRaw)}). ${pathHint(policy)}.`;
+        }
+        const out = await fsRename(oldPath, newPath, approval);
+        policy?.onUndoCapture?.({ kind: "rename", oldPath, newPath });
         return out;
       }
       case "fs_delete": {
-        const p = String(args.path ?? "");
+        const raw = String(args.path ?? "");
+        if (!raw) return `error: fs_delete path is required - ${pathHint(policy)}`;
+        const ph = placeholderPathError(raw, "fs_delete", policy);
+        if (ph) return ph;
+        const { path } = await resolveModelPathNative(raw, policy);
+        if (!(await isAbsolutePathNative(path))) {
+          return `error: fs_delete path must be absolute (got ${JSON.stringify(raw)}). ${pathHint(policy)}.`;
+        }
         const recursive = !!args.recursive;
-        // Capture file content for /undo (dirs are out of scope - noted).
         let content: string | null = null;
         if (!recursive) {
           try {
-            content = await fsRead(p);
+            content = await fsRead(path);
           } catch {
             content = null;
           }
         }
-        await fsDelete(p, recursive, approval);
-        if (content !== null) policy?.onUndoCapture?.({ kind: "delete", path: p, content });
-        return `deleted ${args.path}${recursive ? " (directory - not undoable)" : ""}`;
+        await fsDelete(path, recursive, approval);
+        if (content !== null) policy?.onUndoCapture?.({ kind: "delete", path, content });
+        return `deleted ${path}${recursive ? " (directory - not undoable)" : ""}`;
       }
       case "fs_search": {
         const rawPath = args.path ? String(args.path) : "";
         const phS = rawPath ? placeholderPathError(rawPath, "fs_search", policy) : null;
         if (phS) return phS;
-        const p = rawPath ? resolveModelPath(rawPath, policy).path : undefined;
+        const p = rawPath ? (await resolveModelPathNative(rawPath, policy)).path : undefined;
+        if (p && !(await isAbsolutePathNative(p))) {
+          return `error: fs_search path must be absolute (got ${JSON.stringify(rawPath)}). ${pathHint(policy)}.`;
+        }
         const res = await fsSearch(
           String(args.query ?? ""),
           p,
@@ -800,7 +837,10 @@ export async function runTool(
         const rawPath = args.path ? String(args.path) : "";
         const phG = rawPath ? placeholderPathError(rawPath, "fs_glob", policy) : null;
         if (phG) return phG;
-        const p = rawPath ? resolveModelPath(rawPath, policy).path : undefined;
+        const p = rawPath ? (await resolveModelPathNative(rawPath, policy)).path : undefined;
+        if (p && !(await isAbsolutePathNative(p))) {
+          return `error: fs_glob path must be absolute (got ${JSON.stringify(rawPath)}). ${pathHint(policy)}.`;
+        }
         const res = await fsGlob(
           String(args.pattern ?? ""),
           p,
@@ -812,8 +852,8 @@ export async function runTool(
         if (!raw) return `error: lsp_diagnostics path is required - ${pathHint(policy)}`;
         const ph = placeholderPathError(raw, "lsp_diagnostics", policy);
         if (ph) return ph;
-        const { path: p, note } = resolveModelPath(raw, policy);
-        if (!p.startsWith("/"))
+        const { path: p, note } = await resolveModelPathNative(raw, policy);
+        if (!(await isAbsolutePathNative(p)))
           return `error: lsp_diagnostics path must be absolute inside the workspace (got ${JSON.stringify(raw)}). ${pathHint(policy)} — try that exact path.`;
         return (await lspDiagnostics(p, approval)).slice(0, 10000) + note;
       }
@@ -823,8 +863,8 @@ export async function runTool(
         if (!raw || !op) return `error: lsp needs op + path - ${pathHint(policy)}`;
         const ph = placeholderPathError(raw, "lsp", policy);
         if (ph) return ph;
-        const { path: p, note } = resolveModelPath(raw, policy);
-        if (!p.startsWith("/"))
+        const { path: p, note } = await resolveModelPathNative(raw, policy);
+        if (!(await isAbsolutePathNative(p)))
           return `error: lsp path must be absolute inside the workspace (got ${JSON.stringify(raw)}). ${pathHint(policy)} — try that exact path.`;
         return (
           await lspOp({
@@ -846,9 +886,9 @@ export async function runTool(
         // guessed directory would create the file in the wrong place), but
         // the error hands over the exact path to copy — weak models recover
         // in one round instead of flailing (observed live: bare "hello.txt").
-        if (!path || !path.startsWith("/")) {
-          const { path: cand } = resolveModelPath(path, policy);
-          const sug = cand.startsWith("/") ? ` - use ${JSON.stringify(cand)}` : "";
+        if (!path || !(await isAbsolutePathNative(path))) {
+          const { path: cand } = await resolveModelPathNative(path, policy);
+          const sug = (await isAbsolutePathNative(cand)) ? ` - use ${JSON.stringify(cand)}` : "";
           return `error: fs_write path must be absolute (got ${JSON.stringify(path)})${sug}. ${pathHint(policy)}.`;
         }
         if (content.length > 4 * 1024 * 1024) return "error: fs_write content too large (4MB max)";
@@ -857,7 +897,7 @@ export async function runTool(
         if (
           policy?.autoApproveWorkspace &&
           policy.workspaceRoot &&
-          isWorkspaceConfined("fs_write", { path }, policy.workspaceRoot)
+          await isPathInsideRootNative(path, policy.workspaceRoot)
         ) {
           let before = "";
           let existed = true;
@@ -891,7 +931,7 @@ export async function runTool(
           // An error string lets the model correct the path this turn.
           if (
             policy.workspaceRoot &&
-            !isWorkspaceConfined("fs_write", { path }, policy.workspaceRoot)
+            !(await isPathInsideRootNative(path, policy.workspaceRoot))
           ) {
             return `error: fs_write path outside workspace ${policy.workspaceRoot} (got ${path}) - use a path inside the workspace, or ask the user to switch workspace/cwd. Do not re-send this path.`;
           }

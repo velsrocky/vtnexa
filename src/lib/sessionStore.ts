@@ -1,6 +1,6 @@
 import type { ChatMsg, UndoEntry, Workspace } from "../types";
 import { undoEntrySize } from "../types";
-import { baseName } from "./utils";
+import { basenamePath } from "./path";
 import {
   sessionDelete as tauriSessionDelete,
   sessionGet as tauriSessionGet,
@@ -54,28 +54,20 @@ export function sessionDisplayName(meta: SessionMeta): string {
 }
 
 export function sessionDirLabel(directory: string): string {
-  return baseName(directory.replace(/\/$/, "")) || directory;
+  return basenamePath(directory) || directory;
 }
 
 export async function listSessions(): Promise<SessionMeta[]> {
-  try {
-    const metas = await tauriSessionsList();
-    return [...metas].sort((a, b) => b.updated - a.updated || (b.id < a.id ? -1 : 1));
-  } catch {
-    return [];
-  }
+  const metas = await tauriSessionsList();
+  return [...metas].sort((a, b) => b.updated - a.updated || (b.id < a.id ? -1 : 1));
 }
 
 export async function getSessionFile(id: string): Promise<SessionFile | null> {
   if (!isValidSessionId(id)) return null;
-  try {
-    const raw = await tauriSessionGet(id);
-    const data = JSON.parse(raw) as SessionFile;
-    if (!data || typeof data !== "object" || data.workspace == null) return null;
-    return data;
-  } catch {
-    return null;
-  }
+  const raw = await tauriSessionGet(id);
+  const data = JSON.parse(raw) as SessionFile;
+  if (!data || typeof data !== "object" || data.workspace == null) return null;
+  return data;
 }
 
 export async function putSessionFile(file: SessionFile): Promise<void> {

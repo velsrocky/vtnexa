@@ -83,6 +83,7 @@ function TopBarInner() {
         </button>
         <button
           onClick={onOpenSettings}
+          data-testid="settings-button"
           title="Settings (trusted paths, etc)"
         >
           ⚙️

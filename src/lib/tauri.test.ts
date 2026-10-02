@@ -6,14 +6,19 @@ const invokeMock = vi.hoisted(() =>
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
 import {
+  fsCreate,
   fsDelete as tauriFsDelete,
   fsGlob as tauriFsGlob,
+  fsRename,
   fsSearch as tauriFsSearch,
   gitInit,
   gitLog,
   isTauri,
   sandboxStatus,
+  setWorkspaceRoot,
   shellBg,
+  shellKill,
+  shellPoll,
   shellRun,
 } from "./tauri";
 
@@ -47,6 +52,37 @@ describe("tauri wrapper wire format", () => {
     await shellBg("/ws", "pnpm test", { token: "t2", detail: "pnpm test" });
     const [, args] = invokeMock.mock.calls[0];
     expect(args).toMatchObject({ approvalToken: "t2", approvalDetail: "pnpm test" });
+  });
+
+  it("shell polling and kill keep camelCase approval bindings", async () => {
+    await shellPoll("job_1");
+    expect(invokeMock).toHaveBeenLastCalledWith("shell_poll", { id: "job_1" });
+    await shellKill("job_1", { token: "kill-token", detail: "kill" });
+    expect(invokeMock).toHaveBeenLastCalledWith("shell_kill", {
+      id: "job_1",
+      approvalToken: "kill-token",
+      approvalDetail: "kill",
+    });
+  });
+
+  it("file and workspace payloads use Tauri camelCase bindings", async () => {
+    await fsCreate("C:\\repo\\new-dir", true);
+    expect(invokeMock).toHaveBeenLastCalledWith("fs_create", {
+      path: "C:\\repo\\new-dir",
+      isDir: true,
+    });
+    await fsRename("C:\\repo\\old", "C:\\repo\\new", { token: "rename-token", detail: "rename-detail" });
+    expect(invokeMock).toHaveBeenLastCalledWith("fs_rename", {
+      oldPath: "C:\\repo\\old",
+      newPath: "C:\\repo\\new",
+      approvalToken: "rename-token",
+      approvalDetail: "rename-detail",
+    });
+    await setWorkspaceRoot("C:\\repo", true);
+    expect(invokeMock).toHaveBeenLastCalledWith("set_workspace_root", {
+      path: "C:\\repo",
+      confirmDangerous: true,
+    });
   });
 
   it("sandbox_status reads the boolean verbatim", async () => {

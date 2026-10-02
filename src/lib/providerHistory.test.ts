@@ -12,6 +12,8 @@ import {
   markPairCleared,
   saveDrafts,
   saveHist,
+  setDraftKey,
+  stripDraftPair,
   stripHistoryKey,
   unmarkPairCleared,
 } from "./providerHistory";
@@ -60,14 +62,16 @@ describe("clear-intent marks", () => {
 });
 
 describe("stripHistoryKey", () => {
-  it("clears the pair's key but keeps the entry for reuse", () => {
+  it("clears every kind for one pair but keeps entries for reuse", () => {
     const entries = [
       { baseUrl: "https://a.test", model: "m", apiKey: "K", kind: "auto" as const },
+      { baseUrl: "https://a.test", model: "m", apiKey: "K-OPENAI", kind: "openai" as const },
       { baseUrl: "https://b.test", model: "m", apiKey: "K2", kind: "auto" as const },
     ];
     const next = stripHistoryKey(entries, "https://a.test", "m", "auto");
     expect(next).toEqual([
       { baseUrl: "https://a.test", model: "m", apiKey: "", kind: "auto" },
+      { baseUrl: "https://a.test", model: "m", apiKey: "", kind: "openai" },
       { baseUrl: "https://b.test", model: "m", apiKey: "K2", kind: "auto" },
     ]);
   });
@@ -106,6 +110,50 @@ describe("draft backups", () => {
     localStorage.setItem("vtai.providerDraft", "not json{{");
     expect(loadDrafts()).toEqual({});
     expect(lookupDraftKey({}, "main", "https://a.test", "m")).toBe("");
+  });
+
+  it("stores fallback keys by pair without moving the current slot", () => {
+    const stored = setDraftKey(
+      {
+        main: {
+          baseUrl: "https://b.test",
+          model: "m",
+          apiKey: "K-B",
+          keys: { "https://b.test|m": "K-B" },
+        },
+      },
+      "main",
+      "https://a.test",
+      "m",
+      "K-A",
+    );
+    expect(stored.main).toMatchObject({
+      baseUrl: "https://b.test",
+      apiKey: "K-B",
+      keys: { "https://a.test|m": "K-A", "https://b.test|m": "K-B" },
+    });
+  });
+
+  it("purges only the requested pair from keys and the matching top-level key", () => {
+    const stripped = stripDraftPair(
+      {
+        main: {
+          baseUrl: "https://a.test",
+          model: "m",
+          apiKey: "K-A",
+          keys: { "https://a.test|m": "K-A", "https://b.test|m": "K-B" },
+        },
+      },
+      "main",
+      "https://a.test",
+      "m",
+    );
+    expect(stripped.main).toEqual({
+      baseUrl: "https://a.test",
+      model: "m",
+      apiKey: "",
+      keys: { "https://b.test|m": "K-B" },
+    });
   });
 });
 

@@ -1,6 +1,7 @@
 use crate::util::{reject_sensitive, safe_absolute};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::Manager;
 
@@ -110,38 +111,109 @@ pub(crate) fn is_trusted_path(path: &std::path::Path, trusted_paths: &[TrustedPa
     false
 }
 
-pub(crate) fn default_root() -> std::path::PathBuf {
-    if let Ok(h) = std::env::var("HOME") {
-        if !h.is_empty() {
-            return std::path::PathBuf::from(h);
-        }
-    }
-    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+pub(crate) fn native_home() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let variable = "USERPROFILE";
+    #[cfg(not(windows))]
+    let variable = "HOME";
+    std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
-pub(crate) fn root_snapshot(
-    state: &tauri::State<'_, WorkspaceRoots>,
-    label: &str,
-) -> std::path::PathBuf {
+pub(crate) fn canonical_workspace_root(root: &Path) -> Result<PathBuf, String> {
+    root.canonicalize().map_err(|error| {
+        format!(
+            "workspace: cannot canonicalize {}: {}",
+            root.display(),
+            error
+        )
+    })
+}
+
+pub(crate) fn default_root() -> PathBuf {
+    native_home().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
+}
+
+pub(crate) fn root_snapshot(state: &tauri::State<'_, WorkspaceRoots>, label: &str) -> PathBuf {
     let g = state.0.lock().ok();
     if let Some(r) = g.as_ref().and_then(|m| m.get(label)) {
-        return r.clone();
+        return r.canonicalize().unwrap_or_else(|_| r.clone());
     }
-    // Fresh window: default to $HOME (set_workspace_root canonicalizes).
     let r = default_root();
     r.canonicalize().unwrap_or(r)
 }
 
-/// Enforce allowlist: target (lexically normalized, absolute) must live inside root.
-/// Symlink-safe for existing AND non-existing targets: if the target itself
-/// resolves, its canonical path must be inside root; if it doesn't resolve,
-/// the nearest existing ancestor is canonicalized and must be inside root
-/// (a dangling symlink is refused outright - its final path is unverifiable).
-pub(crate) fn ensure_within_root(
-    norm: &std::path::Path,
-    root: &std::path::Path,
-    what: &str,
-) -> Result<(), String> {
+fn path_component_key(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| {
+            let value = component.as_os_str().to_string_lossy().into_owned();
+            #[cfg(windows)]
+            let value = value.to_lowercase();
+            value
+        })
+        .collect()
+}
+
+fn path_is_within_fs(path: &Path, root: &Path) -> bool {
+    let path = path_component_key(path);
+    let root = path_component_key(root);
+    path.len() >= root.len() && path.iter().zip(&root).all(|(left, right)| left == right)
+}
+
+fn relative_path_within(path: &Path, root: &Path) -> Option<PathBuf> {
+    let path_components: Vec<_> = path.components().collect();
+    let root_components: Vec<_> = root.components().collect();
+    if path_components.len() < root_components.len() {
+        return None;
+    }
+    let path_keys = path_component_key(path);
+    let root_keys = path_component_key(root);
+    if !path_keys
+        .iter()
+        .zip(&root_keys)
+        .all(|(left, right)| left == right)
+    {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for component in &path_components[root_components.len()..] {
+        relative.push(component.as_os_str());
+    }
+    Some(relative)
+}
+
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+pub(crate) fn is_link_or_reparse(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata_is_link_or_reparse(&metadata))
+        .unwrap_or(false)
+}
+
+pub(crate) fn has_link_or_reparse_ancestor(path: &Path) -> bool {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if is_link_or_reparse(candidate) {
+            return true;
+        }
+        current = candidate.parent();
+    }
+    false
+}
+
+pub(crate) fn ensure_within_root(norm: &Path, root: &Path, what: &str) -> Result<(), String> {
+    let root = canonical_workspace_root(root)?;
     let outside = |via: &str| {
         format!(
             "{}: outside workspace {} (got {}, {})",
@@ -152,37 +224,299 @@ pub(crate) fn ensure_within_root(
         )
     };
     if let Ok(canon) = norm.canonicalize() {
-        if canon.starts_with(root) {
+        if path_is_within_fs(&canon, &root) {
             return Ok(());
         }
         return Err(outside("symlink or path resolves outside"));
     }
-    // Does not resolve: either it doesn't exist or it's a dangling symlink.
-    if let Ok(sm) = std::fs::symlink_metadata(norm) {
-        if sm.file_type().is_symlink() {
+    if let Ok(metadata) = std::fs::symlink_metadata(norm) {
+        if metadata_is_link_or_reparse(&metadata) {
             return Err(format!(
-                "{}: dangling symlink (cannot verify where it points)",
+                "{}: dangling symlink or reparse point (cannot verify where it points)",
                 what
             ));
         }
     }
-    // Non-existing target: walk to the nearest existing ancestor. A write
-    // through that ancestor lands wherever the ancestor points, so it must
-    // be inside root; the lexical remainder is already normalized.
-    let mut anc = norm.parent();
-    while let Some(a) = anc {
-        if a.as_os_str().is_empty() {
+    let mut ancestor = norm.parent();
+    while let Some(candidate) = ancestor {
+        if candidate.as_os_str().is_empty() {
             break;
         }
-        if let Ok(canon) = a.canonicalize() {
-            if !canon.starts_with(root) {
+        if let Ok(metadata) = std::fs::symlink_metadata(candidate) {
+            if metadata_is_link_or_reparse(&metadata) {
+                return Err(format!("{}: symlink or reparse point in path", what));
+            }
+        }
+        if let Ok(canon) = candidate.canonicalize() {
+            if !path_is_within_fs(&canon, &root) {
                 return Err(outside("nearest existing ancestor resolves outside"));
             }
             return Ok(());
         }
-        anc = a.parent();
+        ancestor = candidate.parent();
     }
     Err(outside("no existing ancestor inside workspace"))
+}
+
+fn is_private_name(component: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized = component.trim_end_matches(['.', ' ']);
+        normalized.eq_ignore_ascii_case(".nexa") || normalized.eq_ignore_ascii_case(".vtnexa")
+    }
+    #[cfg(not(windows))]
+    {
+        component == ".nexa" || component == ".vtnexa"
+    }
+}
+
+fn normalize_internal_relative(relative: &Path, what: &str) -> Result<PathBuf, String> {
+    let text = relative.to_string_lossy().replace('\\', "/");
+    if text.is_empty() || text.contains('\0') || text.starts_with('/') {
+        return Err(format!("{}: invalid internal path", what));
+    }
+    let mut components = Vec::new();
+    for component in text.split('/') {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." {
+            return Err(format!("{}: traversal is not allowed", what));
+        }
+        if component.contains(':') {
+            return Err(format!("{}: invalid internal path component", what));
+        }
+        components.push(component);
+    }
+    let first_private = components.first().copied().map(is_private_name);
+    if components.is_empty() || !first_private.unwrap_or(false) {
+        return Err(format!("{}: path is outside app-private storage", what));
+    }
+    Ok(PathBuf::from(components.join("/")))
+}
+
+fn is_internal_relative(path: &Path) -> bool {
+    let Some(component) = path
+        .components()
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+    else {
+        return false;
+    };
+    is_private_name(component)
+}
+
+pub(crate) fn internal_relative_path(root: &Path, path: &Path) -> Option<PathBuf> {
+    let root = root.canonicalize().ok()?;
+    if let Some(relative) = relative_path_within(path, &root) {
+        if is_internal_relative(&relative) {
+            return Some(relative);
+        }
+    }
+    if let Ok(canonical) = path.canonicalize() {
+        if let Some(relative) = relative_path_within(&canonical, &root) {
+            if is_internal_relative(&relative) {
+                return Some(relative);
+            }
+        }
+    }
+    let mut current = path;
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canonical) = current.canonicalize() {
+            if let Some(mut relative) = relative_path_within(&canonical, &root) {
+                for component in suffix.iter().rev() {
+                    relative.push(component);
+                }
+                if is_internal_relative(&relative) {
+                    return Some(relative);
+                }
+            }
+            break;
+        }
+        suffix.push(current.file_name()?.to_os_string());
+        current = current.parent()?;
+    }
+    None
+}
+
+pub(crate) fn is_internal_path(root: &Path, path: &Path) -> bool {
+    internal_relative_path(root, path).is_some()
+}
+
+const GENERIC_PRIVATE_COMPONENTS: &[&str] = &[".nexa", ".vtnexa", ".git", ".hg", ".svn"];
+
+fn is_generic_private_component(component: &str) -> bool {
+    let normalized = component.trim_end_matches(['.', ' ']);
+    let lower = normalized.to_ascii_lowercase();
+    GENERIC_PRIVATE_COMPONENTS
+        .iter()
+        .any(|name| lower == *name || lower.starts_with(&format!("{name}:")))
+}
+
+fn path_has_generic_private_component(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        std::path::Component::Normal(value) => {
+            is_generic_private_component(&value.to_string_lossy())
+        }
+        _ => false,
+    })
+}
+
+fn generic_private_relative(root: &Path, path: &Path) -> Option<PathBuf> {
+    let root = root.canonicalize().ok()?;
+    if let Some(relative) = relative_path_within(path, &root) {
+        if path_has_generic_private_component(&relative) {
+            return Some(relative);
+        }
+    }
+    if let Ok(canonical) = path.canonicalize() {
+        if let Some(relative) = relative_path_within(&canonical, &root) {
+            if path_has_generic_private_component(&relative) {
+                return Some(relative);
+            }
+        }
+    }
+    let mut current = path;
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canonical) = current.canonicalize() {
+            if let Some(mut relative) = relative_path_within(&canonical, &root) {
+                for component in suffix.iter().rev() {
+                    relative.push(component);
+                }
+                if path_has_generic_private_component(&relative) {
+                    return Some(relative);
+                }
+            }
+            break;
+        }
+        suffix.push(current.file_name()?.to_os_string());
+        current = current.parent()?;
+    }
+    None
+}
+
+pub(crate) fn is_generic_private_path(root: &Path, path: &Path) -> bool {
+    generic_private_relative(root, path).is_some()
+}
+
+pub(crate) fn reject_generic_private_path(
+    root: &Path,
+    path: &Path,
+    what: &str,
+) -> Result<(), String> {
+    if let Some(relative) = generic_private_relative(root, path) {
+        return Err(format!(
+            "{}: app-private or repository-metadata path {} is not available through generic file APIs",
+            what,
+            relative.to_string_lossy()
+        ));
+    }
+    if path_has_generic_private_component(path) {
+        return Err(format!(
+            "{}: app-private or repository-metadata paths are not available through generic file APIs",
+            what
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn checked_internal_path(
+    root: &Path,
+    relative: &Path,
+    what: &str,
+) -> Result<PathBuf, String> {
+    let root = canonical_workspace_root(root)?;
+    let relative = normalize_internal_relative(relative, what)?;
+    let candidate = root.join(&relative);
+    let mut current = root.clone();
+    let components: Vec<_> = relative.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata_is_link_or_reparse(&metadata) {
+                    return Err(format!(
+                        "{}: app-private path contains a symlink or reparse point",
+                        what
+                    ));
+                }
+                if index + 1 < components.len() && !metadata.is_dir() {
+                    return Err(format!("{}: app-private parent is not a directory", what));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(format!("{}: {}", what, error)),
+        }
+    }
+    if let Ok(canonical) = candidate.canonicalize() {
+        if !path_is_within_fs(&canonical, &root) {
+            return Err(format!("{}: resolves outside workspace", what));
+        }
+    } else {
+        let mut ancestor = candidate.parent();
+        while let Some(candidate_parent) = ancestor {
+            if candidate_parent.as_os_str().is_empty() {
+                break;
+            }
+            if let Ok(metadata) = std::fs::symlink_metadata(candidate_parent) {
+                if metadata_is_link_or_reparse(&metadata) {
+                    return Err(format!(
+                        "{}: app-private path contains a symlink or reparse point",
+                        what
+                    ));
+                }
+            }
+            if let Ok(canonical_parent) = candidate_parent.canonicalize() {
+                if !path_is_within_fs(&canonical_parent, &root) {
+                    return Err(format!("{}: resolves outside workspace", what));
+                }
+                break;
+            }
+            ancestor = candidate_parent.parent();
+        }
+    }
+    Ok(candidate)
+}
+
+pub(crate) fn create_internal_directory(
+    root: &Path,
+    relative: &Path,
+    what: &str,
+) -> Result<PathBuf, String> {
+    let path = checked_internal_path(root, relative, what)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+                return Err(format!("{}: app-private path is not a directory", what));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&path).map_err(|error| format!("{}: {}", what, error))?;
+        }
+        Err(error) => return Err(format!("{}: {}", what, error)),
+    }
+    let checked = checked_internal_path(root, relative, what)?;
+    if !checked.is_dir() {
+        return Err(format!("{}: app-private path is not a directory", what));
+    }
+    Ok(checked)
+}
+
+pub(crate) fn ensure_internal_parents(
+    root: &Path,
+    relative: &Path,
+    what: &str,
+) -> Result<PathBuf, String> {
+    let parent = relative
+        .parent()
+        .ok_or_else(|| format!("{}: missing app-private parent", what))?;
+    create_internal_directory(root, parent, what)?;
+    checked_internal_path(root, relative, what)
 }
 
 pub(crate) fn checked_path(
@@ -190,11 +524,59 @@ pub(crate) fn checked_path(
     label: &str,
     raw: String,
     what: &str,
-) -> Result<std::path::PathBuf, String> {
+) -> Result<PathBuf, String> {
     let norm = safe_absolute(raw, what)?;
     let root = root_snapshot(state, label);
+    if let Some(relative) = internal_relative_path(&root, &norm) {
+        if has_link_or_reparse_ancestor(&norm) {
+            return Err(format!(
+                "{}: app-private path contains a symlink or reparse point",
+                what
+            ));
+        }
+        return checked_internal_path(&root, &relative, what);
+    }
     ensure_within_root(&norm, &root, what)?;
     Ok(norm)
+}
+
+fn normalized_absolute(raw: &str) -> Result<std::path::PathBuf, String> {
+    if raw.is_empty() || raw.contains('\0') {
+        return Err("path is empty or invalid".to_string());
+    }
+    let path = std::path::PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err("path must be absolute".to_string());
+    }
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+fn comparable_components(path: &std::path::Path) -> Vec<String> {
+    path.components()
+        .map(|component| {
+            let value = component.as_os_str().to_string_lossy().into_owned();
+            #[cfg(windows)]
+            let value = value.to_lowercase();
+            value
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub(crate) fn path_is_within(path: String, root: String) -> Result<bool, String> {
+    let path = comparable_components(&normalized_absolute(&path)?);
+    let root = comparable_components(&normalized_absolute(&root)?);
+    Ok(path.len() >= root.len() && path.iter().zip(&root).all(|(left, right)| left == right))
 }
 
 #[tauri::command]
@@ -208,8 +590,8 @@ pub(crate) fn workspace_root(
 }
 
 #[tauri::command]
-pub(crate) fn set_workspace_root(
-    window: tauri::WebviewWindow,
+pub(crate) fn set_workspace_root<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     state: tauri::State<'_, WorkspaceRoots>,
     path: String,
     confirm_dangerous: Option<bool>,
@@ -220,18 +602,20 @@ pub(crate) fn set_workspace_root(
     }
     let canon = norm.canonicalize().map_err(|e| e.to_string())?;
     reject_sensitive(&canon)?;
+    if path_has_generic_private_component(&canon) {
+        return Err(
+            "workspace: app-private or repository-metadata directories cannot be workspaces"
+                .to_string(),
+        );
+    }
     // Disallow widening to / or $HOME itself without explicit opt-in.
     // One blind Approve must not silently grant the whole machine.
-    let is_fs_root = canon.as_os_str() == "/";
-    let home_canon = std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .map(std::path::PathBuf::from)
-        .and_then(|h| h.canonicalize().ok());
+    let is_fs_root = canon.parent().is_none();
+    let home_canon = native_home().and_then(|home| home.canonicalize().ok());
     let is_home = home_canon.as_ref().map(|h| &canon == h).unwrap_or(false);
     if (is_fs_root || is_home) && !confirm_dangerous.unwrap_or(false) {
         return Err(if is_fs_root {
-            "workspace: refusing / without explicit confirm (pick a project folder, or confirm you understand the sandbox is effectively off)".to_string()
+            "workspace: refusing filesystem root without explicit confirm (pick a project folder, or confirm you understand the sandbox is effectively off)".to_string()
         } else {
             "workspace: refusing $HOME without explicit confirm (pick a project folder, or confirm you understand shell+fs can reach dotfiles)".to_string()
         });
@@ -370,5 +754,107 @@ mod tests {
         assert!(ensure_within_root(&root.join("real.txt"), &r, "t").is_ok());
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    fn internal_fixture(label: &str) -> PathBuf {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vtnexa-internal-{label}-{id}"));
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn generic_paths_reject_private_components_and_metadata() {
+        let root = internal_fixture("generic-private");
+        for name in [".nexa", ".vtnexa", ".git", ".hg", ".svn"] {
+            let path = root.join(name).join("secret.txt");
+            assert!(reject_generic_private_path(&root, &path, "fs_read").is_err());
+        }
+        assert!(reject_generic_private_path(&root, &root.join("src/main.rs"), "fs_read").is_ok());
+        assert!(
+            reject_generic_private_path(&root, &root.join("src/../.git/config"), "fs_read")
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generic_paths_reject_symlinks_to_private_metadata() {
+        let root = internal_fixture("generic-private-link");
+        let target = root.join(".git");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("config"), b"private").unwrap();
+        let link = root.join("source");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(reject_generic_private_path(&root, &link.join("config"), "fs_read").is_err());
+        assert!(is_generic_private_path(&root, &root.join("source")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn internal_paths_accept_nested_and_missing_children() {
+        let root = internal_fixture("nested");
+        for relative in [".nexa/sessions/new.json", ".vtnexa/skills/new.md"] {
+            assert!(checked_internal_path(&root, Path::new(relative), "test").is_ok());
+        }
+        let directory =
+            create_internal_directory(&root, Path::new(".vtnexa/skills"), "test").unwrap();
+        assert!(directory.is_dir());
+        assert!(
+            checked_internal_path(&root, Path::new(".vtnexa/skills/missing.md"), "test").is_ok()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn internal_paths_reject_traversal_and_non_private_namespaces() {
+        let root = internal_fixture("invalid");
+        for relative in [
+            ".",
+            "normal/file",
+            "../outside",
+            ".nexa/../outside",
+            ".vtnexa/./../outside",
+            "/outside",
+            "C:\\outside",
+            "\\\\server\\share\\.nexa",
+            "\\\\?\\C:\\outside",
+            ".nexa::$DATA",
+            "..\\outside",
+        ] {
+            assert!(
+                checked_internal_path(&root, Path::new(relative), "test").is_err(),
+                "accepted {}",
+                relative
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_symlinks_are_rejected_even_when_internal() {
+        let root = internal_fixture("symlink");
+        let outside = internal_fixture("symlink-outside");
+        let inside = root.join("inside");
+        std::fs::create_dir_all(&inside).unwrap();
+        let nexa = root.join(".nexa");
+        std::os::unix::fs::symlink(&outside, &nexa).unwrap();
+        assert!(checked_internal_path(&root, Path::new(".nexa/secret.txt"), "test").is_err());
+        std::fs::remove_file(&nexa).unwrap();
+        std::os::unix::fs::symlink(&inside, &nexa).unwrap();
+        assert!(checked_internal_path(&root, Path::new(".nexa/secret.txt"), "test").is_err());
+        std::fs::remove_file(&nexa).unwrap();
+        let vtnexa = root.join(".vtnexa");
+        std::os::unix::fs::symlink(&outside, &vtnexa).unwrap();
+        assert!(
+            checked_internal_path(&root, Path::new(".vtnexa/skills/secret.md"), "test").is_err()
+        );
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
     }
 }

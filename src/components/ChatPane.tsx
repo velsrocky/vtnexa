@@ -1,10 +1,11 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
-import type { SkillInfo, SideTab, ToolEvent, Workspace } from "../types";
+import type { OperationState, SkillInfo, SideTab, ToolEvent, Workspace } from "../types";
 import type { NexaState } from "../hooks/useNexa";
 import { useInputHistory } from "../hooks/useInputHistory";
 import { renderChatMarkdown } from "../lib/chatMarkdown";
 import { toolArgsSummary } from "../lib/toolCard";
+import OperationStatus from "./OperationStatus";
 
 /** Assistant replies render as sanitized markdown: the finalized message
  *  directly, the in-flight one through StreamingBody (throttled, with an
@@ -94,9 +95,11 @@ export function StreamingBody({ content, thinking }: { content: string; thinking
   );
 }
 
-export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, showContinue, onContinue, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote }: {
+export default function ChatPane({ ws, agentActive, agentOperation, workspaceOperation, sideTab, setSideTab, width, skills, msgsRef, stickBottom, showJump, setShowJump, scrollMsgsToBottom, input, setInput, sendChat, stopTurn, planMode, onTogglePlan, showContinue, onContinue, padText, setPadText, planText, setPlanText, memoryText, setMemoryText, nexaState, auditNote, setAuditNote }: {
   ws: Workspace;
-  busy: boolean;
+  agentActive?: boolean;
+  agentOperation?: OperationState;
+  workspaceOperation?: OperationState;
   sideTab: SideTab;
   setSideTab: (t: SideTab) => void;
   width: number;
@@ -125,6 +128,9 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
   setAuditNote: (v: string) => void;
 }) {
   const hist = useInputHistory();
+  const turnActive = agentActive ?? (agentOperation ? agentOperation.status === "pending" : false);
+  const workspacePending = workspaceOperation?.status === "pending";
+  const sendDisabled = turnActive || workspacePending;
   function onInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter") {
       hist.push(input);
@@ -154,10 +160,13 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
     nexaState === "saving" ? "saving…" : nexaState === "saved" ? "✓ saved, agent sees it" : nexaState === "error" ? "⚠ save failed" : "…";
   return (
     <aside className="chat" style={{ width }}>
-      <div className="tabs">
+      <div className="tabs" role="tablist" aria-label="Commander views">
         {(["chat", "pad", "plan", "memory", "audit"] as const).map((t) => (
           <button
             key={t}
+            type="button"
+            role="tab"
+            aria-selected={sideTab === t}
             className={sideTab === t ? "active" : ""} onClick={() => setSideTab(t)}
             title={t === "audit" ? "Every tool call + your approve/reject decisions, this window" : undefined}
           >
@@ -231,10 +240,10 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
             >
               {planMode ? "◔ Plan" : "◑ Build"}
             </button>
-            <button onClick={sendChat} disabled={busy}>
+            <button onClick={sendChat} disabled={sendDisabled} title={workspacePending ? "Waiting for the workspace change to finish." : undefined}>
               Send
             </button>
-            {showContinue && !busy && (
+            {showContinue && !sendDisabled && (
               <button
                 onClick={onContinue}
                 title="The last turn ran out of tool budget. Continue it with fresh rounds over the full history (nothing is repeated or lost)."
@@ -242,7 +251,7 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
                 ▶ Continue
               </button>
             )}
-            {busy && (
+            {turnActive && (
               <button
                 onClick={() => stopTurn(ws.id)}
                 title="Stop this turn: aborts the request (applied side effects are not undone; answer the native approval dialog if one is open)"
@@ -250,12 +259,14 @@ export default function ChatPane({ ws, busy, sideTab, setSideTab, width, skills,
                 ■ Stop
               </button>
             )}
-            {busy && (
+            {turnActive && (
               <span className="agent-status" title="Agent is thinking...">
                 <span className="spinner" />
                 thinking
               </span>
             )}
+            {workspacePending && <span className="muted small" role="status">Waiting for the workspace change to finish.</span>}
+            <OperationStatus state={agentOperation} />
           </div>
           <div
             className="muted small"

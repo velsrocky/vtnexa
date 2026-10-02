@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useInit } from "./useInit";
 import { newWorkspace } from "../lib/utils";
+import type { ProviderConfig } from "../types";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -29,12 +30,13 @@ async function flush() {
   });
 }
 
-function setup() {
+function setup(provider?: ProviderConfig) {
   let ws = newWorkspace("main:ws", "");
   const order: string[] = [];
   const notes: string[] = [];
   const deps: any = {
     workspaceRoot: "",
+    provider,
     wsCommitted: { current: "" },
     nexaReady: { current: false },
     sessionsReady: { current: false },
@@ -75,6 +77,7 @@ function setup() {
 
 describe("useInit boot", () => {
   it("resolves the root, loads every domain in order, clamps cwd", async () => {
+    localStorage.setItem("vtai.workspaceRoot", "/backend-home");
     setInvokeImpl(async (cmd, args?: any) => {
       if (cmd === "workspace_root") return "/backend-home";
       if (cmd === "set_workspace_root") return String(args.path).replace(/\/$/, "");
@@ -103,6 +106,7 @@ describe("useInit boot", () => {
 
 describe("useInit.changeWorkspace", () => {
   function ready() {
+    localStorage.setItem("vtai.workspaceRoot", "/w");
     setInvokeImpl(async (cmd, args?: any) => {
       if (cmd === "workspace_root") return "/w";
       if (cmd === "set_workspace_root") return String(args.path).replace(/\/$/, "");
@@ -135,7 +139,7 @@ describe("useInit.changeWorkspace", () => {
     expect(h.deps.saveSessionNow).not.toHaveBeenCalled();
   });
 
-  it("resets the guard and notes failures", async () => {
+  it("resets the guard and reports failures", async () => {
     setInvokeImpl(async (cmd) => {
       if (cmd === "workspace_root") return "/w";
       if (cmd === "set_workspace_root") throw new Error("not a directory");
@@ -146,8 +150,8 @@ describe("useInit.changeWorkspace", () => {
     await act(async () => {
       await h.result.current.changeWorkspace("/bad");
     });
-    expect(h.deps.wsCommitted.current).toBe("");
-    expect(h.notes.join("")).toMatch(/workspace change failed/);
+     expect(h.deps.wsCommitted.current).toBe("");
+     expect(h.result.current.operation).toMatchObject({ status: "error" });
   });
 });
 
@@ -186,16 +190,93 @@ describe("useInit changeWorkspace", () => {
       await h.result.current.changeWorkspace("  ");
       await h.result.current.changeWorkspace("/w1");
     });
-    expect(h.order).toEqual([]);
-    await act(async () => {
-      await h.result.current.changeWorkspace("/w9");
-    });
-    expect(h.notes.join("")).toContain("workspace change failed: denied");
+     expect(h.order).toEqual([]);
+     await act(async () => {
+       await h.result.current.changeWorkspace("/w9");
+     });
+     expect(h.result.current.operation).toMatchObject({ status: "error" });
   });
 });
 
 describe("useInit browseWorkspace", () => {
-  it("explains in the shell log when the folder picker is unavailable", async () => {
+  it("enters an error state and retries the failed workspace initialization", async () => {
+    localStorage.setItem("vtai.workspaceRoot", "/stored");
+    let attempts = 0;
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "workspace_root") return "/stored";
+      if (cmd === "set_workspace_root") {
+        attempts += 1;
+        if (attempts === 1) throw new Error("access denied");
+        return String(args.path);
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup();
+    await flush();
+    expect(h.result.current.phase).toBe("workspace-error");
+    expect(h.result.current.error).toMatch(/could not open/i);
+    expect(h.result.current.details).toMatch(/access denied/);
+    await act(async () => {
+      await h.result.current.retry();
+    });
+    await flush();
+    expect(h.result.current.phase).toBe("ready");
+    expect(attempts).toBe(2);
+  });
+
+  it("moves from workspace-required to ready after a folder selection", async () => {
+    dialogStub.open.mockReset();
+    (globalThis as any).window.__TAURI_INTERNALS__ = {};
+    dialogStub.open.mockResolvedValueOnce("/picked");
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "workspace_root") return "";
+      if (cmd === "set_workspace_root") return String(args.path);
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup();
+    await flush();
+    expect(h.result.current.phase).toBe("workspace-required");
+    await act(async () => {
+      await h.result.current.browseWorkspace();
+    });
+    await flush();
+    expect(h.result.current.phase).toBe("ready");
+    expect(h.deps.wsCommitted.current).toBe("/picked");
+    delete (globalThis as any).window.__TAURI_INTERNALS__;
+  });
+
+  it("requires provider details only when the configured provider needs them", async () => {
+    localStorage.setItem("vtai.workspaceRoot", "/w");
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "workspace_root") return "/w";
+      if (cmd === "set_workspace_root") return String(args.path);
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const provider: ProviderConfig = { baseUrl: "https://api.anthropic.com", model: "claude", apiKey: "" };
+    const h = setup(provider);
+    await flush();
+    expect(h.result.current.phase).toBe("provider-required");
+    expect(h.result.current.error).toMatch(/API key/);
+    provider.apiKey = "secret";
+    await act(async () => {
+      await h.result.current.checkProvider();
+    });
+    expect(h.result.current.phase).toBe("ready");
+  });
+
+  it("treats the local default as configured", async () => {
+    localStorage.setItem("vtai.workspaceRoot", "/w");
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "workspace_root") return "/w";
+      if (cmd === "set_workspace_root") return String(args.path);
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup();
+    await flush();
+    expect(h.result.current.phase).toBe("ready");
+  });
+
+  it("shows a visible error when the folder picker is unavailable", async () => {
     setInvokeImpl(async (cmd) => {
       if (cmd === "workspace_root") return "/w1";
       if (cmd === "set_workspace_root") return "/w1";
@@ -206,7 +287,8 @@ describe("useInit browseWorkspace", () => {
     await act(async () => {
       await h.result.current.browseWorkspace();
     });
-    expect(h.notes.join("")).toContain("browse unavailable");
+     expect(h.result.current.operation).toMatchObject({ status: "error" });
+     expect(h.result.current.phase).toBe("workspace-error");
   });
 
   it("routes the picked directory through changeWorkspace", async () => {

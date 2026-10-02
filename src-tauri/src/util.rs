@@ -51,23 +51,36 @@ pub(crate) fn truncate_chars(s: String, max: usize) -> String {
 }
 
 pub(crate) fn reject_sensitive(path: &std::path::Path) -> Result<(), String> {
-    let s = path.to_string_lossy().to_lowercase();
-    // SSH / GPG keys, browser profile (cookies/session), shell history
+    let s = path.to_string_lossy().replace('\\', "/").to_lowercase();
     for pat in [
         ".ssh",
         ".gnupg",
         ".pki",
         "vtai-browser-profile",
+        "browser-profile",
         ".bash_history",
         ".zsh_history",
         ".aws/credentials",
         ".config/gh/hosts.yml",
+        "appdata",
+        "userprofile",
+        "windows/system32/config",
+        "windows/system32/drivers/etc",
     ] {
         if s.contains(pat) {
             return Err(format!("refused: sensitive path ({})", pat));
         }
     }
-    for prefix in ["/etc/", "/proc/", "/sys/", "/dev/", "/root/", "/boot/"] {
+    for prefix in [
+        "/etc/",
+        "/proc/",
+        "/sys/",
+        "/dev/",
+        "/root/",
+        "/boot/",
+        "c:/windows/system32/config/",
+        "c:/windows/system32/drivers/etc/",
+    ] {
         if s.starts_with(prefix) || s == prefix.trim_end_matches('/') {
             return Err(format!("refused: system path ({})", prefix));
         }

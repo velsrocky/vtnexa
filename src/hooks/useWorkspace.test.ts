@@ -99,4 +99,24 @@ describe("useWorkspace.setCwd", () => {
     expect(result.current.cwd).toBe("/w/sub");
     expect(updates).toContain("/w/sub");
   });
+
+  it("uses the backend PTY cwd operation for Windows paths without shell interpolation", () => {
+    const calls: { cmd: string; args?: Record<string, unknown> }[] = [];
+    setInvokeImpl(async (cmd, args) => {
+      calls.push({ cmd, args: args as Record<string, unknown> });
+      return [];
+    });
+    const { result } = setup();
+    act(() => {
+      result.current.setWorkspaceRoot("C:\\workspace");
+    });
+    act(() => {
+      result.current.setCwd("C:\\workspace\\folder with 'quote'");
+    });
+    expect(calls).toContainEqual({
+      cmd: "pty_set_cwd",
+      args: { id: "main:pty", cwd: "C:\\workspace\\folder with 'quote'" },
+    });
+    expect(calls.some(({ cmd }) => cmd === "pty_write")).toBe(false);
+  });
 });

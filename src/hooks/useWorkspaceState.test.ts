@@ -19,11 +19,11 @@ afterEach(() => {
 });
 
 describe("useWorkspaceState basics", () => {
-  it("starts with one workspace, not busy", () => {
+  it("starts with one workspace and an idle agent", () => {
     const { result } = renderHook(() => useWorkspaceState());
     expect(result.current.ws.messages).toEqual([]);
     expect(result.current.ws.id).toContain(":ws");
-    expect(result.current.busy).toBe(false);
+    expect(result.current.agentOperation).toEqual({ status: "idle" });
     expect(result.current.ws.provider.model).toBeTruthy();
   });
 

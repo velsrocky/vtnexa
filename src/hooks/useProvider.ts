@@ -12,6 +12,8 @@ import {
   markPairCleared,
   saveDrafts,
   saveHist,
+  setDraftKey,
+  stripDraftPair,
   stripHistoryKey,
   unmarkPairCleared,
   type ProviderEntry,
@@ -19,212 +21,442 @@ import {
 
 export type { ProviderEntry };
 
-// Per-window provider config: the bar edits THIS window's own copy - there
-// is no shared global. Keychain + history + model discovery are app-level
-// services shared by all windows.
+const WRITE_DEBOUNCE_MS = 300;
+const PROBE_DEBOUNCE_MS = 500;
+
+interface CredentialIntent {
+  version: number;
+  baseUrl: string;
+  model: string;
+  secret: string;
+}
+
+type MigrationCandidate = CredentialIntent;
+
+function pairOf(baseUrl: string, model: string): string {
+  return draftPairKey(baseUrl, model);
+}
+
 export function useProvider(opts: {
   ws: Workspace;
   updateWs: (fn: (w: Workspace) => Workspace) => void;
 }) {
-  const [provHist, setProvHist] = useState<ProviderEntry[]>(loadHist);
+  const [provHist, setProvHist] = useState<ProviderEntry[]>(() => loadHist());
   const [provModels, setProvModels] = useState<string[]>([]);
   const [modelsNote, setModelsNote] = useState("");
-  // OS keychain availability. null = unknown yet. When true, apiKeys live in
-  // the keychain and localStorage copies are stripped; when false we persist
-  // locally and say so (functional, less secure).
   const [keychainOk, setKeychainOk] = useState<boolean | null>(null);
-  const keychainMigrated = useRef(false);
+  const histRef = useRef(provHist);
+  const mountedRef = useRef(true);
+  const updateWsRef = useRef(opts.updateWs);
+  const activeProviderRef = useRef(opts.ws.provider);
+  const intentVersionRef = useRef(0);
+  const intentsRef = useRef(new Map<string, CredentialIntent>());
+  const issuedVersionsRef = useRef(new Map<string, number>());
+  const pendingWritesRef = useRef(
+    new Map<string, { timer: ReturnType<typeof setTimeout>; intent: CredentialIntent }>(),
+  );
+  const credentialQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const enqueueCredentialRef = useRef(<T,>(operation: () => Promise<T>): Promise<T> => operation());
+  const applyFallbackRef = useRef<(baseUrl: string, model: string) => void>(() => undefined);
+  const migrateCredentialsRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const probeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const probeGenerationRef = useRef(0);
+  const migrationRunningRef = useRef(false);
 
-  const ws = opts.ws;
-  const editCfg: ProviderConfig = ws.provider;
-  // Track latest request to prevent race conditions from rapid switches
-  const latestRequest = useRef<string>("");
-  
-  function setEditCfg(patch: Partial<ProviderConfig>) {
-    opts.updateWs((w) => {
-      const next = { ...w.provider, ...patch };
-      // Keys belong to a baseUrl+model pair: switching either clears the
-      // field; the keychain effect below refills it for the new pair.
-      if (("baseUrl" in patch || "model" in patch) && !("apiKey" in patch)) {
-        next.apiKey = "";
-      }
-      return { ...w, provider: next };
-    });
-    // Mirror to the keychain the moment the key is edited - not only after a
-    // successful turn - so a restart never loses it.
-    if (typeof patch.apiKey === "string") {
-      const url = patch.baseUrl ?? ws.provider.baseUrl;
-      const model = patch.model ?? ws.provider.model;
-      const pair = draftPairKey(url, model);
-      if (patch.apiKey === "") {
-        // Explicit clear by the user: record intent (so the turn-end mirror
-        // propagates the deletion) and strip the pair's key from history so
-        // the removal sticks for reuse too.
-        markPairCleared(pair);
-        const kind = patch.kind ?? ws.provider.kind;
-        setProvHist((h) => saveHist(stripHistoryKey(h, url, model, kind)));
-      } else {
-        unmarkPairCleared(pair);
-      }
-      if (url.trim() && model.trim()) {
-        keySet(url, model, patch.apiKey)
-          .then(() => setKeychainOk(true))
-          .catch(() => setKeychainOk(false));
-      }
+  updateWsRef.current = opts.updateWs;
+  activeProviderRef.current = opts.ws.provider;
+
+  const editCfg: ProviderConfig = opts.ws.provider;
+
+  function isCurrentIntent(intent: CredentialIntent): boolean {
+    return intentsRef.current.get(pairOf(intent.baseUrl, intent.model))?.version === intent.version;
+  }
+
+  function commitHist(next: ProviderEntry[]): ProviderEntry[] {
+    const saved = saveHist(next);
+    histRef.current = saved;
+    setProvHist(saved);
+    return saved;
+  }
+
+  function purgePairPersistence(baseUrl: string, model: string): void {
+    const drafts = loadDrafts();
+    const nextDrafts = stripDraftPair(drafts, windowLabel, baseUrl, model);
+    if (nextDrafts !== drafts) saveDrafts(nextDrafts);
+    const nextHist = stripHistoryKey(histRef.current, baseUrl, model);
+    if (nextHist.some((entry, index) => entry.apiKey !== histRef.current[index]?.apiKey)) {
+      commitHist(nextHist);
     }
   }
 
-  // Persist this window's draft on every keystroke so reloads never lose it.
-  // Key backups are kept PER PAIR (not one slot): flipping between endpoints
-  // must not wipe the key you typed five minutes ago. The live field is kept
-  // locally only while no keychain is confirmed.
-  const draftProvider = ws.provider;
+  function applyFallback(baseUrl: string, model: string): void {
+    if (!mountedRef.current) return;
+    if (pairOf(activeProviderRef.current.baseUrl, activeProviderRef.current.model) !== pairOf(baseUrl, model)) {
+      return;
+    }
+    setKeychainOk(false);
+    const pair = pairOf(baseUrl, model);
+    if (isPairCleared(pair)) return;
+    const key = lookupDraftKey(loadDrafts(), windowLabel, baseUrl, model);
+    if (!key) return;
+    updateWsRef.current((workspace) =>
+      workspace.provider.baseUrl === baseUrl &&
+      workspace.provider.model === model &&
+      !workspace.provider.apiKey
+        ? { ...workspace, provider: { ...workspace.provider, apiKey: key } }
+        : workspace,
+    );
+  }
+
+  function persistFallback(intent: CredentialIntent): void {
+    if (!mountedRef.current || !isCurrentIntent(intent)) return;
+    if (intent.secret) {
+      const drafts = loadDrafts();
+      saveDrafts(setDraftKey(drafts, windowLabel, intent.baseUrl, intent.model, intent.secret));
+      const nextHist = histRef.current.map((entry) =>
+        entry.baseUrl.trim() === intent.baseUrl.trim() && entry.model.trim() === intent.model.trim()
+          ? { ...entry, apiKey: intent.secret }
+          : entry,
+      );
+      if (nextHist.some((entry, index) => entry.apiKey !== histRef.current[index]?.apiKey)) {
+        commitHist(nextHist);
+      }
+    }
+    if (pairOf(activeProviderRef.current.baseUrl, activeProviderRef.current.model) === pairOf(intent.baseUrl, intent.model)) {
+      applyFallback(intent.baseUrl, intent.model);
+    }
+  }
+
+  function handleWriteSuccess(intent: CredentialIntent): void {
+    if (!mountedRef.current) return;
+    purgePairPersistence(intent.baseUrl, intent.model);
+    if (!isCurrentIntent(intent)) return;
+    if (intent.secret === "") unmarkPairCleared(pairOf(intent.baseUrl, intent.model));
+    if (pairOf(activeProviderRef.current.baseUrl, activeProviderRef.current.model) === pairOf(intent.baseUrl, intent.model)) {
+      setKeychainOk(true);
+    }
+  }
+
+  function handleWriteFailure(intent: CredentialIntent): void {
+    if (!mountedRef.current || !isCurrentIntent(intent)) return;
+    persistFallback(intent);
+  }
+
+  function enqueueCredential<T>(operation: () => Promise<T>): Promise<T> {
+    const result = credentialQueueRef.current.then(operation, operation);
+    credentialQueueRef.current = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  function runCredentialWrite(intent: CredentialIntent): void {
+    const pair = pairOf(intent.baseUrl, intent.model);
+    if (issuedVersionsRef.current.get(pair) === intent.version) return;
+    issuedVersionsRef.current.set(pair, intent.version);
+    void enqueueCredential(async () => {
+      if (!mountedRef.current) return;
+      await keySet(intent.baseUrl, intent.model, intent.secret);
+    })
+      .then(() => handleWriteSuccess(intent))
+      .catch(() => handleWriteFailure(intent));
+  }
+
+  function cancelPendingWrite(baseUrl: string, model: string): void {
+    const pair = pairOf(baseUrl, model);
+    const pending = pendingWritesRef.current.get(pair);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingWritesRef.current.delete(pair);
+  }
+
+  function scheduleCredentialWrite(intent: CredentialIntent, delay = WRITE_DEBOUNCE_MS): void {
+    cancelPendingWrite(intent.baseUrl, intent.model);
+    const pair = pairOf(intent.baseUrl, intent.model);
+    const timer = setTimeout(() => {
+      pendingWritesRef.current.delete(pair);
+      runCredentialWrite(intent);
+    }, delay);
+    pendingWritesRef.current.set(pair, { timer, intent });
+  }
+
+  function nextIntent(baseUrl: string, model: string, secret: string): CredentialIntent {
+    const intent = {
+      version: ++intentVersionRef.current,
+      baseUrl,
+      model,
+      secret,
+    };
+    intentsRef.current.set(pairOf(baseUrl, model), intent);
+    return intent;
+  }
+
+  function addMigrationCandidate(
+    candidates: Map<string, MigrationCandidate>,
+    baseUrl: string,
+    model: string,
+    secret: string,
+  ): void {
+    if (!baseUrl.trim() || !model.trim() || !secret) return;
+    candidates.set(pairOf(baseUrl, model), {
+      version: intentsRef.current.get(pairOf(baseUrl, model))?.version ?? 0,
+      baseUrl,
+      model,
+      secret,
+    });
+  }
+
+  async function migratePlaintextCredentials(): Promise<void> {
+    if (migrationRunningRef.current || !mountedRef.current) return;
+    migrationRunningRef.current = true;
+    try {
+      const candidates = new Map<string, MigrationCandidate>();
+      for (const entry of loadHist()) {
+        addMigrationCandidate(candidates, entry.baseUrl, entry.model, entry.apiKey);
+      }
+      const drafts = loadDrafts();
+      const slot = drafts[windowLabel];
+      if (slot) {
+        addMigrationCandidate(candidates, slot.baseUrl, slot.model, slot.apiKey);
+        for (const [pair, secret] of Object.entries(slot.keys ?? {})) {
+          const separator = pair.lastIndexOf("|");
+          if (separator > 0 && separator < pair.length - 1) {
+            addMigrationCandidate(candidates, pair.slice(0, separator), pair.slice(separator + 1), secret);
+          }
+        }
+      }
+      for (const candidate of candidates.values()) {
+        if (!mountedRef.current) break;
+        const pair = pairOf(candidate.baseUrl, candidate.model);
+        const version = intentsRef.current.get(pair)?.version ?? 0;
+        try {
+          const migrated = await enqueueCredential(async () => {
+            if (!mountedRef.current) return false;
+            if ((intentsRef.current.get(pair)?.version ?? 0) !== version) return false;
+            await keySet(candidate.baseUrl, candidate.model, candidate.secret);
+            return true;
+          });
+          const stillCurrent = (intentsRef.current.get(pair)?.version ?? 0) === version;
+          if (migrated && stillCurrent && mountedRef.current) {
+            purgePairPersistence(candidate.baseUrl, candidate.model);
+          }
+        } catch {
+          if (stillCurrentVersion(candidate, version)) {
+            applyFallback(candidate.baseUrl, candidate.model);
+          }
+        }
+      }
+    } finally {
+      migrationRunningRef.current = false;
+    }
+  }
+
+  function stillCurrentVersion(candidate: MigrationCandidate, version: number): boolean {
+    return (intentsRef.current.get(pairOf(candidate.baseUrl, candidate.model))?.version ?? 0) === version;
+  }
+
+  enqueueCredentialRef.current = enqueueCredential;
+  applyFallbackRef.current = applyFallback;
+  migrateCredentialsRef.current = migratePlaintextCredentials;
+
+  useEffect(() => {
+    const pendingWrites = pendingWritesRef.current;
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      probeGenerationRef.current += 1;
+      if (probeTimerRef.current) clearTimeout(probeTimerRef.current);
+      probeTimerRef.current = null;
+      for (const pending of pendingWrites.values()) clearTimeout(pending.timer);
+      pendingWrites.clear();
+    };
+  }, []);
+
+  function setEditCfg(patch: Partial<ProviderConfig>): void {
+    const current = activeProviderRef.current;
+    const next = { ...current, ...patch };
+    const currentPair = pairOf(current.baseUrl, current.model);
+    const nextPair = pairOf(next.baseUrl, next.model);
+    activeProviderRef.current = next;
+    if (currentPair !== nextPair || (typeof patch.apiKey === "string" && patch.apiKey !== "")) {
+      setKeychainOk(null);
+    }
+    opts.updateWs((workspace) => {
+      const updated = { ...workspace.provider, ...patch };
+      if (("baseUrl" in patch || "model" in patch) && !("apiKey" in patch)) updated.apiKey = "";
+      return { ...workspace, provider: updated };
+    });
+
+    if (currentPair !== nextPair) probeGenerationRef.current += 1;
+    if (typeof patch.apiKey !== "string") return;
+    const baseUrl = next.baseUrl;
+    const model = next.model;
+    const secret = patch.apiKey;
+    const pair = pairOf(baseUrl, model);
+    const validPair = !!baseUrl.trim() && !!model.trim();
+
+    if (!validPair) {
+      if (secret === "") {
+        markPairCleared(pair);
+        purgePairPersistence(baseUrl, model);
+      }
+      return;
+    }
+
+    const intent = nextIntent(baseUrl, model, secret);
+    probeGenerationRef.current += 1;
+    if (probeTimerRef.current) clearTimeout(probeTimerRef.current);
+    probeTimerRef.current = null;
+
+    if (secret === "") {
+      cancelPendingWrite(baseUrl, model);
+      markPairCleared(pair);
+      purgePairPersistence(baseUrl, model);
+      runCredentialWrite(intent);
+      return;
+    }
+
+    unmarkPairCleared(pair);
+    scheduleCredentialWrite(intent);
+  }
+
+  const draftProvider = opts.ws.provider;
   useEffect(() => {
     try {
       const all = loadDrafts();
-      const prev = all[windowLabel];
-      const keys: Record<string, string> = { ...(prev?.keys ?? {}) };
-      const pair = draftPairKey(draftProvider.baseUrl, draftProvider.model);
-      if (draftProvider.apiKey) {
-        keys[pair] = draftProvider.apiKey;
-      } else if (isPairCleared(pair)) {
+      const previous = all[windowLabel];
+      const pair = pairOf(draftProvider.baseUrl, draftProvider.model);
+      const previousPair = previous ? pairOf(previous.baseUrl, previous.model) : "";
+      const keys = { ...(previous?.keys ?? {}) };
+      let persistedKey = previousPair === pair ? previous.apiKey : (keys[pair] ?? "");
+
+      if (isPairCleared(pair)) {
         delete keys[pair];
+        persistedKey = "";
+      } else if (keychainOk === false) {
+        if (draftProvider.apiKey) {
+          keys[pair] = draftProvider.apiKey;
+          persistedKey = draftProvider.apiKey;
+        } else {
+          persistedKey = keys[pair] ?? "";
+        }
       }
+
       all[windowLabel] = {
         baseUrl: draftProvider.baseUrl,
         model: draftProvider.model,
         kind: draftProvider.kind ?? "auto",
-        // Keychain confirmed: never store the live key locally. Otherwise
-        // keep the field, falling back to this pair's backup (unless the
-        // user explicitly cleared it).
-        apiKey: keychainOk
-          ? ""
-          : draftProvider.apiKey || (!isPairCleared(pair) ? (keys[pair] ?? "") : ""),
+        apiKey: persistedKey,
         keys,
       };
       saveDrafts(all);
     } catch {
-      /* ignore */
+      return;
     }
   }, [draftProvider, keychainOk]);
 
-// Resolve the apiKey from the OS keychain whenever this window's
-  // endpoint+model change (debounced). First success also migrates any
-  // plaintext history keys.
-  const baseUrl = ws.provider.baseUrl;
-  const model = ws.provider.model;
+  const baseUrl = opts.ws.provider.baseUrl;
+  const model = opts.ws.provider.model;
   useEffect(() => {
     if (!baseUrl.trim() || !model.trim()) return;
-    // Record this request to prevent race conditions from rapid switches
-    latestRequest.current = `${baseUrl}|${model}`;
-
-    const t = setTimeout(async () => {
-      // Only proceed if this request is still the latest
-      if (latestRequest.current !== `${baseUrl}|${model}`) return;
-
-      try {
-        const k = await keyGet(baseUrl, model);
-        setKeychainOk(true);
-        if (k) {
-          opts.updateWs((w) => (w.provider.apiKey === k ? w : { ...w, provider: { ...w.provider, apiKey: k } }));
-        }
-        if (!keychainMigrated.current) {
-          keychainMigrated.current = true;
-          for (const h of loadHist()) {
-            if (h.apiKey) {
-              try {
-                await keySet(h.baseUrl, h.model, h.apiKey);
-              } catch {
-                /* keep going */
-              }
-            }
+    const pair = pairOf(baseUrl, model);
+    const generation = ++probeGenerationRef.current;
+    const timer = setTimeout(() => {
+      probeTimerRef.current = null;
+      void enqueueCredentialRef.current(async () => {
+        if (!mountedRef.current || probeGenerationRef.current !== generation) return undefined;
+        return keyGet(baseUrl, model);
+      })
+        .then((key) => {
+          if (
+            !mountedRef.current ||
+            probeGenerationRef.current !== generation ||
+            pairOf(activeProviderRef.current.baseUrl, activeProviderRef.current.model) !== pair
+          ) {
+            return;
           }
-          // Strip plaintext keys from history now that they're migrated.
-          setProvHist((h) => {
-            const next = h.map((e) => ({ ...e, apiKey: "" }));
-            saveHist(next);
-            return next;
-          });
-        }
-      } catch {
-        setKeychainOk(false);
-        // No keychain: restore this pair's locally-drafted key, if any.
-        // Only restore if this is still the latest request
-        if (latestRequest.current === `${baseUrl}|${model}`) {
-          try {
-            const k = lookupDraftKey(loadDrafts(), windowLabel, baseUrl, model);
-            if (k) {
-              opts.updateWs((w) =>
-                w.provider.baseUrl === baseUrl && w.provider.model === model && !w.provider.apiKey
-                  ? { ...w, provider: { ...w.provider, apiKey: k } }
-                  : w,
-              );
-            }
-          } catch {
-            /* ignore */
+          setKeychainOk(true);
+          if (key && !isPairCleared(pair)) {
+            updateWsRef.current((workspace) =>
+              workspace.provider.baseUrl === baseUrl &&
+              workspace.provider.model === model &&
+              workspace.provider.apiKey !== key
+                ? { ...workspace, provider: { ...workspace.provider, apiKey: key } }
+                : workspace,
+            );
           }
-        }
-      }
-    }, 500);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- debounced endpoint probe: deps intentionally limited to baseUrl/model so typing other fields doesn't refire discovery
+          void migrateCredentialsRef.current();
+        })
+        .catch(() => {
+          if (
+            !mountedRef.current ||
+            probeGenerationRef.current !== generation ||
+            pairOf(activeProviderRef.current.baseUrl, activeProviderRef.current.model) !== pair
+          ) {
+            return;
+          }
+          applyFallbackRef.current(baseUrl, model);
+        });
+    }, PROBE_DEBOUNCE_MS);
+    probeTimerRef.current = timer;
+    return () => {
+      clearTimeout(timer);
+      if (probeTimerRef.current === timer) probeTimerRef.current = null;
+      if (probeGenerationRef.current === generation) probeGenerationRef.current += 1;
+    };
   }, [baseUrl, model]);
 
-  // "Correct" = the provider answered without throwing. Most-recent first.
-  // Working keys are mirrored to the OS keychain; localStorage keeps them
-  // only while no keychain is available.
-  function rememberProvider(used: ProviderConfig) {
+  function rememberProvider(used: ProviderConfig): void {
     if (!used.baseUrl.trim() || !used.model.trim()) return;
-    const pair = draftPairKey(used.baseUrl, used.model);
+    const pair = pairOf(used.baseUrl, used.model);
     if (!used.apiKey) {
-      // Empty key at turn end is ambiguous: user-cleared (propagate the
-      // deletion, recorded as intent by setEditCfg) vs a stale copy from an
-      // endpoint switch whose refill is still pending (touch NOTHING - a
-      // blind mirror would delete the good key still in the keychain and
-      // wipe the keyed history entry with it).
-      if (isPairCleared(pair)) {
-        unmarkPairCleared(pair);
-        keySet(used.baseUrl, used.model, "")
-          .then(() => setKeychainOk(true))
-          .catch(() => setKeychainOk(false));
-        setProvHist((h) => saveHist(stripHistoryKey(h, used.baseUrl, used.model, used.kind)));
+      if (intentsRef.current.get(pair)?.secret === "") unmarkPairCleared(pair);
+      return;
+    }
+
+    const entry: ProviderEntry = {
+      baseUrl: used.baseUrl,
+      model: used.model,
+      apiKey: "",
+      kind: used.kind ?? "auto",
+    };
+    commitHist([
+      entry,
+      ...histRef.current.filter(
+        (candidate) =>
+          !(
+            candidate.baseUrl === used.baseUrl &&
+            candidate.model === used.model &&
+            (candidate.kind ?? "auto") === (used.kind ?? "auto")
+          ),
+      ),
+    ]);
+
+    const currentIntent = intentsRef.current.get(pair);
+    if (currentIntent) {
+      if (currentIntent.secret === used.apiKey) {
+        const pending = pendingWritesRef.current.get(pair);
+        if (pending?.intent.version === currentIntent.version) {
+          cancelPendingWrite(used.baseUrl, used.model);
+          runCredentialWrite(currentIntent);
+        }
       }
       return;
     }
-    unmarkPairCleared(pair);
-    keySet(used.baseUrl, used.model, used.apiKey)
-      .then(() => setKeychainOk(true))
-      .catch(() => setKeychainOk(false));
-    const keepLocal = !keychainOk;
-    setProvHist((h) =>
-      saveHist([
-        {
-          baseUrl: used.baseUrl,
-          model: used.model,
-          apiKey: keepLocal ? used.apiKey : "",
-          kind: used.kind ?? "auto",
-        },
-        ...h.filter(
-          (e) =>
-            !(
-              e.baseUrl === used.baseUrl &&
-              e.model === used.model &&
-              (e.kind ?? "auto") === (used.kind ?? "auto")
-            ),
-        ),
-      ]),
-    );
+
+    const intent = nextIntent(used.baseUrl, used.model, used.apiKey);
+    runCredentialWrite(intent);
   }
 
-  // Ask the endpoint what models it actually serves - no more guessing names.
-  async function refreshModels() {
+  async function refreshModels(): Promise<void> {
     setModelsNote("loading…");
     try {
       const ids = await listModels(editCfg);
       setProvModels(ids);
       setModelsNote(ids.length ? `${ids.length} model${ids.length === 1 ? "" : "s"} found - pick from the model ▾` : "no models listed - check baseUrl");
-    } catch (e) {
-      setModelsNote(`models failed: ${e}`);
+    } catch (error) {
+      setModelsNote(`models failed: ${error}`);
     }
   }
 

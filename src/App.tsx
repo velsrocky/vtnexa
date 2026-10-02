@@ -21,7 +21,9 @@ import ProviderBar from "./components/ProviderBar";
 import WorkspaceBar from "./components/WorkspaceBar";
 import SessionBar from "./components/SessionBar";
 import { invoke } from "@tauri-apps/api/core";
-import { baseName, didExhaustBudget } from "./lib/utils";
+import { didExhaustBudget } from "./lib/utils";
+import { routineCanAutoRun } from "./lib/routineTrust";
+import { basenamePath } from "./lib/path";
 import { useGit } from "./hooks/useGit";
 import { useWorkspaceState, windowLabel, ptyId } from "./hooks/useWorkspaceState";
 import { useAgentTurn } from "./hooks/useAgentTurn";
@@ -40,6 +42,7 @@ import { useMcp } from "./hooks/useMcp";
 import { useAutoApprove } from "./hooks/useAutoApprove";
 import { useSandboxStatus } from "./hooks/useSandboxStatus";
 import { AppContextProvider, type AppContextValue } from "./context/AppContext";
+import FirstRunView from "./components/FirstRunView";
 
 // One OS window = one independent VTNexa instance. Multiple windows are
 // siblings: separate workspace roots (enforced per-label in the Rust
@@ -54,8 +57,12 @@ export default function App() {
   const {
     ws,
     setWs,
-    busy,
-    setBusy,
+    agentOperation,
+    agentActive,
+    agentActiveRef,
+    startAgentTurn,
+    finishAgentTurn,
+    workspaceGenerationRef,
     turnAbort,
     stopTurnIdRef,
     streamRaf,
@@ -176,6 +183,29 @@ export default function App() {
   });
 
   const {
+    sessions,
+    currentId: sessionId,
+    currentTitle: sessionTitle,
+    sessionsReady,
+    sessionEpochRef,
+    refreshSessions,
+    persistCurrent: saveSessionNow,
+    retrySave: retrySessionSave,
+    newSession,
+    resumeSession,
+    removeSession,
+    bootFresh,
+    operation: sessionOperation,
+    listOperation: sessionListOperation,
+  } = useSessions({
+    ws,
+    workspaceRoot,
+    setWs,
+    setCwdState,
+    setOpenPath,
+  });
+
+  const {
     creating,
     setCreating,
     renaming,
@@ -183,6 +213,7 @@ export default function App() {
     createEntry,
     doRename,
     doDelete,
+    operation: fileOperation,
   } = useFiles({
     cwd,
     workspaceRoot,
@@ -192,13 +223,16 @@ export default function App() {
     retargetTabs,
     dropTabsUnder,
     pushUndo,
+    workspaceGenerationRef,
+    sessionEpochRef,
   });
 
-  const { shellCmd, onShellCmdChange, runShell } = useShell({
+  const { shellCmd, onShellCmdChange, runShell, operation: shellOperation } = useShell({
     ws,
     cwd,
-    setBusy,
     updateWs,
+    workspaceGenerationRef,
+    sessionEpochRef,
   });
 
   // Chat autoscroll: stick to bottom on new/streamed messages, unless the
@@ -247,14 +281,18 @@ export default function App() {
     repoMap,
     gitSnapshot,
     openPath,
-    busy,
+    agentActive,
+    agentActiveRef,
+    startAgentTurn,
+    finishAgentTurn,
+    workspaceGenerationRef,
+    sessionEpochRef,
     turnAbort,
     stopTurnIdRef,
     streamRaf,
     stickBottom,
     lastSynced,
     updateWs,
-    setBusy,
     logAudit,
     rememberProvider,
     setCenterTab,
@@ -270,29 +308,11 @@ export default function App() {
   });
 
   const {
-    sessions,
-    currentId: sessionId,
-    currentTitle: sessionTitle,
-    sessionsReady,
-    refreshSessions,
-    persistCurrent: saveSessionNow,
-    newSession,
-    resumeSession,
-    removeSession,
-    bootFresh,
-  } = useSessions({
-    ws,
-    workspaceRoot,
-    setWs,
-    setCwdState,
-    setOpenPath,
-    note: (text) => updateWs((w) => ({ ...w, shellOut: w.shellOut + text })),
-  });
+     routines,
+     persistRoutines,
+     setRoutineEnabled,
+     loadRoutines,
 
-  const {
-    routines,
-    persistRoutines,
-    loadRoutines,
     addRoutine,
     runRoutine,
     routinesReady,
@@ -300,7 +320,8 @@ export default function App() {
     setShowRoutines,
     newRoutine,
     setNewRoutine,
-  } = useRoutines({ busy, runAgentTurn });
+    operation: routineOperation,
+  } = useRoutines({ agentActive, workspaceRoot, windowLabel, runAgentTurn });
 
   const {
     mcpOn,
@@ -319,7 +340,16 @@ export default function App() {
     setShowMcp,
   } = useMcp({ workspaceRoot });
 
-  const { changeWorkspace, browseWorkspace } = useInit({
+  const {
+    phase: lifecyclePhase,
+    error: lifecycleError,
+    details: lifecycleDetails,
+    operation: workspaceOperation,
+    retry: retryWorkspace,
+    checkProvider,
+    changeWorkspace,
+    browseWorkspace,
+  } = useInit({
     workspaceRoot,
     wsCommitted,
     nexaReady,
@@ -329,13 +359,16 @@ export default function App() {
     setCwdState,
     setWs,
     setOpenPath,
-    updateWs,
     saveSessionNow,
     bootFresh,
     loadNexa,
     loadRoutines,
     refreshSkills,
     loadConventions,
+    provider: editCfg,
+    sessionOperation,
+    agentActiveRef,
+    workspaceGenerationRef,
   });
 
   useEffect(() => {
@@ -348,7 +381,7 @@ export default function App() {
     if (!stickBottom.current) return;
     const raf = requestAnimationFrame(() => scrollMsgsToBottom());
     return () => cancelAnimationFrame(raf);
-  }, [ws.messages, sideTab, busy, scrollMsgsToBottom]);
+  }, [ws.messages, sideTab, agentActive, scrollMsgsToBottom]);
 
   // Git tab: refresh status when opened or when the cwd changes.
   useEffect(() => {
@@ -358,7 +391,7 @@ export default function App() {
   }, [centerTab, ws.cwd]);
 
   async function sendChat() {
-    if (!input.trim() || busy) return;
+    if (!input.trim() || agentActive || workspaceOperation.status === "pending") return;
     const text = input;
     setInput("");
     // Local commands: undo/redo the last captured file op, no agent turn.
@@ -378,7 +411,7 @@ export default function App() {
   // history (which already holds every tool result). Transparent user
   // message, not hidden state.
   function continueTurn() {
-    if (busy) return;
+    if (agentActive || workspaceOperation.status === "pending") return;
     runAgentTurn(
       "▶ Continue the task from the tool results above. Do not repeat completed steps; pick up exactly where you stopped. If you are done, say what was accomplished instead of calling more tools.",
     );
@@ -401,13 +434,13 @@ export default function App() {
   // per tick - backpressure for local models). Also catches overdue runs
   // shortly after startup.
   useEffect(() => {
-    if (!routinesReady.current || !workspaceRoot) return;
+    if (!routinesReady.current || !workspaceRoot || workspaceOperation.status === "pending") return;
     const tick = () => {
       const now = Date.now();
       const due = routines
-        .filter((r) => r.enabled && r.everyMs > 0 && (r.nextRun ?? 0) <= now)
+        .filter((r) => routineCanAutoRun(r, r.trusted === true, now))
         .sort((a, b) => (a.nextRun ?? 0) - (b.nextRun ?? 0))[0];
-      if (due) runRoutine(due);
+      if (due) void runRoutine(due, { automatic: true });
     };
     const interval = setInterval(tick, 30_000);
     const once = setTimeout(tick, 10_000);
@@ -416,7 +449,7 @@ export default function App() {
       clearTimeout(once);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- runRoutine is render-scoped; re-subscribing the 30s interval on every render would reset the timer and starve routines
-  }, [routines, busy, workspaceRoot, padText, planText, memoryText]);
+  }, [routines, agentActive, workspaceRoot, workspaceOperation, padText, planText, memoryText]);
 
   // Bar slices for AppContext (phase 1 of the prop-drilling cleanup): the
   // same values previously threaded as ~30 individual props. Memoized so the
@@ -424,9 +457,10 @@ export default function App() {
   const barCtx: AppContextValue = useMemo(
     () => ({
       top: {
-        workspaceLabel: baseName(workspaceRoot),
+        workspaceLabel: basenamePath(workspaceRoot),
         windowLabel,
-        scheduledCount: routines.filter((r) => r.enabled && r.everyMs > 0).length,
+          scheduledCount: routines.filter((r) => r.trusted === true && r.enabled && r.everyMs > 0).length,
+
         mcpOn,
         mcpTools,
         sandboxOk,
@@ -454,16 +488,25 @@ export default function App() {
         browseWorkspace,
         cwd,
         setCwd,
+        operation: workspaceOperation,
+        sessionOperation,
+        agentActive,
+        blockedReason: "Workspace changes pause while Commander is working.",
       },
       session: {
         sessions,
         currentId: sessionId,
         currentTitle: sessionTitle,
-        busy,
+         operation: sessionOperation,
+         listOperation: sessionListOperation,
+         workspaceOperation,
+         agentActive,
+        conflictReason: "Session actions remain available; active turn output stays with its original session.",
         onNew: () => void newSession(),
         onResume: (id) => void resumeSession(id),
         onDelete: (id) => void removeSession(id),
         onRefresh: () => void refreshSessions(),
+        onRetrySave: () => void retrySessionSave(),
       },
     }),
     // useState setters (setShowMcp, setShowRoutines, setThemeId) are stable.
@@ -491,31 +534,56 @@ export default function App() {
       sessions,
       sessionId,
       sessionTitle,
-      busy,
+      sessionOperation,
+      sessionListOperation,
+      agentActive,
+      workspaceOperation,
       newSession,
       resumeSession,
       removeSession,
       refreshSessions,
+      retrySessionSave,
     ],
   );
 
+  if (lifecyclePhase !== "ready") {
+    return (
+      <FirstRunView
+        phase={lifecyclePhase}
+        workspaceRoot={workspaceRoot}
+        error={lifecycleError}
+        details={lifecycleDetails}
+        operation={workspaceOperation}
+        provider={editCfg}
+        onOpenFolder={browseWorkspace}
+        onRetry={retryWorkspace}
+        onChangePath={changeWorkspace}
+        onProviderChange={setEditCfg}
+        onCheckProvider={checkProvider}
+      />
+    );
+  }
+
   return (
-    <div className="shell">
+    <div className="shell" data-testid="workbench">
       {showRoutines && (
-        <Suspense fallback={<div className="settings-modal">Loading…</div>}>
+        <Suspense fallback={<div className="dialog-loading" role="status">Loading…</div>}>
           <RoutinesModal
-            routines={routines}
-            newRoutine={newRoutine}
-            setNewRoutine={setNewRoutine}
-            persistRoutines={persistRoutines}
-            addRoutine={addRoutine}
-            runRoutine={runRoutine}
-            onClose={() => setShowRoutines(false)}
+             routines={routines}
+             newRoutine={newRoutine}
+             setNewRoutine={setNewRoutine}
+              persistRoutines={persistRoutines}
+              setRoutineEnabled={setRoutineEnabled}
+              addRoutine={addRoutine}
+
+             runRoutine={runRoutine}
+             operation={routineOperation}
+             onClose={() => setShowRoutines(false)}
           />
         </Suspense>
       )}
       {showMcp && (
-        <Suspense fallback={<div className="settings-modal">Loading…</div>}>
+        <Suspense fallback={<div className="dialog-loading" role="status">Loading…</div>}>
           <McpModal
             mcpOn={mcpOn}
             setMcpOn={(on) => void setMcpOn(on)}
@@ -534,7 +602,7 @@ export default function App() {
         </Suspense>
       )}
       {showSettings && (
-        <Suspense fallback={<div className="settings-modal">Loading…</div>}>
+        <Suspense fallback={<div className="dialog-loading" role="status">Loading…</div>}>
           <SettingsModal
             onClose={() => setShowSettings(false)}
             autoApproveWorkspace={autoApproveWorkspace}
@@ -565,20 +633,24 @@ export default function App() {
           setCwd={setCwd}
           openFile={openFile}
           createEntry={createEntry}
-          doRename={doRename}
-          doDelete={doDelete}
-          createSkill={createSkill}
-          setInput={setInput}
-          setSideTab={setSideTab}
-        />
+           doRename={doRename}
+           doDelete={doDelete}
+           createSkill={createSkill}
+           setInput={setInput}
+           setSideTab={setSideTab}
+           operation={fileOperation}
+           workspaceOperation={workspaceOperation}
+           agentActive={agentActive}
+         />
         <div className="resizer" onMouseDown={onResizerDown("left")} title="Drag to resize panels" />
 
-        <Suspense fallback={<div className="editor-pane">Loading editor…</div>}>
-          <EditorPane
-          ws={ws}
-          ptyId={ptyId}
-          busy={busy}
-          openPath={openPath}
+         <Suspense fallback={<div className="editor-pane">Loading editor…</div>}>
+           <EditorPane
+             ws={ws}
+             ptyId={ptyId}
+             shellOperation={shellOperation}
+             workspaceOperation={workspaceOperation}
+             openPath={openPath}
           tabs={tabs}
           buffers={buffers}
           originals={originals}
@@ -636,8 +708,10 @@ export default function App() {
 
         <ChatPane
           ws={ws}
-          busy={busy}
-          sideTab={sideTab}
+           agentActive={agentActive}
+           agentOperation={agentOperation}
+           workspaceOperation={workspaceOperation}
+           sideTab={sideTab}
           setSideTab={setSideTab}
           width={rightW}
           skills={skills}

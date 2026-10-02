@@ -2,6 +2,7 @@ import { memo } from "react";
 import type { SessionMeta } from "../lib/tauri";
 import { useSessionBar } from "../context/AppContext";
 import { useConfirm } from "../context/ConfirmContext";
+import OperationStatus from "./OperationStatus";
 
 function fmtAge(ts: number): string {
   if (!ts || !isFinite(ts)) return "";
@@ -31,18 +32,31 @@ export function SessionBarInner() {
     sessions,
     currentId,
     currentTitle,
-    busy,
+    operation,
+    listOperation,
+    workspaceOperation,
+    agentActive = false,
+    conflictReason = "Session actions remain available; active turn output stays with its original session.",
     onNew,
     onResume,
     onDelete,
     onRefresh,
+    onRetrySave,
   } = useSessionBar();
   const confirm = useConfirm();
   const others = sessions.filter((s) => s.id !== currentId);
+  const pending = operation?.status === "pending";
+  const workspacePending = workspaceOperation?.status === "pending";
+  const listPending = listOperation?.status === "pending";
+  const actionBlocked = pending || workspacePending;
   return (
     <div className="configbar">
       <span className="muted small">session</span>
-      <button onClick={onNew} disabled={busy} title="Start a fresh session (current auto-saves first)">
+      <button
+        onClick={onNew}
+        disabled={actionBlocked}
+        title={workspacePending ? "Waiting for the workspace change to finish." : "Start a fresh session (current auto-saves first)"}
+      >
         + New
       </button>
       <select
@@ -50,9 +64,10 @@ export function SessionBarInner() {
         onChange={(e) => {
           if (e.target.value && e.target.value !== currentId) void onResume(e.target.value);
         }}
-        disabled={busy}
-        title="Resume a previous session in this folder"
+        disabled={actionBlocked}
+        title={workspacePending ? "Waiting for the workspace change to finish." : "Resume a previous session in this folder"}
         className="grow"
+        aria-label="Session"
       >
         <option value={currentId}>{currentTitle} (current)</option>
         {others.map((s) => (
@@ -63,20 +78,28 @@ export function SessionBarInner() {
       </select>
       <button
         onClick={async () => {
-          if (await confirm(`Delete session "${currentTitle}"? This cannot be undone.`))
-            void onDelete(currentId);
+          if (await confirm(`Delete session "${currentTitle}"? This cannot be undone.`)) void onDelete(currentId);
         }}
-        disabled={busy || !currentId}
-        title="Delete the current session file and start fresh"
+        disabled={actionBlocked || !currentId}
+        title={workspacePending ? "Waiting for the workspace change to finish." : "Delete the current session file and start fresh"}
       >
         Delete
       </button>
-      <button onClick={() => void onRefresh()} title="Refresh session list">
+      <button onClick={() => void onRefresh()} disabled={listPending} title="Refresh session list">
         ↻
       </button>
       <span className="muted small" title="Sessions stored in <workspace>/.nexa/sessions/">
         {sessions.length} saved
       </span>
+      {workspacePending && <span className="muted small" role="status">Waiting for the workspace change to finish.</span>}
+      {agentActive && <span className="muted small" role="status">{conflictReason}</span>}
+      <OperationStatus state={operation} />
+      <OperationStatus state={listOperation} />
+      {operation?.status === "error" && onRetrySave && (
+        <button onClick={() => void onRetrySave()} title="Retry saving this session">
+          Retry save
+        </button>
+      )}
     </div>
   );
 }

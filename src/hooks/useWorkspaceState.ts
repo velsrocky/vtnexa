@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { AuditInput, Workspace } from "../types";
+import type { AuditInput, OperationState, Workspace } from "../types";
 import { newWorkspace, uid } from "../lib/utils";
 import { loadLastUsed } from "../lib/providerHistory";
 
@@ -18,21 +18,17 @@ export const windowLabel = (() => {
 export const wsId = `${windowLabel}:ws`;
 export const ptyId = `${windowLabel}:pty`;
 
-// One window = one independent app instance. This hook owns that window's
-// single workspace state, its busy flag, in-flight turn, and stream
-// coalescing. Approvals are native OS dialogs (see lib/approval) — there is
-// no page-DOM approval queue. No lanes - other windows are separate processes
-// of the same app with their own state.
 export function useWorkspaceState() {
   const [ws, setWs] = useState<Workspace>(() => newWorkspace(wsId, "", loadLastUsed()));
-  const [busy, setBusy] = useState(false);
+  const [agentOperation, setAgentOperation] = useState<OperationState>({ status: "idle" });
+  const agentActiveRef = useRef(false);
+  const agentSequenceRef = useRef(0);
+  const activeAgentSequenceRef = useRef<number | null>(null);
+  const workspaceGenerationRef = useRef(0);
   const turnAbort = useRef<AbortController | null>(null);
   const streamRaf = useRef<number | null>(null);
   const stopTurnIdRef = useRef<string>("");
 
-  // Stable identities: memoized children and context slices below can rely
-  // on these never changing, so stream-token setWs calls don't cascade into
-  // unrelated panes. (setWs/setBusy from useState are already stable.)
   const updateWs = useCallback((fn: (w: Workspace) => Workspace) => {
     setWs((w) => fn(w));
   }, []);
@@ -47,11 +43,21 @@ export function useWorkspaceState() {
     [updateWs],
   );
 
-  // Stop the running turn: abort the provider request. A native approval
-  // dialog already on screen is answered by the user (or dismissed) — there
-  // is no page-DOM queue to release. Side effects already applied are undone
-  // via /undo, never automatically.
-  // Returns true if a turn was stopped, false otherwise.
+  const startAgentTurn = useCallback(() => {
+    const sequence = ++agentSequenceRef.current;
+    activeAgentSequenceRef.current = sequence;
+    agentActiveRef.current = true;
+    setAgentOperation({ status: "pending", message: "Commander is working…" });
+    return sequence;
+  }, []);
+
+  const finishAgentTurn = useCallback((sequence: number, status: "success" | "error", message: string) => {
+    if (activeAgentSequenceRef.current !== sequence) return;
+    activeAgentSequenceRef.current = null;
+    agentActiveRef.current = false;
+    setAgentOperation({ status, message });
+  }, []);
+
   const stopTurn = useCallback((id: string) => {
     if (stopTurnIdRef.current && stopTurnIdRef.current !== id) return false;
     turnAbort.current?.abort();
@@ -70,8 +76,12 @@ export function useWorkspaceState() {
   return {
     ws,
     setWs,
-    busy,
-    setBusy,
+    agentOperation,
+    agentActive: agentOperation.status === "pending",
+    agentActiveRef,
+    startAgentTurn,
+    finishAgentTurn,
+    workspaceGenerationRef,
     turnAbort,
     stopTurnIdRef,
     streamRaf,

@@ -6,7 +6,7 @@ reports, and small PRs are especially valuable right now.
 ## Dev setup
 
 ```sh
-# prereqs: Node 20+, pnpm, Rust (stable), Tauri v2 system deps
+# prereqs: Node 24.18.0, pnpm, Rust (stable), Tauri v2 system deps
 # Debian/Ubuntu: sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev \
 #   libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev patchelf
 pnpm install

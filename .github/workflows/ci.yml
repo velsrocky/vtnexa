@@ -20,7 +20,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.18.0
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -33,6 +33,13 @@ jobs:
 
       - name: Unit tests + coverage ratchet
         run: pnpm exec vitest run --coverage
+
+      - name: Node runtime, sidecar, and release tests
+        run: |
+          pnpm --dir sidecar/browser install --prod --ignore-scripts
+          pnpm test:provision
+          pnpm test:sidecar
+          pnpm test:node
 
       - name: E2E (chromium against the web build)
         run: |
@@ -62,26 +69,94 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # The tauri build-script validates bundle resource paths exist
-      # (sidecar-stage/ and ../dist are gitignored build outputs); clippy and
-      # test never bundle, so empty stubs suffice (release stages the real
-      # sidecar and builds dist via beforeBuildCommand).
       - name: Stub gitignored bundle resource paths
         run: mkdir -p dist src-tauri/sidecar-stage/browser
 
       - name: rustfmt check
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 
       - name: Clippy (warnings are errors)
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
 
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+  tauri-smoke:
+    name: Real-backend Linux Tauri WebDriver smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Tauri + WebDriver system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            xvfb
+          # The WebDriver package was renamed in Ubuntu 26.04.
+          sudo apt-get install -y webkit2gtk-driver || sudo apt-get install -y webkitgtk-webdriver
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install tauri-driver 2.0.6
+        run: cargo install tauri-driver --version 2.0.6 --locked --force
+
+      - name: Stage the browser sidecar (required by bundle.resources)
+        run: |
+          pnpm --dir sidecar/browser install --prod --ignore-scripts
+          pnpm run stage-sidecar
+
+      - name: Build the real Tauri app (frontend embedded)
+        run: pnpm exec tauri build --debug --no-bundle
+
+      - name: Drive the built WebKitGTK app with tauri-driver
+        run: scripts/tauri-smoke.sh --require --app "$PWD/src-tauri/target/debug/vtnexa"
+
+  release-preflight:
+    name: Release version and signing preflight
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [frontend, backend, tauri-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Require exact tag and release signing material
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: node scripts/release-preflight.mjs --tag "$GITHUB_REF_NAME"
 
   release:
-    name: Build & release (tags only)
+    name: Build draft release (tags only)
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [frontend, backend]
+    needs: [frontend, backend, release-preflight]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -107,43 +182,96 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 24.18.0
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
 
-      # tauri-action runs the CLI directly, so npm's pre-hooks never fire —
-      # the gitignored sidecar staging has to be built explicitly.
-      - name: Stage browser sidecar
+      - name: Stage and test the browser sidecar
+        shell: bash
         run: |
+          set -euo pipefail
           cd sidecar/browser
           pnpm install --prod --ignore-scripts
           cd ../..
+          pnpm test:provision
+          pnpm test:sidecar
+          pnpm test:node
           pnpm run stage-sidecar
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Signing is opt-in: tauri-action treats a SET-but-empty APPLE_CERTIFICATE
-      # as "sign me" and dies importing nothing, so only non-empty secrets are
-      # exported. While unset the release ships unsigned (SmartScreen /
-      # Gatekeeper warn; see docs/RELEASE.md "Signing & updater"). When the
-      # updater private key IS set, also add `createUpdaterArtifacts: "true"`
-      # below after enabling the updater plugin in tauri.conf.json.
-      - name: Export signing credentials when configured
+      - name: Import Windows code-signing certificate
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfxPath = Join-Path $env:RUNNER_TEMP "vtnexa-signing.pfx"
+          try {
+            $encoded = $env:WINDOWS_CERTIFICATE -replace '\s', ''
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($encoded))
+            $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificates = @(Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password | Where-Object { $_.HasPrivateKey })
+            $cert = $certificates | Where-Object { $_.EnhancedKeyUsageList | ForEach-Object { $_.ObjectId.Value } | Where-Object { $_ -eq "1.3.6.1.5.5.7.3.3" } } | Select-Object -First 1
+            if ($null -eq $cert) { throw "PFX did not contain a code-signing certificate with a private key" }
+            $thumbprint = $cert.Thumbprint
+            if ([string]::IsNullOrWhiteSpace($thumbprint)) { throw "PFX certificate thumbprint is empty" }
+            "WINDOWS_CERTIFICATE_THUMBPRINT=$thumbprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } finally {
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Locate the Windows signing tool
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $command = Get-Command signtool.exe -ErrorAction SilentlyContinue
+          $path = if ($null -ne $command) { $command.Source } else { $null }
+          if ($null -eq $path) {
+            $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            foreach ($root in $roots) {
+              $kitRoot = Join-Path $root "Windows Kits\10\bin"
+              if (Test-Path -LiteralPath $kitRoot) {
+                $candidate = Get-ChildItem -LiteralPath $kitRoot -Filter "signtool.exe" -File -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+                if ($null -ne $candidate) { $path = $candidate.FullName; break }
+              }
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($path)) { throw "signtool.exe was not found" }
+          "SIGNTOOL_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TAURI_WINDOWS_SIGNTOOL_PATH=$path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Export updater signing credentials
+        shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -e
+          for v in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            val="${!v}"
+            if [ -n "$val" ]; then
+              printf '%s<<GITHUB_ENV_EOF\n%s\nGITHUB_ENV_EOF\n' "$v" "$val" >> "$GITHUB_ENV"
+            fi
+          done
+
+      - name: Export optional macOS signing credentials
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        # NOTE: default step shell is PowerShell on windows-latest; force bash
-        # (values like private keys are multiline - heredoc keeps them intact).
-        shell: bash
         run: |
-          for v in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          set -e
+          for v in APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             val="${!v}"
             if [ -n "$val" ]; then
               printf '%s<<GITHUB_ENV_EOF\n%s\nGITHUB_ENV_EOF\n' "$v" "$val" >> "$GITHUB_ENV"
@@ -153,10 +281,85 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         with:
-          tagName: v__VERSION__
-          releaseName: "VTNexa v__VERSION__"
+          tagName: ${{ github.ref_name }}
+          releaseName: "VTNexa ${{ github.ref_name }}"
           releaseBody: "See the changelog for what shipped."
           releaseDraft: true
           prerelease: false
+          uploadUpdaterJson: true
           createUpdaterArtifacts: "true"
+          uploadUpdaterSignatures: true
+
+  release-verify:
+    name: Verify signed draft and publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [release]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.18.0
+
+      - name: Download the unpublished draft assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $release = gh release view "$env:GITHUB_REF_NAME" --json isDraft,assets | ConvertFrom-Json
+          if (-not $release.isDraft) { throw "release is not a draft" }
+          $directory = Join-Path $env:RUNNER_TEMP "vtnexa-release-assets"
+          New-Item -ItemType Directory -Force -Path $directory | Out-Null
+          $assetMapPath = Join-Path $env:RUNNER_TEMP "vtnexa-release-asset-map.json"
+          $assetMap = @{}
+          foreach ($asset in $release.assets) { $assetMap[[string]$asset.id] = [string]$asset.name }
+          $assetMap | ConvertTo-Json -Compress | Set-Content -LiteralPath $assetMapPath -Encoding utf8NoBOM
+          gh release download "$env:GITHUB_REF_NAME" --repo "$env:GITHUB_REPOSITORY" --dir $directory --clobber
+          "RELEASE_DOWNLOAD_DIR=$directory" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RELEASE_ASSET_MAP=$assetMapPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify updater manifest and artifact set
+        shell: pwsh
+        run: node scripts/verify-release.mjs --directory "$env:RELEASE_DOWNLOAD_DIR" --tag "$env:GITHUB_REF_NAME" --asset-map "$env:RELEASE_ASSET_MAP" --repository "$env:GITHUB_REPOSITORY"
+
+      - name: Import the expected Windows certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pfxPath = Join-Path $env:RUNNER_TEMP "vtnexa-verify.pfx"
+          try {
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String(($env:WINDOWS_CERTIFICATE -replace '\s', '')))
+            $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $certificates = @(Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password | Where-Object { $_.HasPrivateKey })
+            $cert = $certificates | Where-Object { $_.EnhancedKeyUsageList | ForEach-Object { $_.ObjectId.Value } | Where-Object { $_ -eq "1.3.6.1.5.5.7.3.3" } } | Select-Object -First 1
+            if ($null -eq $cert) { throw "expected code-signing certificate was not imported" }
+            "WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } finally {
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Verify Windows Authenticode and trusted timestamps
+        shell: pwsh
+        env:
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          & pwsh -NoLogo -NoProfile -NonInteractive -File scripts/verify-windows-signature.ps1 -Directory "$env:RELEASE_DOWNLOAD_DIR" -Thumbprint "$env:WINDOWS_CERTIFICATE_THUMBPRINT" -TimestampUrl "$env:WINDOWS_TIMESTAMP_URL"
+
+      - name: Publish only after verification
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $state = gh release view "$env:GITHUB_REF_NAME" --repo "$env:GITHUB_REPOSITORY" --json isDraft | ConvertFrom-Json
+          if (-not $state.isDraft) { throw "release stopped being a draft" }
+          gh release edit "$env:GITHUB_REF_NAME" --repo "$env:GITHUB_REPOSITORY" --draft=false

@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "commonjs",
+  "scripts": {
+    "test": "node --test runtime.test.js server.test.js"
+  },
   "dependencies": {
     "playwright-core": "^1.49.0"
   }

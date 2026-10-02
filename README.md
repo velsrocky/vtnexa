@@ -64,8 +64,10 @@ Most coding agents either (a) ask for permission on every keystroke or
 - **Browser Use** — persistent Chromium profile (signed in as you) the agent
   can operate with your approval; screenshots come back as vision input.
 - **MCP (early, opt-in)** — local-stdio and remote-HTTP MCP servers from
-  `vtnexa.json` (`~/.config/vtnexa/vtnexa.json` +
-  `<workspace>/.vtnexa/vtnexa.json`, see `.vtnexa/vtnexa.json.example`).
+  `vtnexa.json` (`$XDG_CONFIG_HOME/vtnexa/vtnexa.json` or the Unix home
+  config fallback, `%APPDATA%\VTNexa\vtnexa.json` on Windows, plus
+  `<workspace>/.vtnexa/vtnexa.json`; see
+  `.vtnexa/vtnexa.json.example`).
   Toggle + per-server status in the ⛁ panel; tools appear as
   `mcp_<server>_<tool>`, always require approval. Remote auth is static
   headers with `{env:...}` substitution (never commit tokens), or OAuth browser
@@ -93,12 +95,40 @@ Most coding agents either (a) ask for permission on every keystroke or
 **From source:**
 
 ```sh
-# prereqs: Node 20+/pnpm, Rust, and Tauri's system deps
+# prereqs: Node 24.18.0/pnpm, Rust, and Tauri's system deps
 # (Debian/Ubuntu: libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev)
 pnpm install
 pnpm tauri dev        # run from source
 pnpm tauri build      # produce .deb / AppImage
 ```
+
+### Browser Use runtime
+
+Browser Use is self-contained at build time. `pnpm run stage-sidecar` (also run by
+`pretauri` and the release workflow) provisions the pinned official Node
+`24.18.0` archive for the build host, verifies its published SHA-256, and stages
+only the executable, `node-license.txt`, `node-version.txt`, and
+`node-runtime.json` beside the Playwright sidecar. A packaged Windows build
+contains `sidecar-stage/browser/node.exe`; it does not require Node on `PATH`.
+The runtime archive is cached under `.cache/node-runtime` and is never committed.
+
+For an offline or reproducible CI build, set `VTAI_NODE_ARCHIVE` to a local
+copy of the exact archive for the host. The archive is still checked against
+the pin; a missing, mismatched, or unextractable archive fails staging rather
+than falling back to an unverified binary. `pnpm run provision-node` can be
+used to provision or verify the runtime independently.
+
+Browser Use requires a system Chromium browser. It checks
+`VTAI_BROWSER_CHROME` first, then standard Chrome, Edge, and Chromium
+locations, and finally Playwright's discoverable executable. Google Chrome,
+Microsoft Edge (including the built-in Windows Edge), and Chromium are
+supported. Set `VTAI_BROWSER_CHROME` to an executable when discovery cannot
+find one. The persistent profile is stored in the native application-data
+location: `%LOCALAPPDATA%/VTNexa/browser-profile` on Windows,
+`~/Library/Application Support/VTNexa/browser-profile` on macOS, and
+`$XDG_DATA_HOME/VTNexa/browser-profile` (or the home-directory equivalent) on
+Linux. The Browser pane shows missing prerequisites and a Recheck action before
+Start is enabled.
 
 **Model:** start Ollama (`ollama serve`, `ollama pull qwen2.5-coder:7b`) or
 paste any provider's baseUrl + key into the provider bar. Tip: pick a model
@@ -165,9 +195,20 @@ pnpm install
 pnpm dev
 
 # Full test suite
-pnpm test                        # ~285 Vitest tests + coverage
-pnpm e2e                         # Playwright E2E tests
-cargo test --manifest-path src-tauri/Cargo.toml --lib  # 56 Rust tests
+pnpm test                        # Vitest unit/component tests
+pnpm test:provision              # archive mapping, checksum, cache, staged-file tests
+pnpm test:sidecar                # browser resolution, status, body, masking tests
+pnpm e2e                         # Playwright E2E tests (mocked backend, UI logic)
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+# Real WebDriver smoke against the actual app (not the mock backend).
+# Linux needs a WebDriver package + display (Xvfb is auto-detected) and tauri-driver 2.0.6:
+#   cargo install tauri-driver --version 2.0.6 --locked
+#   sudo apt-get install xvfb webkit2gtk-driver   # webkitgtk-webdriver on Ubuntu 26.04+
+#   pnpm test:tauri-smoke-linux                    # builds the app, then drives it
+#   # or target an existing binary:
+#   scripts/tauri-smoke.sh --app "$PWD/src-tauri/target/debug/vtnexa" --require
+# Windows: pnpm test:tauri-smoke --app <path-to-vtnexa.exe>
 
 # Build
 pnpm build                       # tsc + vite

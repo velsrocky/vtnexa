@@ -1,68 +1,41 @@
 # Release checklist
 
-Pre-1.0: tag `v0.x.y` from `main`; CI must be green on the tag.
+Public releases are fail-closed. A tag never publishes an unsigned release.
 
-1. **Version bump** — edit `version` in `package.json` and
-   `src-tauri/Cargo.toml` (keep them in sync; the binary reads Cargo's).
-2. **Clean tree + green bar**
+1. **Version the three manifests together.** Set the same version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. The pushed tag must be exactly `v<manifest version>`.
+2. **Run the local checks.**
    ```sh
-   pnpm lint && pnpm exec tsc --noEmit
-   pnpm exec vitest run --coverage
+   pnpm lint
+   pnpm typecheck
+   pnpm test
+   pnpm test:provision
+   pnpm test:sidecar
    pnpm e2e
    pnpm build
-   cargo test --manifest-path src-tauri/Cargo.toml
-   cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
    cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+   cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
+   cargo test --manifest-path src-tauri/Cargo.toml --locked
    ```
-3. **Build bundles**
+3. **Configure the mandatory release secrets.** The following names are exact:
+   - `TAURI_SIGNING_PRIVATE_KEY`: the Tauri updater private key. `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is also passed when the key is encrypted.
+   - `WINDOWS_CERTIFICATE`: a base64-encoded Windows code-signing PFX.
+   - `WINDOWS_CERTIFICATE_PASSWORD`: the PFX export/import password.
+   - `WINDOWS_TIMESTAMP_URL`: the configured RFC 3161 timestamp service URL.
+   The updater key password is optional only when the private key is not encrypted. Apple signing remains supported through the optional `APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` secrets.
+4. **Tag and push.**
    ```sh
-   pnpm tauri build          # .deb + AppImage under src-tauri/target/release/bundle/
+   git tag -a v1.2.3 -m "VTNexa v1.2.3"
+   git push origin v1.2.3
    ```
-   Tag pushes build all three platforms in CI (linux/windows/macos matrix);
-   note in the release what's actually shipped.
-4. **Smoke the installed build** (not `tauri dev`):
-   - `vtnexa --version` / `--help`
-   - open a workspace, one Commander turn with a tool call, approve a diff,
-     run a shell command, open a second window, restart the app (session
-     restore), check the Audit tab.
-5. **Tag + release**
-   ```sh
-   git tag -a v0.x.y -m "VTNexa v0.x.y" && git push origin v0.x.y
-   ```
-   Attach the `.deb` (and AppImage) to the GitHub release; write notes:
-   highlights, fixed issues, known issues, model recommendations.
-6. **Post-release:** close the milestone, update README if install paths
-   changed.
+5. **Wait for the tagged pipeline.** `release-preflight` checks the exact tag, all three manifest versions, and the four mandatory secret names before any release build. A missing or malformed value fails without printing secret contents.
+6. **Build each platform.** The matrix stages the checksum-verified Node sidecar, builds Tauri bundles, imports the PFX into the Windows runner, derives its code-signing thumbprint, and signs the app and installer artifacts through `bundle.windows.signCommand`. The command uses SHA-256 for both the file digest and timestamp digest and uses the configured timestamp URL. Tauri then creates the updater artifacts and `.sig` files with `TAURI_SIGNING_PRIVATE_KEY`.
+7. **Keep the GitHub release draft.** `tauri-action` uploads to a draft only. The final Windows verification job waits for every matrix build, downloads the draft assets, parses `latest.json`, requires every updater asset and matching `.sig`, requires both Windows installer formats, and rejects malformed or mismatched data.
+8. **Verify Authenticode.** PowerShell checks every downloaded Windows `.exe` and `.msi` for `Valid` status, the expected certificate thumbprint, SHA-256, and a trusted timestamp verified by `signtool`. Only after this succeeds does the job edit the draft to public.
 
-## Signing & updater (one-time setup, then automatic)
+A local unsigned build may proceed only when no Windows signing material is configured. If any signing variable is present, the signing script fails closed until the thumbprint and timestamp URL are both valid. A local build never substitutes for the tagged release preflight.
 
-The updater is **wired**: `tauri-plugin-updater` (backend + capability +
-`@tauri-apps/plugin-updater` hook in Settings → Updates), the update feed
-(`.../releases/latest/download/latest.json`) and the public key in
-`src-tauri/tauri.conf.json`, plus `createUpdaterArtifacts` in both the
-bundle config and the release job. What remains is secrets:
+## Windows WebDriver smoke
 
-1. **Updater private key** (required for `.sig` artifacts — without it the
-   release builds but ships no signed update):
-   ```sh
-   # a fresh keypair was minted while wiring this; if lost, rotate:
-   pnpm exec tauri signer generate -w ~/.tauri/vtnexa.key
-   ```
-   Add the private key content to repo settings → Secrets → Actions as
-   `TAURI_SIGNING_PRIVATE_KEY` (+ passphrase as
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if set). If you rotate the key,
-   replace the `pubkey` in `src-tauri/tauri.conf.json` with the new
-   `.pub` value or clients will reject the feed.
-2. **macOS signing** (needs an Apple Developer account): export a
-   Developer ID certificate and set the `APPLE_*` secrets (see ci.yml).
-   Until then macOS ships unsigned (Gatekeeper warns) but the updater
-   signature still verifies.
-3. Verify: the next tagged release should attach `.sig` + `latest.json`
-   and Settings → Updates → Check should offer the new version.
+The `Windows Tauri Smoke` workflow runs on pull requests, pushes to `main`, and manual dispatch. It installs exact `tauri-driver` 2.0.6, installs the matching Edge driver through `msedgedriver-tool` 0.2.2 pinned to source revision `8c4b34f51b45f5cf08013366d703de464ab871d1`, stages the verified Node sidecar, builds real NSIS and MSI bundles, and drives the built WebView2 executable. The smoke is Windows-only and uses the real Tauri IPC path: first-run view, absolute temporary workspace entry, ready workbench, workspace value returned by IPC, and the real Settings dialog. It does not use the web preview or Tauri invoke stubs.
 
-## Notes
-
-- AppImage can't be built on Arch-based distros without extra libs; on
-  Debian/Ubuntu it works out of the box.
-- The `.deb` is the primary Linux artifact; `scripts/install-local.sh` is
-  the no-sudo dev install.
+Protocol and signing/release helpers are dependency-free Node scripts. Their unit tests run with `pnpm test:node`; the release manifest and secret preflight tests are part of the normal CI test jobs.

@@ -1,4 +1,5 @@
 import { DEFAULT_PROVIDER, type ChatMsg, type ProviderConfig, type Workspace } from "../types";
+import { basenamePath, dirnamePath, isWithinPath } from "./path";
 
 export const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -35,17 +36,12 @@ export function fmtDur(ms: number): string {
 }
 
 export function isWithin(root: string, p: string): boolean {
-  if (!root) return true; // not initialized yet - allow, backend still enforces
-  const r = root.endsWith("/") ? root.slice(0, -1) : root;
-  return p === r || p.startsWith(r + "/");
+  return isWithinPath(root, p);
 }
 
-export const baseName = (p: string) => p.split("/").pop() ?? p;
+export const baseName = basenamePath;
 
-export const dirName = (p: string) => {
-  const i = p.lastIndexOf("/");
-  return i > 0 ? p.slice(0, i) : "";
-};
+export const dirName = dirnamePath;
 
 export const clampW = (v: number, lo: number, hi: number, fb: number) =>
   Number.isFinite(v) && v > 0 ? Math.min(hi, Math.max(lo, v)) : fb;

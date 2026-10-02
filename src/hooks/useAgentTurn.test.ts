@@ -55,7 +55,7 @@ function sseToolRound(reasoning: string, calls: { id: string; path: string }[]) 
 }
 
 function setup(opts?: {
-  busy?: boolean;
+  agentActive?: boolean;
   provHistLength?: number;
   skills?: { name: string; description: string }[];
   memoryText?: string;
@@ -73,12 +73,24 @@ function setup(opts?: {
     ...(opts?.provider ? { provider: { ...newWorkspace("main:ws", "/w").provider, ...opts.provider } } : {}),
     ...(opts?.history ? { messages: opts.history } : {}),
   };
-  const busy: boolean[] = [];
+  const agentStates: string[] = [];
+  const agentActiveRef = { current: false };
+  const startAgentTurn = vi.fn(() => {
+    agentActiveRef.current = true;
+    agentStates.push("pending");
+    return 1;
+  });
+  const finishAgentTurn = vi.fn((_sequence: number, status: "success" | "error") => {
+    agentActiveRef.current = false;
+    agentStates.push(status);
+  });
   const remembered: ProviderConfig[] = [];
   const centerTabs: string[] = [];
   const audits: any[] = [];
   const turnAbort = { current: null as AbortController | null };
   const stopTurnIdRef = { current: "" };
+  const workspaceGenerationRef = { current: 0 };
+  const sessionEpochRef = { current: 0 };
   const hook = renderHook(() =>
     useAgentTurn({
       ws,
@@ -90,18 +102,22 @@ function setup(opts?: {
       memoryText: opts?.memoryText,
       repoMap: opts?.repoMap,
       gitSnapshot: opts?.gitSnapshot,
-      openPath: opts?.openPath,
-      busy: opts?.busy ?? false,
+        openPath: opts?.openPath,
+        agentActive: opts?.agentActive ?? false,
+        agentActiveRef,
+        startAgentTurn,
+        finishAgentTurn,
+        workspaceGenerationRef,
+        sessionEpochRef,
       turnAbort: turnAbort as any,
       stopTurnIdRef: stopTurnIdRef as any,
       streamRaf: { current: null } as any,
       stickBottom: { current: true },
       lastSynced: { current: { pad: "", plan: "", memory: "" } },
-      updateWs: (fn) => {
-        ws = fn(ws);
-      },
-      setBusy: (v) => busy.push(v),
-      logAudit: (e) => audits.push(e),
+       updateWs: (fn) => {
+         ws = fn(ws);
+       },
+       logAudit: (e) => audits.push(e),
       rememberProvider: (c) => remembered.push(c),
       setCenterTab: ((t: string) => centerTabs.push(t)) as any,
       setPadText: vi.fn(),
@@ -115,7 +131,7 @@ function setup(opts?: {
       pushUndo: vi.fn(),
     }),
   );
-  return { ...hook, wsOf: () => ws, busy, remembered, centerTabs, audits, turnAbort };
+   return { ...hook, wsOf: () => ws, agentStates, remembered, centerTabs, audits, turnAbort, workspaceGenerationRef, sessionEpochRef };
 }
 
 function stubFetch(handler: (url: string, init: any) => Response | Promise<Response>) {
@@ -131,7 +147,7 @@ function stubRafSync() {
 }
 
 describe("useAgentTurn plain turns", () => {
-  it("appends user + answer, tracks busy, usage and provider", async () => {
+  it("appends user + answer, tracks agent state, usage and provider", async () => {
     stubFetch(() => openAIText("answer"));
     stubRafSync();
     setInvokeImpl(async () => ({}));
@@ -143,13 +159,13 @@ describe("useAgentTurn plain turns", () => {
       ["user", "go"],
       ["assistant", "answer"],
     ]);
-    expect(h.busy).toEqual([true, false]);
+    expect(h.agentStates).toEqual(["pending", "success"]);
     expect(h.wsOf().usage).toMatchObject({ input: 20, output: 10 });
     expect(h.remembered).toHaveLength(1);
     expect(h.turnAbort.current).toBeNull();
   });
 
-  it("refuses when busy without touching the network", async () => {
+  it("refuses when the agent is active without touching the network", async () => {
     let fetched = false;
     stubFetch(() => {
       fetched = true;
@@ -157,12 +173,33 @@ describe("useAgentTurn plain turns", () => {
     });
     stubRafSync();
     setInvokeImpl(async () => ({}));
-    const h = setup({ busy: true });
+    const h = setup({ agentActive: true });
     await act(async () => {
       await h.result.current.runAgentTurn("go");
     });
     expect(fetched).toBe(false);
     expect(h.wsOf().messages).toHaveLength(0);
+  });
+
+  it("does not publish a late turn into a changed workspace", async () => {
+    let resolveFetch!: (value: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    vi.stubGlobal("fetch", () => pending);
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup();
+    let turn: Promise<void> | undefined;
+    act(() => {
+      turn = h.result.current.runAgentTurn("go");
+    });
+    h.workspaceGenerationRef.current += 1;
+    await act(async () => {
+      resolveFetch(openAIText("late answer"));
+      await turn;
+    });
+    expect(h.wsOf().messages.map((message) => message.content)).toEqual(["go"]);
   });
 
   it("surfaces provider errors as chat messages", async () => {
@@ -175,7 +212,7 @@ describe("useAgentTurn plain turns", () => {
     });
     const last = h.wsOf().messages[h.wsOf().messages.length - 1];
     expect(last.content).toMatch(/provider error/);
-    expect(h.busy[h.busy.length - 1]).toBe(false);
+    expect(h.agentStates[h.agentStates.length - 1]).toBe("error");
   });
 });
 
@@ -632,7 +669,7 @@ describe("useAgentTurn long-turn integration", () => {
     // 8. Audit complete and the turn closed cleanly.
     expect(h.audits).toHaveLength(20);
     expect(h.audits.every((a) => a.ok)).toBe(true);
-    expect(h.busy).toEqual([true, false]);
+    expect(h.agentStates).toEqual(["pending", "success"]);
     expect(h.turnAbort.current).toBeNull();
   });
 });

@@ -4,7 +4,7 @@ import { undoEntryLabel, undoEntrySize } from "../types";
 import { fsDelete, fsRead, fsRename, fsWrite, gitCommit } from "../lib/tauri";
 import { claimFor } from "../lib/approval";
 import { trimUndoStack } from "../lib/sessionStore";
-import { baseName } from "../lib/utils";
+import { basenamePath } from "../lib/path";
 import { useConfirm } from "../context/ConfirmContext";
 
 // Undo boundaries (v1): approved Diff-gate writes + file renames/deletes.
@@ -146,14 +146,14 @@ export function useDiffGate(opts: {
         return { proceed: true, current: "", existed: false };
       }
       const ok = await confirm(
-        `${baseName(d.path)} could not be read (${msg}) — likely locked or permission-denied. Apply anyway and overwrite?`,
+        `${basenamePath(d.path)} could not be read (${msg}) — likely locked or permission-denied. Apply anyway and overwrite?`,
       );
       // Blind overwrite: best-effort undo seed (may be empty).
       return { proceed: ok, current: d.original, existed: d.original !== "" || existed };
     }
     if (current === d.original) return { proceed: true, current, existed: true };
     const ok = await confirm(
-      `${baseName(d.path)} changed on disk since this diff was staged (another window, the agent, or an external editor).\n\nApply anyway and overwrite those changes?`,
+      `${basenamePath(d.path)} changed on disk since this diff was staged (another window, the agent, or an external editor).\n\nApply anyway and overwrite those changes?`,
     );
     return { proceed: ok, current, existed: true };
   }
@@ -311,7 +311,7 @@ export function useDiffGate(opts: {
     pushUndo({ kind: "write", path: d.path, before: drift.current, after: d.content, existedBefore: drift.existed });
     const verified = await verifyApplied(d.path, d.content);
     if (!verified) noteVerifyFailure(d.path);
-    const msg = opts.commitMsg.trim() || `Update ${d.path.split("/").pop()}`;
+    const msg = opts.commitMsg.trim() || `Update ${basenamePath(d.path)}`;
     const t0 = Date.now();
     try {
       const r = await gitCommit(

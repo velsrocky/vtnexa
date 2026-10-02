@@ -1,18 +1,20 @@
 import type { ReactNode } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
-import type { CenterTab, Workspace } from "../types";
+import type { CenterTab, OperationState, Workspace } from "../types";
 import BrowserPane from "./BrowserPane";
 import TerminalPane from "./TerminalPane";
 import { languageFromPath } from "../lib/preview";
-import { baseName } from "../lib/utils";
+import { basenamePath } from "../lib/path";
 import { useInputHistory } from "../hooks/useInputHistory";
+import OperationStatus from "./OperationStatus";
 
 // Center column: tabbed edit/diff/preview/browser/git panes + review-gate
 // row + one-shot shell + this window's PTY.
-export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, originals, editorText, originalText, setEditorText, monacoTheme, centerTab, setCenterTab, gitCount, gitPane, previewUrl, setPreviewUrl, previewDoc, openFile, closeTab, saveFile, commitMsg, setCommitMsg, approveDiff, approveAndCommit, onRejectDiff, undo, redo, canUndo, canRedo, undoLabel, shellCmd, onShellCmdChange, runShell, shellH, ptyH, themeId, onHResizerDown }: {
+export default function EditorPane({ ws, ptyId, shellOperation, workspaceOperation, openPath, tabs, buffers, originals, editorText, originalText, setEditorText, monacoTheme, centerTab, setCenterTab, gitCount, gitPane, previewUrl, setPreviewUrl, previewDoc, openFile, closeTab, saveFile, commitMsg, setCommitMsg, approveDiff, approveAndCommit, onRejectDiff, undo, redo, canUndo, canRedo, undoLabel, shellCmd, onShellCmdChange, runShell, shellH, ptyH, themeId, onHResizerDown }: {
   ws: Workspace;
   ptyId: string;
-  busy: boolean;
+  shellOperation?: OperationState;
+  workspaceOperation?: OperationState;
   openPath: string;
   tabs: string[];
   buffers: Record<string, string>;
@@ -50,6 +52,7 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
   onHResizerDown: (which: "shell" | "pty") => (e: React.MouseEvent) => void;
 }) {
   const hist = useInputHistory();
+  const shellBlocked = shellOperation?.status === "pending" || workspaceOperation?.status === "pending";
   return (
     <section className="editor">
       <div className="pane-title row-between">
@@ -57,13 +60,20 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
           {openPath || "(no file)"}
           {ws.pendingDiff && (
             <span className="pill" style={{ marginLeft: 8 }}>
-              {ws.pendingDiff.path === openPath ? `review: ${openPath.split("/").pop()}` : `review: ${ws.pendingDiff.path.split("/").pop()} (not open)`}
+              {ws.pendingDiff.path === openPath ? `review: ${basenamePath(openPath)}` : `review: ${basenamePath(ws.pendingDiff.path)} (not open)`}
             </span>
           )}
         </span>
-        <span className="tabs small">
+        <span className="tabs small" role="tablist" aria-label="Editor views">
           {(["edit", "diff", "preview", "browser", "git"] as const).map((t) => (
-            <button key={t} className={centerTab === t ? "active" : ""} onClick={() => setCenterTab(t)}>
+            <button
+              key={t}
+              type="button"
+              role="tab"
+              aria-selected={centerTab === t}
+              className={centerTab === t ? "active" : ""}
+              onClick={() => setCenterTab(t)}
+            >
               {t === "edit"
                 ? "Edit"
                 : t === "diff"
@@ -86,10 +96,19 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
                 key={p}
                 className={p === openPath ? "tab active" : "tab"}
                 onClick={() => openFile(p)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    openFile(p);
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                aria-current={p === openPath ? "page" : undefined}
                 title={p}
               >
                 {dirty ? "● " : ""}
-                {baseName(p)}
+                {basenamePath(p)}
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
@@ -188,18 +207,26 @@ export default function EditorPane({ ws, ptyId, busy, openPath, tabs, buffers, o
           onChange={(e) => onShellCmdChange(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
+              e.preventDefault();
+              if (shellBlocked) return;
               hist.push(shellCmd);
-              runShell();
+              void runShell();
               return;
             }
             if (hist.applyKey(e, () => shellCmd, onShellCmdChange)) e.preventDefault();
           }}
           placeholder="one-shot shell (↑/↓ history)"
           className="grow"
+          aria-label="One-shot shell command"
         />
-        <button onClick={runShell} disabled={busy}>
+        <button
+          onClick={() => void runShell()}
+          disabled={shellBlocked}
+          title={workspaceOperation?.status === "pending" ? "Waiting for the workspace change to finish." : undefined}
+        >
           Run
         </button>
+        <OperationStatus state={shellOperation} />
       </div>
       <div className="hresizer" onMouseDown={onHResizerDown("shell")} title="Drag to resize shell output" />
       <pre className="term small" style={{ height: shellH }}>{ws.shellOut || "$ one-shot ready"}</pre>

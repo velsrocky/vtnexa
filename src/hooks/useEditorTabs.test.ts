@@ -147,6 +147,21 @@ describe("useEditorTabs retargeting", () => {
     expect(h.wsOf().pendingDiff?.path).toBe("/w/renamed/a.txt");
   });
 
+  it("retargets Windows descendants across slash styles without sibling-prefix matches", () => {
+    setInvokeImpl(async () => "");
+    const h = setup({
+      tabs: ["C:\\Repo\\src\\a.ts", "C:\\Repo\\src2\\b.ts"],
+      buffers: { "C:\\Repo\\src\\a.ts": "a" },
+      originals: { "C:\\Repo\\src\\a.ts": "a" },
+      openPath: "C:/Repo/src/a.ts",
+    });
+    act(() => {
+      h.result.current.retargetTabs("c:\\repo\\SRC", "D:\\Renamed");
+    });
+    expect(h.wsOf().tabs).toEqual(["D:\\Renamed\\a.ts", "C:\\Repo\\src2\\b.ts"]);
+    expect(h.wsOf().openPath).toBe("D:\\Renamed\\a.ts");
+  });
+
   it("dropTabsUnder clears tabs and dangling diffs", () => {
     setInvokeImpl(async () => "");
     const h = setup({

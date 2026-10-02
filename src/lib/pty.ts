@@ -8,6 +8,10 @@ export async function ptySpawn(id: string, cwd: string, cols: number, rows: numb
   await invoke("pty_spawn", { id, cwd, cols: cols || 80, rows: rows || 24 });
 }
 
+export async function ptySetCwd(id: string, cwd: string): Promise<void> {
+  await invoke("pty_set_cwd", { id, cwd });
+}
+
 export async function ptyWrite(id: string, data: string): Promise<void> {
   await invoke("pty_write", { id, data });
 }

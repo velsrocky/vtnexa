@@ -1,6 +1,7 @@
 use crate::util::truncate_chars;
-use crate::workspace::{root_snapshot, WorkspaceRoots};
+use crate::workspace::{checked_internal_path, root_snapshot, WorkspaceRoots};
 use serde::Serialize;
+use std::io::Read;
 use tauri::Manager;
 
 // ---- Project skills (.vtnexa/skills/*.md) ----
@@ -15,12 +16,60 @@ pub struct SkillInfo {
     pub description: String,
 }
 
+const SKILL_MAX_BYTES: usize = 16 * 1024;
+
 pub(crate) fn valid_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn read_bounded_skill(path: &std::path::Path) -> Result<String, (std::io::ErrorKind, String)> {
+    let file = std::fs::File::open(path).map_err(|error| (error.kind(), error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| (error.kind(), error.to_string()))?;
+    if !metadata.is_file() {
+        return Err((
+            std::io::ErrorKind::InvalidData,
+            "skill: not a regular file".to_string(),
+        ));
+    }
+    if metadata.len() > SKILL_MAX_BYTES as u64 {
+        return Err((
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "skill: file too large ({} bytes, max {})",
+                metadata.len(),
+                SKILL_MAX_BYTES
+            ),
+        ));
+    }
+    let capacity = usize::try_from(metadata.len())
+        .unwrap_or(0)
+        .min(SKILL_MAX_BYTES);
+    let mut bytes = Vec::with_capacity(capacity);
+    let limit = SKILL_MAX_BYTES as u64 + 1;
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| (error.kind(), error.to_string()))?;
+    if bytes.len() > SKILL_MAX_BYTES {
+        return Err((
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "skill: file too large (more than {} bytes)",
+                SKILL_MAX_BYTES
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        (
+            std::io::ErrorKind::InvalidData,
+            "skill: file is not valid UTF-8".to_string(),
+        )
+    })
 }
 
 pub(crate) fn skill_entries(
@@ -47,17 +96,17 @@ pub(crate) fn skill_entries(
         if out.contains_key(stem) {
             continue;
         }
-        let desc = std::fs::read_to_string(&path)
-            .map(|text| {
-                text.lines()
-                    .map(|l| l.trim())
-                    .find(|l| !l.is_empty() && !l.starts_with('#'))
-                    .unwrap_or("")
-                    .chars()
-                    .take(160)
-                    .collect::<String>()
-            })
-            .unwrap_or_default();
+        let Ok(text) = read_bounded_skill(&path) else {
+            continue;
+        };
+        let desc = text
+            .lines()
+            .map(|line| line.trim())
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect::<String>();
         out.insert(
             stem.to_string(),
             SkillInfo {
@@ -66,6 +115,53 @@ pub(crate) fn skill_entries(
             },
         );
     }
+}
+
+fn workspace_skill_entries(
+    root: &std::path::Path,
+    out: &mut std::collections::HashMap<String, SkillInfo>,
+) -> Result<(), String> {
+    let relative_dir = std::path::Path::new(".vtnexa/skills");
+    let dir = checked_internal_path(root, relative_dir, "skill_list")?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries.flatten().take(100) {
+        let file_name = entry.file_name();
+        let relative = relative_dir.join(&file_name);
+        let path = checked_internal_path(root, &relative, "skill_list")?;
+        if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !valid_skill_name(stem) || out.contains_key(stem) {
+            continue;
+        }
+        let path = checked_internal_path(root, &relative, "skill_list")?;
+        let Ok(text) = read_bounded_skill(&path) else {
+            continue;
+        };
+        let desc = text
+            .lines()
+            .map(|line| line.trim())
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect::<String>();
+        out.insert(
+            stem.to_string(),
+            SkillInfo {
+                name: stem.to_string(),
+                description: desc,
+            },
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn bundled_skills_dir() -> Option<std::path::PathBuf> {
@@ -105,8 +201,7 @@ pub(crate) fn skill_list(
 ) -> Result<Vec<SkillInfo>, String> {
     let root = root_snapshot(&state, window.label());
     let mut map = std::collections::HashMap::new();
-    // Project skills first (win on collision).
-    skill_entries(&root.join(".vtnexa").join("skills"), &mut map);
+    workspace_skill_entries(&root, &mut map)?;
     // Bundled ready-made skills (taught-in defaults).
     for dir in [
         app.path()
@@ -136,32 +231,78 @@ pub(crate) fn skill_read(
         return Err("skill_read: invalid skill name".to_string());
     }
     let root = root_snapshot(&state, window.label());
+    let project_relative = std::path::Path::new(".vtnexa/skills").join(format!("{}.md", name));
+    let project_path = checked_internal_path(&root, &project_relative, "skill_read")?;
     let candidates = [
-        root.join(".vtnexa")
-            .join("skills")
-            .join(format!("{}.md", name)),
-        app.path()
-            .resource_dir()
-            .ok()
-            .map(|r| {
-                r.join(".vtnexa")
-                    .join("skills")
-                    .join(format!("{}.md", name))
-            })
-            .unwrap_or_default(),
-        bundled_skills_dir()
-            .map(|d| d.join(format!("{}.md", name)))
-            .unwrap_or_default(),
+        Some(project_path.clone()),
+        app.path().resource_dir().ok().map(|r| {
+            r.join(".vtnexa")
+                .join("skills")
+                .join(format!("{}.md", name))
+        }),
+        bundled_skills_dir().map(|d| d.join(format!("{}.md", name))),
     ];
-    for path in candidates {
-        if path.as_os_str().is_empty() {
-            continue;
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(s) => return Ok(truncate_chars(s, 16 * 1024)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.to_string()),
+    for path in candidates.into_iter().flatten() {
+        let path = if path == project_path {
+            checked_internal_path(&root, &project_relative, "skill_read")?
+        } else {
+            path
+        };
+        match read_bounded_skill(&path) {
+            Ok(skill) => return Ok(truncate_chars(skill, SKILL_MAX_BYTES)),
+            Err((std::io::ErrorKind::NotFound, _)) => continue,
+            Err((_, error)) => return Err(error),
         }
     }
     Err(format!("skill_read: no skill named {:?}", name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_root(label: &str) -> std::path::PathBuf {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vtnexa-skills-{label}-{id}"));
+        std::fs::create_dir_all(root.join(".vtnexa/skills")).unwrap();
+        root
+    }
+
+    #[test]
+    fn oversized_workspace_skill_is_skipped_without_partial_description() {
+        let root = fixture_root("oversized-list");
+        let path = root.join(".vtnexa/skills/large.md");
+        std::fs::write(&path, b"# heading\nvisible description\n").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len((SKILL_MAX_BYTES + 1) as u64)
+            .unwrap();
+        let mut entries = std::collections::HashMap::new();
+        workspace_skill_entries(&root, &mut entries).unwrap();
+        assert!(!entries.contains_key("large"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_workspace_skill_read_is_rejected() {
+        let root = fixture_root("oversized-read");
+        let relative = std::path::Path::new(".vtnexa/skills/large.md");
+        let path = root.join(relative);
+        std::fs::write(&path, b"visible content").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len((SKILL_MAX_BYTES + 1) as u64)
+            .unwrap();
+        let checked = checked_internal_path(&root, relative, "skill_read").unwrap();
+        let error = read_bounded_skill(&checked).unwrap_err().1;
+        assert!(error.contains("file too large"), "got: {}", error);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

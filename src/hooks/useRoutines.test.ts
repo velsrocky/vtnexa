@@ -16,10 +16,11 @@ function setInvokeImpl(fn: (cmd: string, args?: any) => Promise<any>) {
 }
 
 afterEach(() => {
+  localStorage.clear();
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
-function setup(opts?: { busy?: boolean; saved?: unknown; impl?: (cmd: string, args?: any) => Promise<any> }) {
+function setup(opts?: { agentActive?: boolean; workspaceRoot?: string; saved?: unknown; impl?: (cmd: string, args?: any) => Promise<any> }) {
   setInvokeImpl(
     opts?.impl ??
       (async (cmd: string) => {
@@ -30,7 +31,12 @@ function setup(opts?: { busy?: boolean; saved?: unknown; impl?: (cmd: string, ar
   );
   const runAgentTurn = vi.fn();
   const hook = renderHook(() =>
-    useRoutines({ busy: opts?.busy ?? false, runAgentTurn }),
+    useRoutines({
+      agentActive: opts?.agentActive ?? false,
+      workspaceRoot: opts?.workspaceRoot ?? "/workspace",
+      windowLabel: "main",
+      runAgentTurn,
+    }),
   );
   return { ...hook, runAgentTurn };
 }
@@ -66,6 +72,42 @@ describe("useRoutines.loadRoutines", () => {
       await result.current.loadRoutines();
     });
     expect(result.current.routines[0].everyMs).toBe(15 * 60 * 1000);
+  });
+
+  it("does not trust an imported enabled schedule until local approval", async () => {
+    const { result, runAgentTurn } = setup({
+      saved: JSON.stringify({
+        routines: [{ id: "imported", name: "imported", prompt: "run", everyMs: 60_000, enabled: true, nextRun: 1 }],
+      }),
+    });
+    await act(async () => {
+      await result.current.loadRoutines();
+    });
+    expect(result.current.routines[0].trusted).toBe(false);
+    await act(async () => {
+      await result.current.runRoutine(result.current.routines[0], { automatic: true });
+    });
+    expect(runAgentTurn).not.toHaveBeenCalled();
+  });
+
+  it("preserves trust across reload and invalidates changed content", async () => {
+    const { result } = setup({
+      saved: JSON.stringify({ routines: [{ id: "local", name: "local", prompt: "one", everyMs: 0, enabled: true }] }),
+    });
+    await act(async () => {
+      await result.current.loadRoutines();
+    });
+    await act(async () => {
+      await result.current.runRoutine(result.current.routines[0]);
+    });
+    expect(result.current.routines[0].trusted).toBe(true);
+    const { result: changed } = setup({
+      saved: JSON.stringify({ routines: [{ id: "local", name: "local", prompt: "two", everyMs: 0, enabled: true }] }),
+    });
+    await act(async () => {
+      await changed.current.loadRoutines();
+    });
+    expect(changed.current.routines[0].trusted).toBe(false);
   });
 
   it("starts empty on missing or corrupt data", async () => {
@@ -107,6 +149,37 @@ describe("useRoutines.addRoutine", () => {
   });
 });
 
+describe("useRoutines persistence status", () => {
+  it("rolls back a failed save and keeps the draft retryable", async () => {
+    let fail = true;
+    const { result } = setup({
+      impl: async (cmd: string) => {
+        if (cmd === "routines_load") return "";
+        if (cmd === "routines_save") {
+          if (fail) throw new Error("disk full");
+          return {};
+        }
+        throw new Error(`unexpected ${cmd}`);
+      },
+    });
+    act(() => {
+      result.current.setNewRoutine({ name: "Retry", prompt: "do work", everyMs: 0 });
+    });
+    await act(async () => {
+      await result.current.addRoutine();
+    });
+    expect(result.current.routines).toEqual([]);
+    expect(result.current.newRoutine.name).toBe("Retry");
+    expect(result.current.operation).toMatchObject({ status: "error" });
+    fail = false;
+    await act(async () => {
+      await result.current.addRoutine();
+    });
+    expect(result.current.routines).toHaveLength(1);
+    expect(result.current.operation).toMatchObject({ status: "success" });
+  });
+});
+
 describe("useRoutines.runRoutine", () => {
   const routine = (over: Partial<Routine> = {}): Routine => ({
     id: "r1",
@@ -127,8 +200,8 @@ describe("useRoutines.runRoutine", () => {
     expect(runAgentTurn.mock.calls[0][0]).toMatch(/Triage.*check inbox/s);
   });
 
-  it("defers when busy instead of piling up", async () => {
-    const { result, runAgentTurn } = setup({ busy: true });
+  it("defers while an agent turn is active", async () => {
+    const { result, runAgentTurn } = setup({ agentActive: true });
     await act(async () => {
       await result.current.runRoutine(routine());
     });
