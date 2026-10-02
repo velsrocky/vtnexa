@@ -1,5 +1,6 @@
+use std::collections::VecDeque;
 #[cfg(unix)]
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use std::fs;
@@ -2134,6 +2135,8 @@ fn configure_managed_command(command: &mut Command) -> io::Result<Option<String>
 pub(crate) fn spawn_managed(command: &mut Command) -> Result<ManagedChild, ProcessError> {
     #[cfg(windows)]
     let job = Some(crate::windows_job::JobHandle::new().map_err(ProcessError::Tree)?);
+    // tree_token is only read in the #[cfg(unix)] block below.
+    #[cfg_attr(windows, allow(unused_variables))]
     let tree_token = configure_managed_command(command).map_err(ProcessError::Io)?;
     let child = command.spawn().map_err(ProcessError::Spawn)?;
     #[cfg(unix)]

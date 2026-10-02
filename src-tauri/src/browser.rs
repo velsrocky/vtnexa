@@ -383,6 +383,8 @@ fn node_names() -> [&'static str; 2] {
 }
 
 fn resolve_node_executable(app: &tauri::AppHandle) -> Result<(String, String), String> {
+    // mut is only used under cfg(debug_assertions) below
+    #[allow(unused_mut)]
     let mut dirs = resource_browser_dirs(app);
     #[cfg(debug_assertions)]
     dirs.extend(debug_browser_dirs());
