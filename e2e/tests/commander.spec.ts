@@ -12,6 +12,7 @@ async function stubTauri(page: Page) {
     w.__tauriInvokeCalls = calls;
     let eventId = 1;
     const root = "/ws";
+    localStorage.setItem("vtai.workspaceRoot", root);
     const files: Record<string, unknown[]> = {
       [root]: [{ name: "package.json", path: `${root}/package.json`, is_dir: false }],
     };
@@ -90,7 +91,7 @@ test.describe("Commander agent turn (e2e, mocked backend)", () => {
     }
 
     // Audit tab records the auto-approved read.
-    await page.getByRole("button", { name: /Audit/ }).click();
+    await page.getByRole("tab", { name: /Audit/ }).click();
     await expect(page.locator(".msgs, .audit").first()).toContainText("fs_list");
 
     // The provider saw the user task in both requests.
