@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const path = require("node:path");
 const { Readable } = require("node:stream");
 const {
   PROXY_USERNAME,
@@ -49,6 +50,9 @@ test("Windows resolution finds the system Edge before Playwright", () => {
 });
 
 test("VTAI_BROWSER_CHROME is checked before common locations", () => {
+  // resolveBrowser path.resolve()s the override against the real OS, so the
+  // expected path has to be resolved the same way or this breaks on Windows.
+  const override = path.resolve("/custom/browser");
   const env = {
     VTAI_BROWSER_CHROME: "/custom/browser",
     ProgramFiles: "/not-used",
@@ -56,10 +60,11 @@ test("VTAI_BROWSER_CHROME is checked before common locations", () => {
   const result = resolveBrowser({
     platform: "linux",
     env,
-    exists: (file) => file === "/custom/browser",
+    exists: (file) => file === override,
   });
   assert.equal(result.source, "VTAI_BROWSER_CHROME");
   assert.equal(result.ready, true);
+  assert.equal(result.path, override);
 });
 
 test("status separates the sidecar endpoint from the page URL", () => {
