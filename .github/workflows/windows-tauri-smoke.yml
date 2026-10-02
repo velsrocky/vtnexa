@@ -76,7 +76,7 @@ jobs:
 
       - name: Build the real Windows Tauri app and bundles
         shell: pwsh
-        run: pnpm tauri build --bundles "nsis,msi" --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        run: pnpm tauri build --bundles "nsis,msi"  --config .github/smoke-config.json
 
       - name: Verify bundle outputs
         shell: pwsh
