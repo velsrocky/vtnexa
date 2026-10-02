@@ -66,7 +66,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          cargo install --locked --force --git https://github.com/chippers/msedgedriver-tool --rev 8c4b34f51b45f5cf08013366d703de464ab871d1 --version 0.2.2
+          cargo install --locked --force --git https://github.com/chippers/msedgedriver-tool --rev 8c4b34f51b45f5cf08013366d703de464ab871d1 msedgedriver-tool --version 0.2.2
           & "$HOME\.cargo\bin\msedgedriver-tool.exe"
           $driver = Join-Path (Get-Location) "msedgedriver.exe"
           if (-not (Test-Path -LiteralPath $driver -PathType Leaf)) {
