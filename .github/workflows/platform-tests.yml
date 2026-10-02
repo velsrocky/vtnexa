@@ -45,4 +45,4 @@ jobs:
         if: matrix.os != 'windows-latest'
 
       - name: Cargo tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
