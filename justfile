@@ -15,6 +15,11 @@ build:
 test:
 	pnpm test
 	cargo test --manifest-path src-tauri/Cargo.toml
+	scripts/tauri-smoke.sh --optional
+
+# Real-backend Linux WebDriver smoke (needs tauri-driver + WebKitWebDriver)
+test-smoke:
+	scripts/tauri-smoke.sh --build
 
 test-e2e:
 	pnpm exec playwright test

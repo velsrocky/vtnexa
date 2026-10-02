@@ -18,6 +18,7 @@ dist-ssr
 .env.local
 # Staged sidecar for Tauri resources (built by pnpm stage-sidecar)
 src-tauri/sidecar-stage
+.cache/node-runtime
 # Derived Monaco static assets (copied from node_modules by sync-monaco)
 public/vs
 

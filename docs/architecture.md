@@ -40,7 +40,7 @@ commands in `src-tauri/src/lib.rs` → OS / sidecar.
 - `skills.rs` — project + bundled skills (`.vtnexa/skills/*.md`).
 - `shell.rs` — command screening (`shell_deny_reason`), capped exec
   (`run_capped`), `shell_run` behind the approval gate.
-- `pty.rs` — window-bound PTY lanes (spawn/write/resize/kill, reaper).
+- `pty.rs` — window-bound PTY lanes (spawn/set-cwd/write/resize/kill, reaper).
 - `window.rs` — `create_window` + label allocation.
 - `approvals.rs` — native OS confirm (`approval_issue`, agent path) +
   dialog-free claims (`approval_claim`, direct gestures); single-use tokens
@@ -51,7 +51,7 @@ commands in `src-tauri/src/lib.rs` → OS / sidecar.
   servers marked `untrusted` (no `{env:}` substitution), `mcp_workspace_trust`.
 - `lsp.rs` / `lsp_ops.rs` — `find_project_root` clamped to workspace;
   `cargo`/`tsc`/local servers need approval, `py_compile` is free.
-- `browser.rs` + `sidecar/browser/server.js` — token via 0600 file (env
+- `browser.rs` + `sidecar/browser/server.js` — token via a private file (env
   fallback), sandboxed Chromium (no `--no-sandbox` by default), SSRF block
   (loopback/private/link-local), release pins to bundled `server.js`.
 - `shell_jobs.rs` — background jobs (8 max, 30min, 2MB), same screening.

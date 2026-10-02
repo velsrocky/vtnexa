@@ -1,5 +1,5 @@
 # Makefile for VTNexa
-.PHONY: all dev build test lint clean install-local help
+.PHONY: all dev build test test-smoke lint clean install-local help
 
 all: build
 
@@ -8,6 +8,7 @@ help:
 	@echo "  make dev      - Run development server with Tauri"
 	@echo "  make build     - Build production app"
 	@echo "  make test      - Run tests (frontend + backend)"
+	@echo "  make test-smoke - Real-backend Linux WebDriver smoke (needs tauri-driver + WebKitWebDriver)"
 	@echo "  make lint      - Run linters and type checks"
 	@echo "  make clean     - Clean build artifacts"
 	@echo "  make install-local - Build and install locally"
@@ -22,6 +23,10 @@ build:
 test:
 	pnpm test
 	cargo test --manifest-path src-tauri/Cargo.toml
+	scripts/tauri-smoke.sh --optional
+
+test-smoke:
+	scripts/tauri-smoke.sh --build
 
 lint:
 	pnpm lint
