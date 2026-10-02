@@ -7,9 +7,12 @@
 // SIGKILL, truncated output. The model supplies only `path`; everything else
 // is derived server-side so there is no command-injection surface.
 
-use std::time::{Duration, Instant};
+use crate::process::{self, ProcessLimits, ProcessOptions};
+use std::time::Duration;
 
 pub(crate) const LSP_MAX_OUTPUT_CHARS: usize = 8000;
+const DIAGNOSTIC_STREAM_BYTES: usize = 1024 * 1024;
+const DIAGNOSTIC_COMBINED_BYTES: usize = 1536 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LspProvider {
@@ -138,64 +141,32 @@ fn run_argv(
     cwd: &std::path::Path,
     timeout: Duration,
 ) -> Result<(String, i32), String> {
-    let mut child = std::process::Command::new(program)
-        .args(args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("lsp_diagnostics: cannot run {}: {}", program, e))?;
-    let out_pipe = child
-        .stdout
-        .take()
-        .ok_or("lsp_diagnostics: missing stdout")?;
-    let err_pipe = child
-        .stderr
-        .take()
-        .ok_or("lsp_diagnostics: missing stderr")?;
-    let (otx, orx) = std::sync::mpsc::channel::<String>();
-    let (etx, erx) = std::sync::mpsc::channel::<String>();
-    std::thread::spawn(move || {
-        let mut s = String::new();
-        let mut r = std::io::BufReader::new(out_pipe);
-        use std::io::Read;
-        if r.read_to_string(&mut s).is_ok() {
-            let _ = otx.send(s);
+    let limits = ProcessLimits::new(
+        DIAGNOSTIC_STREAM_BYTES,
+        DIAGNOSTIC_STREAM_BYTES,
+        DIAGNOSTIC_COMBINED_BYTES,
+    );
+    let mut command = std::process::Command::new(program);
+    command.args(args).current_dir(cwd);
+    let output = process::run_bounded(
+        command,
+        ProcessOptions::new(timeout, limits),
+    )
+    .map_err(|error| match error {
+        process::ProcessError::Timeout(_) => format!(
+            "lsp_diagnostics: checker timed out after {}s (first runs compile dependencies — retry)",
+            timeout.as_secs()
+        ),
+        process::ProcessError::Spawn(error) => {
+            format!("lsp_diagnostics: cannot run {}: {}", program, error)
         }
-    });
-    std::thread::spawn(move || {
-        let mut s = String::new();
-        let mut r = std::io::BufReader::new(err_pipe);
-        use std::io::Read;
-        if r.read_to_string(&mut s).is_ok() {
-            let _ = etx.send(s);
-        }
-    });
-    let deadline = Instant::now() + timeout;
-    let code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code().unwrap_or(-1),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "lsp_diagnostics: checker timed out after {}s (first runs compile dependencies — retry)",
-                        timeout.as_secs()
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return Err(e.to_string()),
-        }
-    };
-    let stdout = orx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
-    let stderr = erx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
-    let mut combined = stdout;
-    if !stderr.trim().is_empty() {
-        combined.push_str(&stderr);
+        other => format!("lsp_diagnostics: {} failed: {}", program, other),
+    })?;
+    let mut combined = output.stdout().to_string();
+    if !output.stderr().trim().is_empty() {
+        combined.push_str(output.stderr());
     }
-    Ok((combined, code))
+    Ok((combined, output.code()))
 }
 
 /// Keep output lines that mention the file (absolute or project-relative —
@@ -254,7 +225,7 @@ pub(crate) fn render_result(
 }
 
 #[tauri::command]
-pub(crate) fn lsp_diagnostics(
+pub(crate) async fn lsp_diagnostics(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::WorkspaceRoots>,
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
@@ -290,38 +261,42 @@ pub(crate) fn lsp_diagnostics(
         )?;
     }
     let ws_root = crate::root_snapshot(&state, window.label());
-    let (cwd, filter_root) = if provider == LspProvider::Python {
-        let parent = file.parent().unwrap_or(&file).to_path_buf();
-        (parent.clone(), parent)
-    } else {
-        match find_project_root(&file, markers_for(provider), Some(&ws_root)) {
-            Some(root) => (root.clone(), root),
-            None => {
-                let marker = markers_for(provider).join(" or ");
-                return Err(format!(
-                    "lsp_diagnostics: no {} found above {} — diagnostics need project config",
-                    marker,
-                    file.parent()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default()
-                ));
+    tauri::async_runtime::spawn_blocking(move || {
+        let (cwd, filter_root) = if provider == LspProvider::Python {
+            let parent = file.parent().unwrap_or(&file).to_path_buf();
+            (parent.clone(), parent)
+        } else {
+            match find_project_root(&file, markers_for(provider), Some(&ws_root)) {
+                Some(root) => (root.clone(), root),
+                None => {
+                    let marker = markers_for(provider).join(" or ");
+                    return Err(format!(
+                        "lsp_diagnostics: no {} found above {} — diagnostics need project config",
+                        marker,
+                        file.parent()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default()
+                    ));
+                }
             }
+        };
+        let (program, args) = command_for(provider, &cwd, &file);
+        let (output, code) = run_argv(&program, &args, &cwd, timeout_for(provider))?;
+        let display = file.to_string_lossy().to_string();
+        if provider == LspProvider::Python {
+            if code == 0 {
+                return Ok(format!("clean: no diagnostics for {}", display));
+            }
+            return Ok(crate::truncate_chars(
+                format!("diagnostics for {}:\n{}", display, output),
+                LSP_MAX_OUTPUT_CHARS,
+            ));
         }
-    };
-    let (program, args) = command_for(provider, &cwd, &file);
-    let (output, code) = run_argv(&program, &args, &cwd, timeout_for(provider))?;
-    let display = file.to_string_lossy().to_string();
-    if provider == LspProvider::Python {
-        if code == 0 {
-            return Ok(format!("clean: no diagnostics for {}", display));
-        }
-        return Ok(crate::truncate_chars(
-            format!("diagnostics for {}:\n{}", display, output),
-            LSP_MAX_OUTPUT_CHARS,
-        ));
-    }
-    let (filtered, total) = filter_to_file(&output, &file, &filter_root);
-    Ok(render_result(&display, code, &filtered, total))
+        let (filtered, total) = filter_to_file(&output, &file, &filter_root);
+        Ok(render_result(&display, code, &filtered, total))
+    })
+    .await
+    .map_err(|error| format!("lsp_diagnostics: worker failed: {error}"))?
 }
 
 #[cfg(test)]

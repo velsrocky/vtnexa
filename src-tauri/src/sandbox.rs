@@ -65,24 +65,17 @@ pub(crate) fn platform_shell_cmd(cmd: &str) -> Command {
 /// POSIX only — Windows foreground execution goes through `run_capped`
 /// (pure-Rust kill-after-timeout), which needs none of these binaries.
 #[cfg_attr(windows, allow(dead_code))]
-pub(crate) fn exec_command(cmd: &str, timeout_secs: u64, cwd: &std::path::Path) -> Command {
-    let secs = format!("{timeout_secs}s");
+pub(crate) fn exec_command(cmd: &str, _timeout_secs: u64, cwd: &std::path::Path) -> Command {
     if firejail_available() {
         let mut c = Command::new(FIREJAIL_PATH);
         for flag in FLAGS {
             c.arg(flag);
         }
-        c.current_dir(cwd)
-            .arg("--")
-            .arg("timeout")
-            .arg(&secs)
-            .arg("sh")
-            .arg("-c")
-            .arg(cmd);
+        c.current_dir(cwd).arg("--").arg("sh").arg("-c").arg(cmd);
         c
     } else {
-        let mut c = Command::new("timeout");
-        c.arg(&secs).arg("sh").arg("-c").arg(cmd).current_dir(cwd);
+        let mut c = platform_shell_cmd(cmd);
+        c.current_dir(cwd);
         c
     }
 }
@@ -129,6 +122,9 @@ mod tests {
         let c = exec_command("echo hi", 30, std::path::Path::new("."));
         let joined = format!("{c:?}");
         assert!(joined.contains("echo hi"));
+        #[cfg(windows)]
+        assert!(joined.contains("/C"));
+        #[cfg(not(windows))]
         assert!(joined.contains("-c"));
     }
 
@@ -137,6 +133,9 @@ mod tests {
         let c = exec_bg_command("sleep 60", std::path::Path::new("."));
         let joined = format!("{c:?}");
         assert!(joined.contains("sleep 60"));
+        #[cfg(windows)]
+        assert!(joined.contains("/C"));
+        #[cfg(not(windows))]
         assert!(joined.contains("-c"));
         // Bg jobs are bounded by the 30min poll-kill, not `timeout 30s`.
         assert!(!joined.contains("\"30s\""));

@@ -1,5 +1,8 @@
 use crate::util::{truncate_chars, write_atomic};
-use crate::workspace::{root_snapshot, WorkspaceRoots};
+use crate::workspace::{
+    checked_internal_path, ensure_internal_parents, root_snapshot, WorkspaceRoots,
+};
+use std::io::Read;
 
 // ---- Nexa Pad/Plan: two small live files the agent can read AND write ----
 // Confined by construction: `kind` is an enum, never a path, so there is no
@@ -16,37 +19,67 @@ pub(crate) fn nexa_filename(kind: &str) -> Result<&'static str, String> {
     }
 }
 
-/// Size-checked read: refuse files bigger than `max` BEFORE loading them
-/// into memory (metadata gate + post-read check against TOCTOU growth).
-fn read_capped(path: &std::path::Path, max: usize, what: &str) -> Result<String, String> {
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > max as u64 {
-            return Err(format!(
-                "{}: file too large ({} bytes, max {})",
-                what,
-                meta.len(),
-                max
-            ));
-        }
-    }
-    let s = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err("__not_found__".to_string())
-        }
-        Err(e) => return Err(e.to_string()),
-    };
-    if s.len() > max {
-        return Err(format!(
-            "{}: file too large ({} bytes, max {})",
-            what,
-            s.len(),
-            max
+fn read_bounded_internal_bytes(
+    root: &std::path::Path,
+    relative: &std::path::Path,
+    max: usize,
+    what: &str,
+) -> Result<Vec<u8>, (std::io::ErrorKind, String)> {
+    let path = checked_internal_path(root, relative, what)
+        .map_err(|error| (std::io::ErrorKind::Other, error))?;
+    let file = std::fs::File::open(&path).map_err(|error| (error.kind(), error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| (error.kind(), error.to_string()))?;
+    if !metadata.is_file() {
+        return Err((
+            std::io::ErrorKind::InvalidData,
+            format!("{}: not a regular file", what),
         ));
     }
-    Ok(s)
+    if metadata.len() > max as u64 {
+        return Err((
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{}: file too large ({} bytes, max {})",
+                what,
+                metadata.len(),
+                max
+            ),
+        ));
+    }
+    checked_internal_path(root, relative, what)
+        .map_err(|error| (std::io::ErrorKind::Other, error))?;
+    let capacity = usize::try_from(metadata.len()).unwrap_or(0).min(max);
+    let mut bytes = Vec::with_capacity(capacity);
+    let limit = max as u64 + 1;
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| (error.kind(), error.to_string()))?;
+    if bytes.len() > max {
+        return Err((
+            std::io::ErrorKind::InvalidData,
+            format!("{}: file too large (more than {} bytes)", what, max),
+        ));
+    }
+    Ok(bytes)
 }
 
+fn read_capped(
+    root: &std::path::Path,
+    relative: &std::path::Path,
+    max: usize,
+    what: &str,
+) -> Result<String, String> {
+    let bytes = match read_bounded_internal_bytes(root, relative, max, what) {
+        Ok(bytes) => bytes,
+        Err((std::io::ErrorKind::NotFound, _)) => return Err("__not_found__".to_string()),
+        Err((_, error)) => return Err(error),
+    };
+    String::from_utf8(bytes).map_err(|_| format!("{}: file is not valid UTF-8", what))
+}
+
+#[allow(dead_code)]
 pub(crate) fn nexa_path_for(
     root: &std::path::Path,
     kind: &str,
@@ -61,11 +94,11 @@ pub(crate) fn nexa_read(
     kind: String,
 ) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
-    let path = nexa_path_for(&root, &kind)?;
-    match std::fs::read_to_string(&path) {
-        Ok(s) => Ok(truncate_chars(s, NEXA_MAX_BYTES)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e.to_string()),
+    let relative = std::path::Path::new(".nexa").join(nexa_filename(&kind)?);
+    match read_capped(&root, &relative, NEXA_MAX_BYTES, "nexa_read") {
+        Ok(content) => Ok(truncate_chars(content, NEXA_MAX_BYTES)),
+        Err(error) if error == "__not_found__" => Ok(String::new()),
+        Err(error) => Err(error),
     }
 }
 
@@ -87,10 +120,9 @@ pub(crate) fn nexa_write(
         ));
     }
     let root = root_snapshot(&state, window.label());
-    let path = nexa_path_for(&root, &kind)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+    let relative = std::path::Path::new(".nexa").join(nexa_filename(&kind)?);
+    ensure_internal_parents(&root, &relative, "nexa_write")?;
+    let path = checked_internal_path(&root, &relative, "nexa_write")?;
     write_atomic(&path, content.as_bytes())
 }
 
@@ -99,6 +131,7 @@ pub(crate) fn nexa_write(
 // restores the workspace exactly as it was left. Larger cap than the notes.
 pub(crate) const SESSION_MAX_BYTES: usize = 2 * 1024 * 1024;
 
+#[allow(dead_code)]
 pub(crate) fn session_path_for(root: &std::path::Path) -> std::path::PathBuf {
     root.join(".nexa").join("session.json")
 }
@@ -109,8 +142,8 @@ pub(crate) fn session_load(
     state: tauri::State<'_, WorkspaceRoots>,
 ) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
-    let path = session_path_for(&root);
-    match read_capped(&path, SESSION_MAX_BYTES, "session") {
+    let relative = std::path::Path::new(".nexa/session.json");
+    match read_capped(&root, relative, SESSION_MAX_BYTES, "session") {
         Ok(s) => Ok(s),
         Err(e) if e == "__not_found__" => Ok(String::new()),
         Err(e) => Err(e),
@@ -134,10 +167,9 @@ pub(crate) fn session_save(
         ));
     }
     let root = root_snapshot(&state, window.label());
-    let path = session_path_for(&root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+    let relative = std::path::Path::new(".nexa/session.json");
+    ensure_internal_parents(&root, relative, "session_save")?;
+    let path = checked_internal_path(&root, relative, "session_save")?;
     write_atomic(&path, content.as_bytes())
 }
 
@@ -149,6 +181,7 @@ pub(crate) fn session_save(
 pub(crate) const SESSIONS_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const SESSIONS_LIST_LIMIT: usize = 100;
 
+#[allow(dead_code)]
 pub(crate) fn sessions_dir_for(root: &std::path::Path) -> std::path::PathBuf {
     root.join(".nexa").join("sessions")
 }
@@ -161,6 +194,7 @@ pub(crate) fn valid_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+#[allow(dead_code)]
 pub(crate) fn session_file_for(
     root: &std::path::Path,
     id: &str,
@@ -180,6 +214,16 @@ pub struct SessionMeta {
     pub updated: i64,
     pub message_count: usize,
     pub preview: String,
+}
+
+fn session_meta_from_bounded_file(
+    root: &std::path::Path,
+    relative: &std::path::Path,
+    id: &str,
+) -> Option<SessionMeta> {
+    let bytes = read_bounded_internal_bytes(root, relative, SESSIONS_MAX_BYTES, "session").ok()?;
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+    Some(session_meta_from_value(id, &value))
 }
 
 pub(crate) fn session_meta_from_value(id: &str, v: &serde_json::Value) -> SessionMeta {
@@ -234,7 +278,8 @@ pub(crate) fn sessions_list(
     state: tauri::State<'_, WorkspaceRoots>,
 ) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
-    let dir = sessions_dir_for(&root);
+    let relative_dir = std::path::Path::new(".nexa/sessions");
+    let dir = checked_internal_path(&root, relative_dir, "sessions_list")?;
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -244,7 +289,9 @@ pub(crate) fn sessions_list(
     };
     let mut out: Vec<SessionMeta> = Vec::new();
     for e in entries.flatten().take(SESSIONS_LIST_LIMIT * 2) {
-        let path = e.path();
+        let file_name = e.file_name();
+        let relative = relative_dir.join(&file_name);
+        let path = checked_internal_path(&root, &relative, "sessions_list")?;
         if path.extension().and_then(|x| x.to_str()) != Some("json") {
             continue;
         }
@@ -254,16 +301,10 @@ pub(crate) fn sessions_list(
         if !valid_session_id(stem) {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Some(meta) = session_meta_from_bounded_file(&root, &relative, stem) else {
             continue;
         };
-        if bytes.len() > SESSIONS_MAX_BYTES {
-            continue;
-        }
-        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            continue; // skip corrupt files, never fail the whole list
-        };
-        out.push(session_meta_from_value(stem, &v));
+        out.push(meta);
         if out.len() >= SESSIONS_LIST_LIMIT {
             break;
         }
@@ -280,8 +321,11 @@ pub(crate) fn session_get(
     id: String,
 ) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
-    let path = session_file_for(&root, &id)?;
-    match read_capped(&path, SESSIONS_MAX_BYTES, "session") {
+    if !valid_session_id(&id) {
+        return Err("session: invalid id (letters, numbers, -, _; 64 max)".to_string());
+    }
+    let relative = std::path::Path::new(".nexa/sessions").join(format!("{}.json", id));
+    match read_capped(&root, &relative, SESSIONS_MAX_BYTES, "session") {
         Ok(s) => Ok(s),
         Err(e) if e == "__not_found__" => Err("session: not found".to_string()),
         Err(e) => Err(e),
@@ -309,10 +353,12 @@ pub(crate) fn session_put(
     serde_json::from_str::<serde_json::Value>(&content)
         .map_err(|e| format!("session: invalid JSON: {}", e))?;
     let root = root_snapshot(&state, window.label());
-    let path = session_file_for(&root, &id)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    if !valid_session_id(&id) {
+        return Err("session: invalid id (letters, numbers, -, _; 64 max)".to_string());
     }
+    let relative = std::path::Path::new(".nexa/sessions").join(format!("{}.json", id));
+    ensure_internal_parents(&root, &relative, "session_put")?;
+    let path = checked_internal_path(&root, &relative, "session_put")?;
     write_atomic(&path, content.as_bytes())
 }
 
@@ -323,7 +369,12 @@ pub(crate) fn session_delete(
     id: String,
 ) -> Result<(), String> {
     let root = root_snapshot(&state, window.label());
-    let path = session_file_for(&root, &id)?;
+    if !valid_session_id(&id) {
+        return Err("session: invalid id (letters, numbers, -, _; 64 max)".to_string());
+    }
+    let relative = std::path::Path::new(".nexa/sessions").join(format!("{}.json", id));
+    checked_internal_path(&root, &relative, "session_delete")?;
+    let path = checked_internal_path(&root, &relative, "session_delete")?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -334,6 +385,7 @@ pub(crate) fn session_delete(
 // ---- Routines persistence (.nexa/routines.json) ----
 pub(crate) const ROUTINES_MAX_BYTES: usize = 256 * 1024;
 
+#[allow(dead_code)]
 pub(crate) fn routines_path_for(root: &std::path::Path) -> std::path::PathBuf {
     root.join(".nexa").join("routines.json")
 }
@@ -344,8 +396,8 @@ pub(crate) fn routines_load(
     state: tauri::State<'_, WorkspaceRoots>,
 ) -> Result<String, String> {
     let root = root_snapshot(&state, window.label());
-    let path = routines_path_for(&root);
-    match read_capped(&path, ROUTINES_MAX_BYTES, "routines") {
+    let relative = std::path::Path::new(".nexa/routines.json");
+    match read_capped(&root, relative, ROUTINES_MAX_BYTES, "routines") {
         Ok(s) => Ok(s),
         Err(e) if e == "__not_found__" => Ok(String::new()),
         Err(e) => Err(e),
@@ -369,15 +421,79 @@ pub(crate) fn routines_save(
         ));
     }
     let root = root_snapshot(&state, window.label());
-    let path = routines_path_for(&root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+    let relative = std::path::Path::new(".nexa/routines.json");
+    ensure_internal_parents(&root, relative, "routines_save")?;
+    let path = checked_internal_path(&root, relative, "routines_save")?;
     write_atomic(&path, content.as_bytes())
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_root(label: &str) -> std::path::PathBuf {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("vtnexa-nexa-{label}-{id}"));
+        std::fs::create_dir_all(root.join(".nexa/sessions")).unwrap();
+        root
+    }
+
+    fn make_oversized(path: &std::path::Path, prefix: &[u8], size: usize) {
+        std::fs::write(path, prefix).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(size as u64)
+            .unwrap();
+    }
+
+    #[test]
+    fn oversized_note_is_rejected_before_utf8_use() {
+        let root = fixture_root("oversized-note");
+        let path = root.join(".nexa/pad.md");
+        make_oversized(&path, b"# heading\nvisible\n", NEXA_MAX_BYTES + 1);
+        let error = read_capped(
+            &root,
+            std::path::Path::new(".nexa/pad.md"),
+            NEXA_MAX_BYTES,
+            "nexa_read",
+        )
+        .unwrap_err();
+        assert!(error.contains("file too large"), "got: {}", error);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_session_is_rejected_before_utf8_use() {
+        let root = fixture_root("oversized-session");
+        let path = root.join(".nexa/session.json");
+        make_oversized(&path, br#"{"title":"visible"}"#, SESSION_MAX_BYTES + 1);
+        let error = read_capped(
+            &root,
+            std::path::Path::new(".nexa/session.json"),
+            SESSION_MAX_BYTES,
+            "session",
+        )
+        .unwrap_err();
+        assert!(error.contains("file too large"), "got: {}", error);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_named_session_is_skipped_without_partial_parse() {
+        let root = fixture_root("oversized-named-session");
+        let relative = std::path::Path::new(".nexa/sessions/large.json");
+        make_oversized(
+            &root.join(relative),
+            br#"{"title":"visible","updated":1}"#,
+            SESSIONS_MAX_BYTES + 1,
+        );
+        assert!(session_meta_from_bounded_file(&root, relative, "large").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn nexa_paths_stay_inside_root() {

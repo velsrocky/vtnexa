@@ -6,7 +6,8 @@
 // confined; outputs truncated. Servers: typescript-language-server and
 // rust-analyzer when installed, with install hints otherwise.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use crate::process;
+use std::io::{BufReader, Read, Write};
 use std::time::{Duration, Instant};
 
 pub(crate) const LSP_OP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -171,7 +172,158 @@ struct Roundtrip<'a> {
     timeout: Duration,
 }
 
-fn roundtrip(rt: Roundtrip<'_>) -> Result<Vec<serde_json::Value>, String> {
+const LSP_MAX_HEADER_LINE: usize = 8 * 1024;
+const LSP_MAX_BODY: usize = 1024 * 1024;
+const LSP_MAX_MESSAGES: usize = 100;
+const LSP_MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
+
+struct BoundedLspReader<R> {
+    reader: R,
+    total: usize,
+    messages: usize,
+}
+
+impl<R: Read> BoundedLspReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            total: 0,
+            messages: 0,
+        }
+    }
+
+    fn read_header_line(&mut self) -> Result<Option<Vec<u8>>, String> {
+        let mut line = Vec::new();
+        loop {
+            let mut byte = [0u8; 1];
+            match self.reader.read(&mut byte) {
+                Ok(0) if line.is_empty() => return Ok(None),
+                Ok(0) => return Err("lsp: truncated message header".to_string()),
+                Ok(_) => {}
+                Err(error) => return Err(format!("lsp: stdout read failed: {}", error)),
+            }
+            self.total = self.total.saturating_add(1);
+            if self.total > LSP_MAX_TOTAL_BYTES {
+                return Err(format!(
+                    "lsp: response exceeded {} bytes",
+                    LSP_MAX_TOTAL_BYTES
+                ));
+            }
+            if byte[0] == b'\n' {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                return Ok(Some(line));
+            }
+            if line.len() >= LSP_MAX_HEADER_LINE {
+                return Err(format!(
+                    "lsp: header line exceeded {} bytes",
+                    LSP_MAX_HEADER_LINE
+                ));
+            }
+            line.push(byte[0]);
+        }
+    }
+
+    fn read_body(&mut self, length: usize) -> Result<Vec<u8>, String> {
+        if length == 0 || length > LSP_MAX_BODY {
+            return Err(format!(
+                "lsp: Content-Length must be 1..={} bytes",
+                LSP_MAX_BODY
+            ));
+        }
+        if self.total.saturating_add(length) > LSP_MAX_TOTAL_BYTES {
+            return Err(format!(
+                "lsp: response exceeded {} bytes",
+                LSP_MAX_TOTAL_BYTES
+            ));
+        }
+        let mut body = vec![0u8; length];
+        let mut read = 0;
+        while read < length {
+            let count = match self.reader.read(&mut body[read..]) {
+                Ok(0) => return Err("lsp: truncated message body".to_string()),
+                Ok(count) => count,
+                Err(error) => return Err(format!("lsp: stdout read failed: {}", error)),
+            };
+            read += count;
+            self.total = self.total.saturating_add(count);
+        }
+        Ok(body)
+    }
+
+    fn next_message(&mut self) -> Result<Option<serde_json::Value>, String> {
+        let mut content_length = None;
+        let mut headers = 0;
+        loop {
+            let Some(line) = self.read_header_line()? else {
+                return Ok(None);
+            };
+            if line.is_empty() {
+                break;
+            }
+            headers += 1;
+            if headers > 32 {
+                return Err("lsp: too many message headers".to_string());
+            }
+            let Some(separator) = line.iter().position(|byte| *byte == b':') else {
+                return Err("lsp: malformed message header".to_string());
+            };
+            let name = &line[..separator];
+            let value = &line[separator + 1..];
+            if name.eq_ignore_ascii_case(b"content-length") {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| "lsp: invalid Content-Length".to_string())?
+                    .trim();
+                content_length = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "lsp: invalid Content-Length".to_string())?,
+                );
+            }
+        }
+        let Some(length) = content_length else {
+            return Err("lsp: message has no Content-Length".to_string());
+        };
+        let body = self.read_body(length)?;
+        self.messages = self.messages.saturating_add(1);
+        if self.messages > LSP_MAX_MESSAGES {
+            return Err(format!(
+                "lsp: server sent more than {} messages",
+                LSP_MAX_MESSAGES
+            ));
+        }
+        serde_json::from_slice(&body)
+            .map(Some)
+            .map_err(|error| format!("lsp: malformed JSON message: {}", error))
+    }
+}
+
+fn lsp_reader(
+    stdout: impl Read + Send + 'static,
+) -> std::sync::mpsc::Receiver<Result<serde_json::Value, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut reader = BoundedLspReader::new(BufReader::new(stdout));
+        loop {
+            match reader.next_message() {
+                Ok(Some(value)) => {
+                    if tx.send(Ok(value)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = tx.send(Err(error));
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
+
+fn roundtrip(rt: Roundtrip<'_>) -> Result<serde_json::Value, String> {
     let Roundtrip {
         program,
         args,
@@ -182,141 +334,97 @@ fn roundtrip(rt: Roundtrip<'_>) -> Result<Vec<serde_json::Value>, String> {
         op_first_id,
         timeout,
     } = rt;
-    let mut child = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "lsp: cannot run {} ({}). Hint: {}",
-                program, e, "see install hint"
-            )
-        })?;
-    let mut stdin = child.stdin.take().ok_or("lsp: no stdin")?;
-    let stdout = child.stdout.take().ok_or("lsp: no stdout")?;
-
-    let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            // Header scan for Content-Length.
-            let mut len: Option<usize> = None;
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-                let t = line.trim();
-                if t.is_empty() {
-                    break;
-                }
-                if let Some(v) = t
-                    .strip_prefix("Content-Length:")
-                    .or_else(|| t.strip_prefix("Content-length:"))
-                {
-                    len = v.trim().parse().ok();
-                }
-            }
-            let len = match len {
-                Some(l) if l > 0 && l <= 8 * 1024 * 1024 => l,
-                _ => {
-                    if len.is_none() {
-                        break;
-                    } // EOF or garbage: stop.
-                    continue;
-                }
-            };
-            let mut buf = vec![0u8; len];
-            if reader.read_exact(&mut buf).is_err() {
-                break;
-            }
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) {
-                if tx.send(v).is_err() {
-                    break;
-                }
-            }
+        .stderr(std::process::Stdio::null());
+    let mut child = process::spawn_managed(&mut command).map_err(|error| {
+        format!(
+            "lsp: cannot run {} ({}). Hint: {}",
+            program, error, "see install hint"
+        )
+    })?;
+    let mut stdin = match child.child_mut().stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            let _ = child.terminate();
+            return Err("lsp: no stdin".to_string());
         }
-    });
-
+    };
+    let stdout = match child.child_mut().stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.terminate();
+            return Err("lsp: no stdout".to_string());
+        }
+    };
+    let rx = lsp_reader(stdout);
     let deadline = Instant::now() + timeout;
-    let out = std::cell::RefCell::new(Vec::<serde_json::Value>::new());
-    // Each stage: send, then wait for its reply id (None = notification-only).
-    let mut stage = |frames: &[Vec<u8>], wait_id: Option<u64>| -> Result<(), String> {
-        for f in frames {
+    let mut stage = |frames: &[Vec<u8>],
+                     wait_id: Option<u64>|
+     -> Result<Option<serde_json::Value>, String> {
+        for frame in frames {
             stdin
-                .write_all(f)
-                .map_err(|e| format!("lsp: stdin write failed: {}", e))?;
+                .write_all(frame)
+                .map_err(|error| format!("lsp: stdin write failed: {}", error))?;
         }
         stdin
             .flush()
-            .map_err(|e| format!("lsp: stdin flush failed: {}", e))?;
-        let Some(want) = wait_id else { return Ok(()) };
+            .map_err(|error| format!("lsp: stdin flush failed: {}", error))?;
+        let Some(want) = wait_id else {
+            return Ok(None);
+        };
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err("lsp: server gave no response (timeout or crash — retry; first runs index the project)".to_string());
             }
             match rx.recv_timeout(left.min(Duration::from_millis(250))) {
-                Ok(v) => {
-                    let is_want = v.get("id").and_then(|i| i.as_u64()) == Some(want);
-                    out.borrow_mut().push(v);
-                    if out.borrow().len() > 100 {
-                        return Err("lsp: server chattered too much (50+ messages)".to_string());
-                    }
-                    if is_want {
-                        return Ok(());
+                Ok(Ok(value)) => {
+                    if value.get("id").and_then(|id| id.as_u64()) == Some(want) {
+                        return Ok(Some(value));
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Ok(Err(error)) => return Err(error),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err("lsp: server gave no response (timeout or crash — retry; first runs index the project)".to_string())
+                    return Err("lsp: server gave no response (timeout or crash — retry; first runs index the project)".to_string());
                 }
             }
         }
     };
-
-    let shutdown = frame(&rpc("shutdown", Some(3), serde_json::json!(null)));
-    let exit = frame(&rpc("exit", None, serde_json::json!(null)));
-    // Settle retries: a cold server answers empty until analysis lands.
-    // Same session (no respawn), fresh ids, bounded sleeps.
-    let mut next_id = op_first_id;
-    let mut last_id = op_first_id;
     let result = (|| {
         stage(init_frames, Some(1))?;
         stage(open_frames, None)?;
+        let mut id = op_first_id;
         for attempt in 0..3 {
-            let id = next_id;
-            next_id += 2;
-            last_id = id;
-            stage(std::slice::from_ref(&op_frame(id)), Some(id))?;
-            if !result_is_empty(find_id(&out.borrow(), id)) || attempt == 2 {
-                break;
+            let current = id;
+            id += 2;
+            let Some(value) = stage(std::slice::from_ref(&op_frame(current)), Some(current))?
+            else {
+                return Err("lsp: server gave no operation response".to_string());
+            };
+            if !result_is_empty(Some(&value)) || attempt == 2 {
+                return Ok(value);
             }
-            std::thread::sleep(Duration::from_secs(2 * (attempt + 1) as u64));
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err("lsp: server gave no response (timeout or crash — retry; first runs index the project)".to_string());
+            }
+            std::thread::sleep(Duration::from_secs(2 * (attempt + 1) as u64).min(left));
         }
-        // Shutdown handshake before exit: exiting early drops queued replies
-        // on conforming servers. Best-effort under the same deadline.
-        let _ = stage(std::slice::from_ref(&shutdown), Some(3));
-        let _ = stage(std::slice::from_ref(&exit), None);
-        // Let the goodbye flush through the pipe before reaping.
-        std::thread::sleep(Duration::from_millis(300));
-        Ok(last_id)
+        Err("lsp: server gave no operation response".to_string())
     })();
     drop(stdin);
-    let _ = child.kill();
-    let _ = child.wait();
-    result.map(|id| {
-        out.borrow()
-            .iter()
-            .filter(|v| v.get("id").and_then(|i| i.as_u64()) == Some(id))
-            .cloned()
-            .collect()
-    })
+    match (result, child.terminate()) {
+        (Ok(value), Ok(_)) => Ok(value),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(format!("lsp: process cleanup failed: {cleanup}")),
+        (Err(error), Err(cleanup)) => Err(format!("{error}; cleanup failed: {cleanup}")),
+    }
 }
 
 /// Cold servers answer `result: null` (or `[]`) until analysis lands.
@@ -326,12 +434,6 @@ fn result_is_empty(resp: Option<&serde_json::Value>) -> bool {
         Some(serde_json::Value::Array(a)) => a.is_empty(),
         Some(_) => false,
     }
-}
-
-fn find_id(responses: &[serde_json::Value], id: u64) -> Option<&serde_json::Value> {
-    responses
-        .iter()
-        .find(|v| v.get("id").and_then(|i| i.as_u64()) == Some(id))
 }
 
 // ---- Result rendering (pure, tested) ----
@@ -499,7 +601,7 @@ pub(crate) fn run_lsp_op(
     };
     let op_frame = |id: u64| frame(&rpc(method, Some(id), params.clone()));
 
-    let mut responses = roundtrip(Roundtrip {
+    let resp = roundtrip(Roundtrip {
         program,
         args,
         cwd: project_root,
@@ -508,10 +610,6 @@ pub(crate) fn run_lsp_op(
         op_frame: &op_frame,
         op_first_id: 2,
         timeout: LSP_OP_TIMEOUT,
-    })?;
-    let resp = responses.pop().ok_or_else(|| {
-        "lsp: server gave no response (timeout or crash — retry; first runs index the project)"
-            .to_string()
     })?;
     if let Some(err) = resp.get("error") {
         let msg = err
@@ -529,7 +627,7 @@ pub(crate) fn run_lsp_op(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn lsp_op(
+pub(crate) async fn lsp_op(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, crate::WorkspaceRoots>,
     approvals: tauri::State<'_, crate::approvals::ApprovalStore>,
@@ -593,30 +691,33 @@ pub(crate) fn lsp_op(
             &approval_token,
         )?;
     }
-    let disk_text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
-    if disk_text.len() > 1024 * 1024 {
-        return Err("lsp: file too large (1MB max)".to_string());
-    }
-    run_lsp_op(
-        &program,
-        &args,
-        &project_root,
-        &file,
-        language_id(lang, &ext),
-        &disk_text,
-        op,
-        line.unwrap_or(1),
-        character.unwrap_or(1),
-        symbol.as_deref().unwrap_or(""),
-    )
-    .map_err(|e| {
-        // Spawn failure = missing server: point at the install, not the OS error.
-        if e.contains("cannot run") {
-            format!("{} — {}", e, install_hint(lang))
-        } else {
-            e
+    tauri::async_runtime::spawn_blocking(move || {
+        let disk_text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+        if disk_text.len() > 1024 * 1024 {
+            return Err("lsp: file too large (1MB max)".to_string());
         }
+        run_lsp_op(
+            &program,
+            &args,
+            &project_root,
+            &file,
+            language_id(lang, &ext),
+            &disk_text,
+            op,
+            line.unwrap_or(1),
+            character.unwrap_or(1),
+            &symbol.unwrap_or_default(),
+        )
+        .map_err(|e| {
+            if e.contains("cannot run") {
+                format!("{} — {}", e, install_hint(lang))
+            } else {
+                e
+            }
+        })
     })
+    .await
+    .map_err(|error| format!("lsp: worker failed: {error}"))?
 }
 
 #[cfg(test)]
@@ -780,5 +881,32 @@ while True:
         .expect("roundtrip failed");
         assert_eq!(out, "mock-hover");
         let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn oversized_lsp_header_is_rejected() {
+        let data = format!("X: {}\r\n\r\n", "x".repeat(LSP_MAX_HEADER_LINE + 1));
+        let mut reader = BoundedLspReader::new(std::io::Cursor::new(data.into_bytes()));
+        let error = reader.next_message().unwrap_err();
+        assert!(error.contains("header line exceeded"));
+    }
+
+    #[test]
+    fn oversized_lsp_body_is_rejected() {
+        let data = format!("Content-Length: {}\r\n\r\n", LSP_MAX_BODY + 1);
+        let mut reader = BoundedLspReader::new(std::io::Cursor::new(data.into_bytes()));
+        let error = reader.next_message().unwrap_err();
+        assert!(error.contains("Content-Length"));
+    }
+
+    #[test]
+    fn malformed_lsp_json_is_rejected() {
+        let body = b"not-json";
+        let data = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut bytes = data.into_bytes();
+        bytes.extend_from_slice(body);
+        let mut reader = BoundedLspReader::new(std::io::Cursor::new(bytes));
+        let error = reader.next_message().unwrap_err();
+        assert!(error.contains("malformed JSON"));
     }
 }

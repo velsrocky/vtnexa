@@ -1,6 +1,9 @@
 use crate::approvals;
 use crate::util::{write_atomic, MAX_LIST_ENTRIES, MAX_READ_BYTES, MAX_WRITE_BYTES};
-use crate::workspace::{checked_path, is_trusted_path, root_snapshot, AppSettings, WorkspaceRoots};
+use crate::workspace::{
+    checked_path, is_generic_private_path, is_link_or_reparse, is_trusted_path,
+    reject_generic_private_path, root_snapshot, AppSettings, WorkspaceRoots,
+};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
@@ -12,18 +15,26 @@ pub struct FileEntry {
 }
 
 #[tauri::command]
-pub(crate) fn fs_list(
-    window: tauri::WebviewWindow,
+pub(crate) fn fs_list<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     state: tauri::State<'_, WorkspaceRoots>,
     path: String,
 ) -> Result<Vec<FileEntry>, String> {
     let safe = checked_path(&state, window.label(), path, "fs_list")?;
+    let root = root_snapshot(&state, window.label());
+    reject_generic_private_path(&root, &safe, "fs_list")?;
     let entries = std::fs::read_dir(&safe).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for e in entries {
         let e = e.map_err(|e| e.to_string())?;
         let p = e.path();
+        if is_generic_private_path(&root, &p) {
+            continue;
+        }
         let ft = e.file_type().map_err(|e| e.to_string())?;
+        if is_link_or_reparse(&p) {
+            continue;
+        }
         out.push(FileEntry {
             name: e.file_name().to_string_lossy().to_string(),
             path: p.to_string_lossy().to_string(),
@@ -42,12 +53,14 @@ pub(crate) fn fs_list(
 }
 
 #[tauri::command]
-pub(crate) fn fs_read(
-    window: tauri::WebviewWindow,
+pub(crate) fn fs_read<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     state: tauri::State<'_, WorkspaceRoots>,
     path: String,
 ) -> Result<String, String> {
     let safe = checked_path(&state, window.label(), path, "fs_read")?;
+    let root = root_snapshot(&state, window.label());
+    reject_generic_private_path(&root, &safe, "fs_read")?;
     let meta = std::fs::metadata(&safe).map_err(|e| e.to_string())?;
     if meta.len() > MAX_READ_BYTES {
         return Err(format!(
@@ -56,6 +69,7 @@ pub(crate) fn fs_read(
             MAX_READ_BYTES
         ));
     }
+    reject_generic_private_path(&root, &safe, "fs_read")?;
     std::fs::read_to_string(&safe).map_err(|e| e.to_string())
 }
 
@@ -72,6 +86,8 @@ pub(crate) fn fs_write(
     approval_detail: String,
 ) -> Result<(), String> {
     let safe = checked_path(&state, window.label(), path, "fs_write")?;
+    let root = root_snapshot(&state, window.label());
+    reject_generic_private_path(&root, &safe, "fs_write")?;
     let trusted_paths = settings
         .0
         .lock()
@@ -101,12 +117,14 @@ pub(crate) fn fs_write(
             MAX_WRITE_BYTES
         ));
     }
-    if let Some(parent) = safe.parent() {
+    let path = safe;
+    if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
     }
-    write_atomic(&safe, content.as_bytes())
+    reject_generic_private_path(&root, &path, "fs_write")?;
+    write_atomic(&path, content.as_bytes())
 }
 
 // ---- Workspace-wide search (grep + glob) ----
@@ -122,6 +140,7 @@ pub(crate) const NOISE_DIRS: &[&str] = &[
     ".hg",
     ".svn",
     ".nexa",
+    ".vtnexa",
     "node_modules",
     "target",
     "dist",
@@ -145,6 +164,7 @@ pub(crate) const NOISE_DIRS: &[&str] = &[
     "DerivedData",
     "Pods",
     "vtai-browser-profile",
+    "browser-profile",
 ];
 
 #[derive(Debug, Serialize)]
@@ -183,8 +203,18 @@ pub(crate) fn walk_files(
         let path = e.path();
         let name = e.file_name().to_string_lossy().to_string();
         let Ok(ft) = e.file_type() else { continue };
+        if is_link_or_reparse(&path) {
+            continue;
+        }
+        if is_generic_private_path(root, &path)
+            || NOISE_DIRS
+                .iter()
+                .any(|noise| noise.eq_ignore_ascii_case(&name))
+        {
+            continue;
+        }
         if ft.is_dir() {
-            if name.starts_with('.') || NOISE_DIRS.contains(&name.as_str()) {
+            if name.starts_with('.') {
                 continue;
             }
             walk_files(root, &path, visited, cb);
@@ -229,8 +259,8 @@ pub(crate) fn glob_matches(pat: &str, name: &str) -> bool {
 }
 
 #[tauri::command]
-pub(crate) fn fs_search(
-    window: tauri::WebviewWindow,
+pub(crate) fn fs_search<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     state: tauri::State<'_, WorkspaceRoots>,
     query: String,
     path: Option<String>,
@@ -248,10 +278,13 @@ pub(crate) fn fs_search(
     let root = root_snapshot(&state, window.label());
     let start = match path {
         Some(p) if !p.trim().is_empty() => {
-            checked_path(&state, window.label(), p, "fs_search.path")?
+            let path = checked_path(&state, window.label(), p, "fs_search.path")?;
+            reject_generic_private_path(&root, &path, "fs_search.path")?;
+            path
         }
         _ => root.clone(),
     };
+    reject_generic_private_path(&root, &start, "fs_search.path")?;
     if !start.is_dir() {
         return Err("fs_search.path: not a directory".to_string());
     }
@@ -338,8 +371,8 @@ pub(crate) fn fs_search(
 }
 
 #[tauri::command]
-pub(crate) fn fs_glob(
-    window: tauri::WebviewWindow,
+pub(crate) fn fs_glob<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     state: tauri::State<'_, WorkspaceRoots>,
     pattern: String,
     path: Option<String>,
@@ -353,9 +386,14 @@ pub(crate) fn fs_glob(
     }
     let root = root_snapshot(&state, window.label());
     let start = match path {
-        Some(p) if !p.trim().is_empty() => checked_path(&state, window.label(), p, "fs_glob.path")?,
+        Some(p) if !p.trim().is_empty() => {
+            let path = checked_path(&state, window.label(), p, "fs_glob.path")?;
+            reject_generic_private_path(&root, &path, "fs_glob.path")?;
+            path
+        }
         _ => root.clone(),
     };
+    reject_generic_private_path(&root, &start, "fs_glob.path")?;
     if !start.is_dir() {
         return Err("fs_glob.path: not a directory".to_string());
     }
@@ -381,13 +419,15 @@ pub(crate) fn fs_glob(
 // (parents included) or dirs and refuses to overwrite; rename refuses to
 // overwrite; delete refuses the workspace root itself.
 #[tauri::command]
-pub(crate) fn fs_create(
-    window: tauri::WebviewWindow,
+pub(crate) fn fs_create<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     state: tauri::State<'_, WorkspaceRoots>,
     path: String,
     is_dir: Option<bool>,
 ) -> Result<String, String> {
     let safe = checked_path(&state, window.label(), path, "fs_create")?;
+    let root = root_snapshot(&state, window.label());
+    reject_generic_private_path(&root, &safe, "fs_create")?;
     if safe.exists() {
         return Err("fs_create: already exists".to_string());
     }
@@ -399,14 +439,19 @@ pub(crate) fn fs_create(
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
         }
-        std::fs::write(&safe, "").map_err(|e| e.to_string())?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&safe)
+            .map_err(|e| e.to_string())?;
     }
+    reject_generic_private_path(&root, &safe, "fs_create")?;
     Ok(safe.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub(crate) fn fs_rename(
-    window: tauri::WebviewWindow,
+pub(crate) fn fs_rename<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     state: tauri::State<'_, WorkspaceRoots>,
     approvals: tauri::State<'_, approvals::ApprovalStore>,
     old_path: String,
@@ -414,6 +459,11 @@ pub(crate) fn fs_rename(
     approval_token: Option<String>,
     approval_detail: Option<String>,
 ) -> Result<String, String> {
+    let root = root_snapshot(&state, window.label());
+    let from = checked_path(&state, window.label(), old_path, "fs_rename.from")?;
+    let to = checked_path(&state, window.label(), new_path, "fs_rename.to")?;
+    reject_generic_private_path(&root, &from, "fs_rename.from")?;
+    reject_generic_private_path(&root, &to, "fs_rename.to")?;
     approvals::approval_consume(
         &approvals,
         window.label(),
@@ -421,8 +471,6 @@ pub(crate) fn fs_rename(
         &approval_detail,
         &approval_token,
     )?;
-    let from = checked_path(&state, window.label(), old_path, "fs_rename.from")?;
-    let to = checked_path(&state, window.label(), new_path, "fs_rename.to")?;
     if !from.exists() {
         return Err("fs_rename: source does not exist".to_string());
     }
@@ -434,13 +482,15 @@ pub(crate) fn fs_rename(
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
     }
+    reject_generic_private_path(&root, &from, "fs_rename.from")?;
+    reject_generic_private_path(&root, &to, "fs_rename.to")?;
     std::fs::rename(&from, &to).map_err(|e| e.to_string())?;
     Ok(to.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub(crate) fn fs_delete(
-    window: tauri::WebviewWindow,
+pub(crate) fn fs_delete<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     state: tauri::State<'_, WorkspaceRoots>,
     approvals: tauri::State<'_, approvals::ApprovalStore>,
     path: String,
@@ -448,6 +498,9 @@ pub(crate) fn fs_delete(
     approval_token: Option<String>,
     approval_detail: Option<String>,
 ) -> Result<(), String> {
+    let safe = checked_path(&state, window.label(), path, "fs_delete")?;
+    let root = root_snapshot(&state, window.label());
+    reject_generic_private_path(&root, &safe, "fs_delete")?;
     approvals::approval_consume(
         &approvals,
         window.label(),
@@ -455,8 +508,6 @@ pub(crate) fn fs_delete(
         &approval_detail,
         &approval_token,
     )?;
-    let safe = checked_path(&state, window.label(), path, "fs_delete")?;
-    let root = root_snapshot(&state, window.label());
     if safe == root {
         return Err("fs_delete: refusing to delete the workspace root".to_string());
     }

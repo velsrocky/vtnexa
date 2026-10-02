@@ -7,8 +7,8 @@
 // Refresh tokens rotate silently; a dead refresh surfaces as "sign in
 // again" instead of a raw 401.
 //
-// Secrets live ONLY in the keychain (account `mcp-oauth:<server>`). Config
-// carries ids and endpoints, never tokens. Error strings never include
+// Secrets live ONLY in the keychain (account `mcp-oauth:<server>:<url-id>`).
+// Config carries ids and endpoints, never tokens. Error strings never include
 // tokens, codes, verifiers or secrets.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -48,6 +48,8 @@ pub(crate) struct OAuthTokens {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredBlob {
+    #[serde(default)]
+    canonical_url: String,
     client: OAuthClientState,
     tokens: OAuthTokens,
 }
@@ -67,11 +69,17 @@ pub(crate) fn oauth_mode(cfg: &McpServerConfig) -> OAuthMode {
     }
 }
 
-fn oauth_account(server: &str) -> Result<String, String> {
+fn oauth_account(server: &str, mcp_url: &str) -> Result<String, String> {
     if !valid_server_name(server) {
         return Err("mcp: invalid server name".to_string());
     }
-    Ok(format!("{}{}", KEY_ACCOUNT_PREFIX, server))
+    let canonical = validate_remote_url(mcp_url)?;
+    let digest = Sha256::digest(canonical.as_bytes());
+    let url_id = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{}{}:{}", KEY_ACCOUNT_PREFIX, server, url_id))
 }
 
 fn now_unix() -> i64 {
@@ -88,60 +96,118 @@ pub(crate) fn tokens_live(tokens: &OAuthTokens) -> bool {
     tokens.expires_at == 0 || now_unix() < tokens.expires_at - CLOCK_SKEW_SECS
 }
 
-fn load_blob(server: &str) -> Result<Option<StoredBlob>, String> {
-    let account = oauth_account(server)?;
-    // A keychain that cannot be REACHED means no token - not a failure.
-    // Anything downstream still gets correct behavior (server treated as
-    // unauthenticated, re-auth flow offered), and tool discovery never dies
-    // on CI boxes / fresh installs without a secret service. keyring v4
-    // changed error taxonomy (NoStorageAccess/NoMatchingEntry vs NoEntry),
-    // so match on capability, not variant.
-    let entry = match keyring::Entry::new(crate::KEY_SERVICE, &account) {
-        Ok(e) => e,
-        Err(_) => return Ok(None),
-    };
-    match entry.get_password() {
-        Ok(raw) => {
-            let blob: StoredBlob = serde_json::from_str(&raw).map_err(|_| {
-                format!(
-                    "mcp: stored credentials for '{}' are corrupt — sign in again",
-                    server
-                )
-            })?;
-            Ok(Some(blob))
+trait CredentialStore {
+    fn get(&self, account: &str) -> Result<Option<String>, String>;
+    fn set(&self, account: &str, value: &str) -> Result<(), String>;
+    fn delete(&self, account: &str) -> Result<(), String>;
+}
+
+struct KeyringCredentialStore;
+
+impl CredentialStore for KeyringCredentialStore {
+    fn get(&self, account: &str) -> Result<Option<String>, String> {
+        let entry = match keyring::Entry::new(crate::KEY_SERVICE, account) {
+            Ok(entry) => entry,
+            Err(_) => return Ok(None),
+        };
+        match entry.get_password() {
+            Ok(raw) => Ok(Some(raw)),
+            Err(keyring::Error::NoEntry) | Err(_) => Ok(None),
         }
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(_) => Ok(None),
+    }
+
+    fn set(&self, account: &str, value: &str) -> Result<(), String> {
+        keyring::Entry::new(crate::KEY_SERVICE, account)
+            .map_err(|error| format!("keyring unavailable: {}", error))?
+            .set_password(value)
+            .map_err(|error| {
+                format!(
+                    "mcp: cannot store tokens in OS keychain ({}). Without a keychain daemon OAuth login cannot persist — start one (e.g. gnome-keyring) and retry",
+                    error
+                )
+            })
+    }
+
+    fn delete(&self, account: &str) -> Result<(), String> {
+        match keyring::Entry::new(crate::KEY_SERVICE, account)
+            .map_err(|error| format!("keyring unavailable: {}", error))?
+            .delete_credential()
+        {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!("keyring unavailable: {}", error)),
+        }
     }
 }
 
-fn store_blob(server: &str, blob: &StoredBlob) -> Result<(), String> {
-    let account = oauth_account(server)?;
-    let raw = serde_json::to_string(blob).map_err(|e| e.to_string())?;
+fn load_blob_with(
+    store: &dyn CredentialStore,
+    server: &str,
+    mcp_url: &str,
+) -> Result<Option<StoredBlob>, String> {
+    let expected_url = validate_remote_url(mcp_url)?;
+    let account = oauth_account(server, &expected_url)?;
+    let Some(raw) = store.get(&account)? else {
+        return Ok(None);
+    };
+    let blob: StoredBlob = serde_json::from_str(&raw).map_err(|_| {
+        format!(
+            "mcp: stored credentials for '{}' are corrupt — sign in again",
+            server
+        )
+    })?;
+    let stored_url = validate_remote_url(&blob.canonical_url).map_err(|_| {
+        format!(
+            "mcp: stored credentials for '{}' have no valid server URL — sign in again",
+            server
+        )
+    })?;
+    if stored_url != expected_url {
+        return Err(format!(
+            "mcp: stored credentials for '{}' do not match the configured server URL — sign in again",
+            server
+        ));
+    }
+    Ok(Some(blob))
+}
+
+fn load_blob(server: &str, mcp_url: &str) -> Result<Option<StoredBlob>, String> {
+    load_blob_with(&KeyringCredentialStore, server, mcp_url)
+}
+
+fn store_blob_with(
+    store: &dyn CredentialStore,
+    server: &str,
+    mcp_url: &str,
+    client: OAuthClientState,
+    tokens: OAuthTokens,
+) -> Result<(), String> {
+    let canonical_url = validate_remote_url(mcp_url)?;
+    let account = oauth_account(server, &canonical_url)?;
+    let blob = StoredBlob {
+        canonical_url,
+        client,
+        tokens,
+    };
+    let raw = serde_json::to_string(&blob).map_err(|error| error.to_string())?;
     if raw.len() > 16384 {
         return Err("mcp: credential blob too large".to_string());
     }
-    keyring::Entry::new(crate::KEY_SERVICE, &account)
-        .map_err(|e| format!("keyring unavailable: {}", e))?
-        .set_password(&raw)
-        .map_err(|e| {
-            format!(
-                "mcp: cannot store tokens in OS keychain ({}). Without a keychain daemon OAuth login cannot persist — start one (e.g. gnome-keyring) and retry",
-                e
-            )
-        })
+    store.set(&account, &raw)
 }
 
-fn delete_blob(server: &str) -> Result<(), String> {
-    let account = oauth_account(server)?;
-    match keyring::Entry::new(crate::KEY_SERVICE, &account)
-        .map_err(|e| format!("keyring unavailable: {}", e))?
-        .delete_credential()
-    {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("keyring unavailable: {}", e)),
-    }
+fn store_blob(
+    server: &str,
+    mcp_url: &str,
+    client: OAuthClientState,
+    tokens: OAuthTokens,
+) -> Result<(), String> {
+    store_blob_with(&KeyringCredentialStore, server, mcp_url, client, tokens)
+}
+
+fn delete_blob(server: &str, mcp_url: &str) -> Result<(), String> {
+    let account = oauth_account(server, mcp_url)?;
+    KeyringCredentialStore.delete(&account)
 }
 
 // ---- Pure helpers (unit tested) ----
@@ -167,6 +233,7 @@ pub(crate) fn auth_server_wellknown(origin: &str) -> String {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn mcp_origin(mcp_url: &str) -> String {
     match mcp_url.split_once("://") {
         Some((scheme, rest)) => format!("{}://{}", scheme, rest.split('/').next().unwrap_or(rest)),
@@ -174,32 +241,11 @@ pub(crate) fn mcp_origin(mcp_url: &str) -> String {
     }
 }
 
-fn rand_b64url(nbytes: usize) -> String {
+fn rand_b64url(nbytes: usize) -> Result<String, String> {
     let mut bytes = vec![0u8; nbytes];
-    // Bounded read: /dev/urandom never EOFs, so read_exact (browser.rs pattern).
-    let filled = std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| {
-            use std::io::Read;
-            f.read_exact(&mut bytes).map(|_| true)
-        })
-        .unwrap_or(false);
-    if !filled {
-        // Fallback entropy: time + pid + stack address, hashed.
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        std::time::SystemTime::now().hash(&mut h);
-        std::process::id().hash(&mut h);
-        (&bytes as *const _ as usize).hash(&mut h);
-        let mut seed = h.finish();
-        for b in bytes.iter_mut() {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            *b = (seed >> 33) as u8;
-        }
-    }
-    URL_SAFE_NO_PAD.encode(&bytes)
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("mcp: secure random generation failed: {}", error))?;
+    Ok(URL_SAFE_NO_PAD.encode(&bytes))
 }
 
 /// S256 code challenge. The RFC 7636 Appendix B vector is a unit test.
@@ -313,8 +359,92 @@ fn hex_val(b: u8) -> Option<u8> {
 fn http_client(timeout_ms: u64) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_millis(timeout_ms.clamp(1000, 30_000)))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("mcp: http client failed: {}", e))
+}
+
+fn oauth_host_blocked(host: &str, url: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_lowercase();
+    normalized == "localhost"
+        || normalized.ends_with(".localhost")
+        || normalized == "local"
+        || normalized.ends_with(".local")
+        || normalized.ends_with(".lan")
+        || normalized.ends_with(".internal")
+        || normalized == "metadata.google.internal"
+        || crate::browser::navigation_host_blocked(url)
+}
+
+fn oauth_origin(raw: &str, label: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(raw)
+        .map_err(|error| format!("mcp: {} URL is invalid ({})", label, error))?;
+    if parsed.scheme() != "https" {
+        return Err(format!("mcp: {} must use HTTPS for OAuth", label));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("mcp: {} must not contain URL credentials", label));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(format!("mcp: {} has no host", label));
+    };
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Err(format!("mcp: {} must not use a literal IP host", label));
+    }
+    if oauth_host_blocked(host, parsed.as_str()) {
+        return Err(format!(
+            "mcp: {} resolves to a loopback, private, literal, or local host",
+            label
+        ));
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
+fn validate_oauth_endpoint(
+    raw: &str,
+    configured_origin: &str,
+    label: &str,
+) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(raw)
+        .map_err(|error| format!("mcp: discovered {} URL is invalid ({})", label, error))?;
+    if parsed.scheme() != "https" {
+        return Err(format!("mcp: discovered {} must use HTTPS", label));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!(
+            "mcp: discovered {} must not contain URL credentials",
+            label
+        ));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(format!("mcp: discovered {} has no host", label));
+    };
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Err(format!(
+            "mcp: discovered {} must not use a literal IP host",
+            label
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(format!(
+            "mcp: discovered {} must not contain a URL fragment",
+            label
+        ));
+    }
+    if oauth_host_blocked(host, parsed.as_str()) {
+        return Err(format!(
+            "mcp: discovered {} resolves to a loopback, private, literal, or local host",
+            label
+        ));
+    }
+    let origin = parsed.origin().ascii_serialization();
+    if origin != configured_origin {
+        return Err(format!(
+            "mcp: discovered {} uses a different origin ({}); explicit cross-origin consent is required",
+            label, origin
+        ));
+    }
+    Ok(parsed.to_string())
 }
 
 async fn get_json(
@@ -334,6 +464,12 @@ async fn get_json(
                 format!("mcp: cannot reach {} during login ({})", host, e)
             }
         })?;
+    if res.status().is_redirection() {
+        return Err(format!(
+            "mcp: {} returned a redirect during OAuth; redirects are disabled",
+            host
+        ));
+    }
     if !res.status().is_success() {
         return Err(format!(
             "mcp: {} answered HTTP {} during login",
@@ -341,8 +477,8 @@ async fn get_json(
             res.status()
         ));
     }
-    res.json::<serde_json::Value>()
-        .await
+    let body = crate::mcp::read_bounded_response_body(res, &format!("{} response", host)).await?;
+    serde_json::from_slice(&body)
         .map_err(|_| format!("mcp: {} returned non-JSON during login", host))
 }
 
@@ -365,6 +501,12 @@ async fn post_form(
                 format!("mcp: {} request failed: {}", host, e)
             }
         })?;
+    if res.status().is_redirection() {
+        return Err(format!(
+            "mcp: {} returned a redirect during OAuth; redirects are disabled",
+            host
+        ));
+    }
     // Status only on failure: bodies may echo secrets back.
     if !res.status().is_success() {
         return Err(format!(
@@ -373,8 +515,8 @@ async fn post_form(
             res.status()
         ));
     }
-    res.json::<serde_json::Value>()
-        .await
+    let body = crate::mcp::read_bounded_response_body(res, &format!("{} response", host)).await?;
+    serde_json::from_slice(&body)
         .map_err(|_| format!("mcp: {} returned non-JSON during login", host))
 }
 
@@ -415,47 +557,61 @@ async fn discover(
     mcp_url: &str,
     host: &str,
 ) -> Result<Discovered, String> {
-    // 1. Protected-resource metadata may name the authorization server(s).
+    let configured_origin = oauth_origin(mcp_url, "MCP server")?;
     let prm_url = protected_resource_url(mcp_url);
-    let mut auth_server: Option<String> = None;
-    if let Ok(meta) = get_json(client, &prm_url, host).await {
+    let auth_server = if let Ok(meta) = get_json(client, &prm_url, host).await {
         if meta.get("error").is_none() {
-            auth_server = meta
-                .get("authorization_servers")
+            meta.get("authorization_servers")
                 .and_then(|s| s.as_array())
                 .and_then(|a| a.first())
                 .and_then(|s| s.as_str())
-                .map(str::to_string);
+                .map(str::to_string)
+        } else {
+            None
         }
-    }
-    // 2. Authorization-server metadata: named server, else same-origin guess.
-    let candidates = match auth_server {
-        Some(s) => vec![auth_server_wellknown(&s)],
-        None => vec![auth_server_wellknown(&mcp_origin(mcp_url))],
+    } else {
+        None
     };
-    for url in candidates {
-        if let Ok(meta) = get_json(client, &url, host).await {
-            if meta.get("error").is_some() {
-                continue;
+    let auth_origin = match auth_server {
+        Some(server) => {
+            let origin = oauth_origin(&server, "discovered authorization server")?;
+            if origin != configured_origin {
+                return Err(format!(
+                    "mcp: discovered authorization server uses a different origin ({}); explicit cross-origin consent is required",
+                    origin
+                ));
             }
-            let auth_ep = meta.get("authorization_endpoint").and_then(|v| v.as_str());
-            let token_ep = meta.get("token_endpoint").and_then(|v| v.as_str());
-            if let (Some(a), Some(t)) = (auth_ep, token_ep) {
-                return Ok(Discovered {
-                    authorization_endpoint: a.to_string(),
-                    token_endpoint: t.to_string(),
-                    registration_endpoint: meta
-                        .get("registration_endpoint")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                });
-            }
+            origin
         }
+        None => configured_origin.clone(),
+    };
+    let metadata_url = auth_server_wellknown(&auth_origin);
+    validate_oauth_endpoint(&metadata_url, &configured_origin, "authorization metadata")?;
+    let meta = get_json(client, &metadata_url, host).await?;
+    if meta.get("error").is_some() {
+        return Err(format!("mcp: {} returned OAuth metadata errors", host));
     }
-    Err(format!(
-        "mcp: {} exposes no OAuth metadata (tried {}) — pre-register a client (oauth.clientId) or use header auth",
-        host, prm_url
-    ))
+    let auth_ep = meta
+        .get("authorization_endpoint")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("mcp: {} OAuth metadata has no authorization_endpoint", host))?;
+    let token_ep = meta
+        .get("token_endpoint")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("mcp: {} OAuth metadata has no token_endpoint", host))?;
+    let authorization_endpoint =
+        validate_oauth_endpoint(auth_ep, &configured_origin, "authorization endpoint")?;
+    let token_endpoint = validate_oauth_endpoint(token_ep, &configured_origin, "token endpoint")?;
+    let registration_endpoint = meta
+        .get("registration_endpoint")
+        .and_then(|v| v.as_str())
+        .map(|value| validate_oauth_endpoint(value, &configured_origin, "registration endpoint"))
+        .transpose()?;
+    Ok(Discovered {
+        authorization_endpoint,
+        token_endpoint,
+        registration_endpoint,
+    })
 }
 
 fn preregistered_client(
@@ -496,6 +652,11 @@ async fn dynamic_register(
     auth_ep: &str,
     token_ep: &str,
 ) -> Result<OAuthClientState, String> {
+    let registration_endpoint = validate_oauth_endpoint(
+        registration_endpoint,
+        &oauth_origin(auth_ep, "authorization endpoint")?,
+        "registration endpoint",
+    )?;
     let mut body = serde_json::Map::new();
     body.insert("client_name".to_string(), "VTNexa".into());
     body.insert("redirect_uris".to_string(), vec![redirect_uri].into());
@@ -509,11 +670,17 @@ async fn dynamic_register(
         body.insert("scope".to_string(), scope.into());
     }
     let res = client
-        .post(registration_endpoint)
+        .post(&registration_endpoint)
         .json(&body)
         .send()
         .await
         .map_err(|e| format!("mcp: {} client registration failed: {}", host, e))?;
+    if res.status().is_redirection() {
+        return Err(format!(
+            "mcp: {} client registration returned a redirect; redirects are disabled",
+            host
+        ));
+    }
     if !res.status().is_success() {
         return Err(format!(
             "mcp: {} refused client registration (HTTP {}) — pre-register a client (oauth.clientId) instead",
@@ -521,9 +688,10 @@ async fn dynamic_register(
             res.status()
         ));
     }
-    let v: serde_json::Value = res
-        .json()
-        .await
+    let body =
+        crate::mcp::read_bounded_response_body(res, &format!("{} registration response", host))
+            .await?;
+    let v: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|_| format!("mcp: {} registration returned non-JSON", host))?;
     let client_id = v
         .get("client_id")
@@ -671,6 +839,17 @@ fn tokens_from_response(v: &serde_json::Value) -> Result<OAuthTokens, String> {
     })
 }
 
+fn validate_client_endpoints(state: &OAuthClientState, host: &str) -> Result<(), String> {
+    let origin = oauth_origin(host, "MCP server")?;
+    validate_oauth_endpoint(
+        &state.authorization_endpoint,
+        &origin,
+        "authorization endpoint",
+    )?;
+    validate_oauth_endpoint(&state.token_endpoint, &origin, "token endpoint")?;
+    Ok(())
+}
+
 async fn exchange_code(
     client: &reqwest::Client,
     host: &str,
@@ -679,6 +858,7 @@ async fn exchange_code(
     redirect_uri: &str,
     verifier: &str,
 ) -> Result<OAuthTokens, String> {
+    validate_client_endpoints(client_state, host)?;
     let mut form: HashMap<&str, String> = HashMap::new();
     form.insert("grant_type", "authorization_code".to_string());
     form.insert("code", code.to_string());
@@ -697,6 +877,7 @@ async fn refresh_tokens(
     client_state: &OAuthClientState,
     refresh_token: &str,
 ) -> Result<OAuthTokens, String> {
+    validate_client_endpoints(client_state, host)?;
     let mut form: HashMap<&str, String> = HashMap::new();
     form.insert("grant_type", "refresh_token".to_string());
     form.insert("refresh_token", refresh_token.to_string());
@@ -737,7 +918,8 @@ pub(crate) async fn bearer_for(
     if force {
         return force_refresh(name, cfg).await.map(Bearer::Token);
     }
-    match load_blob(name)? {
+    let mcp_url = validate_remote_url(cfg.url.as_deref().unwrap_or(""))?;
+    match load_blob(name, &mcp_url)? {
         None => Ok(Bearer::Unsigned),
         Some(blob) => {
             if tokens_live(&blob.tokens) {
@@ -749,18 +931,12 @@ pub(crate) async fn bearer_for(
                     name
                 ));
             }
-            let host = url_host_display(cfg.url.as_deref().unwrap_or(""));
+            let host = url_host_display(&mcp_url);
             let client = http_client(crate::mcp::clamp_timeout(cfg.timeout))?;
             match refresh_tokens(&client, &host, &blob.client, &blob.tokens.refresh_token).await {
                 Ok(tokens) => {
                     let access = tokens.access_token.clone();
-                    let _ = store_blob(
-                        name,
-                        &StoredBlob {
-                            client: blob.client,
-                            tokens,
-                        },
-                    );
+                    let _ = store_blob(name, &mcp_url, blob.client, tokens);
                     Ok(Bearer::Token(access))
                 }
                 Err(_) => Err(format!(
@@ -780,8 +956,9 @@ pub(crate) struct OAuthStatus {
     pub has_refresh: bool,
 }
 
-pub(crate) fn oauth_status(name: &str) -> Result<OAuthStatus, String> {
-    match load_blob(name)? {
+pub(crate) fn oauth_status(name: &str, cfg: &McpServerConfig) -> Result<OAuthStatus, String> {
+    let mcp_url = validate_remote_url(cfg.url.as_deref().unwrap_or(""))?;
+    match load_blob(name, &mcp_url)? {
         None => Ok(OAuthStatus {
             signed_in: false,
             expires_in: None,
@@ -799,14 +976,16 @@ pub(crate) fn oauth_status(name: &str) -> Result<OAuthStatus, String> {
     }
 }
 
-pub(crate) fn oauth_logout(name: &str) -> Result<(), String> {
-    delete_blob(name)
+pub(crate) fn oauth_logout(name: &str, cfg: &McpServerConfig) -> Result<(), String> {
+    let mcp_url = validate_remote_url(cfg.url.as_deref().unwrap_or(""))?;
+    delete_blob(name, &mcp_url)
 }
 
 /// Refresh unconditionally (401 path): the stored access token was rejected
 /// even though it looked live. Returns the new access token.
 pub(crate) async fn force_refresh(name: &str, cfg: &McpServerConfig) -> Result<String, String> {
-    let Some(blob) = load_blob(name)? else {
+    let mcp_url = validate_remote_url(cfg.url.as_deref().unwrap_or(""))?;
+    let Some(blob) = load_blob(name, &mcp_url)? else {
         return Err(format!(
             "mcp: '{}' is not signed in — open the ⛁ panel and Sign in",
             name
@@ -818,18 +997,12 @@ pub(crate) async fn force_refresh(name: &str, cfg: &McpServerConfig) -> Result<S
             name
         ));
     }
-    let host = url_host_display(cfg.url.as_deref().unwrap_or(""));
+    let host = url_host_display(&mcp_url);
     let client = http_client(crate::mcp::clamp_timeout(cfg.timeout))?;
     match refresh_tokens(&client, &host, &blob.client, &blob.tokens.refresh_token).await {
         Ok(tokens) => {
             let access = tokens.access_token.clone();
-            store_blob(
-                name,
-                &StoredBlob {
-                    client: blob.client,
-                    tokens,
-                },
-            )?;
+            store_blob(name, &mcp_url, blob.client, tokens)?;
             Ok(access)
         }
         Err(_) => Err(format!(
@@ -896,8 +1069,8 @@ pub(crate) async fn oauth_login(
         }
     };
 
-    let verifier = rand_b64url(32);
-    let state = rand_b64url(16);
+    let verifier = rand_b64url(32)?;
+    let state = rand_b64url(16)?;
     let auth_url = authorize_url(
         &client_state.authorization_endpoint,
         &client_state.client_id,
@@ -922,44 +1095,52 @@ pub(crate) async fn oauth_login(
         &verifier,
     )
     .await?;
-    store_blob(
-        name,
-        &StoredBlob {
-            client: client_state,
-            tokens,
-        },
-    )?;
+    store_blob(name, &url, client_state, tokens)?;
     Ok(format!("signed in to '{}'", name))
 }
 
 // ---- Tauri commands ----
 
 #[tauri::command]
-pub(crate) async fn mcp_oauth_status(
-    window: tauri::WebviewWindow,
+pub(crate) async fn mcp_oauth_status<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     state: tauri::State<'_, crate::WorkspaceRoots>,
     server: String,
 ) -> Result<OAuthStatus, String> {
     // Config load validates the server exists (no silent per-name probing).
     let root = crate::root_snapshot(&state, window.label());
     let merged = crate::mcp::load_merged_mcp_config(&root)?;
-    if !merged.contains_key(&server) {
-        return Err(format!("mcp: unknown server '{}'", server));
-    }
-    oauth_status(&server)
-}
-
-#[tauri::command]
-pub(crate) async fn mcp_oauth_login(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, crate::WorkspaceRoots>,
-    server: String,
-) -> Result<String, String> {
-    let root = crate::root_snapshot(&state, window.label());
-    let merged = crate::mcp::load_merged_mcp_config(&root)?;
     let cfg = merged
         .get(&server)
         .ok_or_else(|| format!("mcp: unknown server '{}'", server))?;
+    oauth_status(&server, cfg)
+}
+
+#[tauri::command]
+pub(crate) async fn mcp_oauth_login<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+    state: tauri::State<'_, crate::WorkspaceRoots>,
+    trust: tauri::State<'_, crate::mcp::McpTrustStore>,
+    server: String,
+) -> Result<String, String> {
+    let root = crate::root_snapshot(&state, window.label());
+    let entries = crate::mcp::load_merged_mcp_entries(&root)?;
+    let entry = entries
+        .get(&server)
+        .ok_or_else(|| format!("mcp: unknown server '{}'", server))?;
+    if !entry.config.enabled {
+        return Err(format!("mcp: '{}' is disabled", server));
+    }
+    if entry.source == crate::mcp::McpConfigSource::Workspace {
+        let fingerprint = crate::mcp::config_fingerprint_for(&root, &entry.config);
+        if !trust.observe(&root, &server, &fingerprint, true, true)? {
+            return Err(format!(
+                "mcp: '{}' requires native trust consent before sign-in",
+                server
+            ));
+        }
+    }
+    let cfg = &entry.config;
     if cfg.r#type != "remote" {
         return Err(format!("mcp: '{}' is not a remote server", server));
     }
@@ -984,13 +1165,200 @@ pub(crate) async fn mcp_oauth_login(
 }
 
 #[tauri::command]
-pub(crate) fn mcp_oauth_logout(server: String) -> Result<(), String> {
-    oauth_logout(&server)
+pub(crate) fn mcp_oauth_logout<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+    state: tauri::State<'_, crate::WorkspaceRoots>,
+    server: String,
+) -> Result<(), String> {
+    let root = crate::root_snapshot(&state, window.label());
+    let merged = crate::mcp::load_merged_mcp_config(&root)?;
+    let cfg = merged
+        .get(&server)
+        .ok_or_else(|| format!("mcp: unknown server '{}'", server))?;
+    oauth_logout(&server, cfg)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct MemoryCredentialStore {
+        values: std::cell::RefCell<HashMap<String, String>>,
+    }
+
+    impl CredentialStore for MemoryCredentialStore {
+        fn get(&self, account: &str) -> Result<Option<String>, String> {
+            Ok(self.values.borrow().get(account).cloned())
+        }
+
+        fn set(&self, account: &str, value: &str) -> Result<(), String> {
+            self.values
+                .borrow_mut()
+                .insert(account.to_string(), value.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, account: &str) -> Result<(), String> {
+            self.values.borrow_mut().remove(account);
+            Ok(())
+        }
+    }
+
+    fn test_client() -> OAuthClientState {
+        OAuthClientState {
+            client_id: "client".to_string(),
+            client_secret: String::new(),
+            authorization_endpoint: "https://mcp.example.test/authorize".to_string(),
+            token_endpoint: "https://mcp.example.test/token".to_string(),
+            scope: String::new(),
+        }
+    }
+
+    fn test_tokens(access_token: &str) -> OAuthTokens {
+        OAuthTokens {
+            access_token: access_token.to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 0,
+            scope: String::new(),
+        }
+    }
+
+    fn remote_config(url: &str) -> McpServerConfig {
+        McpServerConfig {
+            r#type: "remote".to_string(),
+            url: Some(url.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn same_name_same_origin_retrieves_bound_credentials() {
+        let store = MemoryCredentialStore::default();
+        let first_url = "https://mcp.example.test/mcp";
+        let equivalent_url = "HTTPS://MCP.EXAMPLE.TEST:443/mcp";
+        store_blob_with(
+            &store,
+            "shared",
+            first_url,
+            test_client(),
+            test_tokens("origin-a"),
+        )
+        .unwrap();
+        assert_eq!(
+            oauth_account("shared", first_url).unwrap(),
+            oauth_account("shared", equivalent_url).unwrap()
+        );
+        let first = load_blob_with(&store, "shared", first_url)
+            .unwrap()
+            .unwrap();
+        let second = load_blob_with(&store, "shared", equivalent_url)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.tokens.access_token, "origin-a");
+        assert_eq!(second.tokens.access_token, "origin-a");
+    }
+
+    #[test]
+    fn same_name_different_origin_never_returns_old_token() {
+        let store = MemoryCredentialStore::default();
+        let first_url = "https://one.example.test/mcp";
+        let second_url = "https://two.example.test/mcp";
+        store_blob_with(
+            &store,
+            "shared",
+            first_url,
+            test_client(),
+            test_tokens("origin-a"),
+        )
+        .unwrap();
+        assert!(load_blob_with(&store, "shared", second_url)
+            .unwrap()
+            .is_none());
+        assert_ne!(
+            oauth_account("shared", first_url).unwrap(),
+            oauth_account("shared", second_url).unwrap()
+        );
+    }
+
+    #[test]
+    fn configuration_url_mutation_requires_new_bound_credentials() {
+        let store = MemoryCredentialStore::default();
+        let mut cfg = remote_config("https://one.example.test/mcp");
+        store_blob_with(
+            &store,
+            "shared",
+            cfg.url.as_deref().unwrap(),
+            test_client(),
+            test_tokens("origin-a"),
+        )
+        .unwrap();
+        cfg.url = Some("https://two.example.test/mcp".to_string());
+        assert!(
+            load_blob_with(&store, "shared", cfg.url.as_deref().unwrap())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn mismatched_stored_url_fails_closed() {
+        let store = MemoryCredentialStore::default();
+        let first_url = "https://one.example.test/mcp";
+        let second_url = "https://two.example.test/mcp";
+        let blob = StoredBlob {
+            canonical_url: second_url.to_string(),
+            client: test_client(),
+            tokens: test_tokens("origin-b"),
+        };
+        store.values.borrow_mut().insert(
+            oauth_account("shared", first_url).unwrap(),
+            serde_json::to_string(&blob).unwrap(),
+        );
+        let error = load_blob_with(&store, "shared", first_url).unwrap_err();
+        assert!(error.contains("do not match"), "got: {}", error);
+        assert!(error.contains("sign in again"), "got: {}", error);
+    }
+
+    #[test]
+    fn missing_or_invalid_stored_url_fails_closed() {
+        let store = MemoryCredentialStore::default();
+        let url = "https://mcp.example.test/mcp";
+        let account = oauth_account("shared", url).unwrap();
+        for canonical_url in [None, Some("not-a-url".to_string())] {
+            let mut value = serde_json::to_value(StoredBlob {
+                canonical_url: canonical_url.clone().unwrap_or_default(),
+                client: test_client(),
+                tokens: test_tokens("secret"),
+            })
+            .unwrap();
+            if canonical_url.is_none() {
+                value.as_object_mut().unwrap().remove("canonical_url");
+            }
+            store
+                .values
+                .borrow_mut()
+                .insert(account.clone(), serde_json::to_string(&value).unwrap());
+            let error = load_blob_with(&store, "shared", url).unwrap_err();
+            assert!(error.contains("sign in again"), "got: {}", error);
+        }
+    }
+
+    #[test]
+    fn legacy_unbound_account_is_never_loaded() {
+        let store = MemoryCredentialStore::default();
+        let url = "https://mcp.example.test/mcp";
+        let legacy = StoredBlob {
+            canonical_url: url.to_string(),
+            client: test_client(),
+            tokens: test_tokens("legacy"),
+        };
+        store.values.borrow_mut().insert(
+            format!("{}shared", KEY_ACCOUNT_PREFIX),
+            serde_json::to_string(&legacy).unwrap(),
+        );
+        assert!(load_blob_with(&store, "shared", url).unwrap().is_none());
+    }
 
     #[test]
     fn pkce_matches_rfc7636_vector() {
@@ -1044,6 +1412,44 @@ mod tests {
         ));
         assert!(parse_callback_target("/callback?state=s").is_err());
         assert!(parse_callback_target("/callback").is_err());
+    }
+
+    #[test]
+    fn oauth_endpoints_require_safe_https_same_origin() {
+        let origin = oauth_origin("https://mcp.example.com/mcp", "MCP server").unwrap();
+        assert_eq!(origin, "https://mcp.example.com");
+        assert!(validate_oauth_endpoint(
+            "https://mcp.example.com/authorize",
+            &origin,
+            "authorization endpoint"
+        )
+        .is_ok());
+        assert!(validate_oauth_endpoint(
+            "http://mcp.example.com/authorize",
+            &origin,
+            "authorization endpoint"
+        )
+        .is_err());
+        assert!(validate_oauth_endpoint(
+            "https://127.0.0.1/authorize",
+            &origin,
+            "authorization endpoint"
+        )
+        .is_err());
+        assert!(validate_oauth_endpoint(
+            "https://localhost./authorize",
+            &origin,
+            "authorization endpoint"
+        )
+        .is_err());
+        assert!(validate_oauth_endpoint(
+            "https://auth.example.com/authorize",
+            &origin,
+            "authorization endpoint"
+        )
+        .unwrap_err()
+        .contains("different origin"));
+        assert!(oauth_origin("http://mcp.example.com/mcp", "MCP server").is_err());
     }
 
     #[test]

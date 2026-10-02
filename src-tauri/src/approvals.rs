@@ -14,6 +14,7 @@
 // 5 minutes, and burn on first use. Every privileged command takes
 // `approval_token` + `approval_detail` and fails closed without them.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -22,8 +23,9 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 const APPROVAL_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_ACTION_LEN: usize = 64;
 const MAX_DETAIL_LEN: usize = 20_000;
-const DETAIL_STORE_LEN: usize = 4000;
-const DIALOG_DETAIL_LEN: usize = 1000;
+pub(crate) const DIALOG_DETAIL_LEN: usize = 1000;
+pub(crate) const MAX_REVIEWABLE_SHELL_DETAIL: usize = DIALOG_DETAIL_LEN;
+pub(crate) const MAX_REVIEWABLE_SHELL_COMMAND: usize = 800;
 
 /// Review-gate protocol version. Must match the frontend's APPROVAL_PROTO
 /// (shown as `gate vN` in the TopBar). Mismatches fail LOUDLY on issue/claim
@@ -70,27 +72,35 @@ pub(crate) struct Approval {
 #[derive(Default)]
 pub(crate) struct ApprovalStore(pub Mutex<HashMap<String, Approval>>);
 
-fn gen_token() -> String {
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let mut bytes = [0u8; 32];
-        if std::io::Read::read_exact(&mut f, &mut bytes).is_ok() {
-            return bytes.iter().map(|b| format!("{:02x}", b)).collect();
-        }
-    }
-    // /dev/urandom missing (essentially never on Linux): hash time + pid +
-    // thread + stack address so the fallback is not a pure time counter.
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mut h = DefaultHasher::new();
-    nanos.hash(&mut h);
-    std::process::id().hash(&mut h);
-    std::thread::current().id().hash(&mut h);
-    (&h as *const _ as usize).hash(&mut h);
-    format!("fallback-{:x}-{:x}", nanos, h.finish())
+struct PendingShellContext {
+    command: String,
+    cwd: String,
+}
+
+thread_local! {
+    static PENDING_SHELL_CONTEXT: RefCell<Option<PendingShellContext>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn take_pending_shell_context() -> Option<(String, String)> {
+    PENDING_SHELL_CONTEXT.with(|context| {
+        context
+            .borrow_mut()
+            .take()
+            .map(|value| (value.command, value.cwd))
+    })
+}
+
+pub(crate) fn clear_pending_shell_context() {
+    PENDING_SHELL_CONTEXT.with(|context| {
+        context.borrow_mut().take();
+    });
+}
+
+fn gen_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("approval: secure random token generation failed: {}", error))?;
+    Ok(bytes.iter().map(|byte| format!("{:02x}", byte)).collect())
 }
 
 fn prune(map: &mut HashMap<String, Approval>) {
@@ -102,18 +112,10 @@ pub(crate) fn is_privileged(action: &str) -> bool {
     PRIVILEGED_ACTIONS.contains(&action)
 }
 
-/// Canonical detail fingerprint: trim + truncate. Both issue and consume run
-/// this, so the frontend just echoes one opaque string through.
-/// NOTE: truncation alone is not the security boundary — `mint`/`consume`
-/// additionally bind the FULL detail length + hash (see below), so mutating
-/// bytes past DETAIL_STORE_LEN is detected instead of silently allowed.
 pub(crate) fn norm_detail(raw: &str) -> String {
-    raw.trim().chars().take(DETAIL_STORE_LEN).collect()
+    raw.trim().to_string()
 }
 
-/// Full-detail binding: length + non-cryptographic hash over the complete
-/// trimmed detail. Stored at mint, rechecked at consume — a suffix past the
-/// 4k truncated prefix cannot be swapped without re-approval.
 pub(crate) fn full_detail_binding(raw: &str) -> (usize, u64) {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -123,9 +125,82 @@ pub(crate) fn full_detail_binding(raw: &str) -> (usize, u64) {
     (t.len(), h.finish())
 }
 
-fn validate_issue(
+fn shell_detail_command(detail: &str) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(detail)
+        .map_err(|_| "approval: shell detail is not valid JSON".to_string())?;
+    value
+        .get("cmd")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "approval: shell detail does not contain the exact command".to_string())
+}
+
+fn shell_detail_cwd(detail: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(detail)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_default()
+}
+
+fn validate_shell_detail(action: &str, detail: &str, native: bool) -> Result<(), String> {
+    if action != "shell_run" && action != "shell_bg" {
+        if native && detail.chars().count() > DIALOG_DETAIL_LEN {
+            return Err(format!(
+                "approval: detail exceeds the native review limit ({} characters)",
+                DIALOG_DETAIL_LEN
+            ));
+        }
+        return Ok(());
+    }
+    let normalized = norm_detail(detail);
+    if normalized.chars().count() > MAX_REVIEWABLE_SHELL_DETAIL {
+        return Err(format!(
+            "approval: shell detail exceeds the review limit ({} characters)",
+            MAX_REVIEWABLE_SHELL_DETAIL
+        ));
+    }
+    let command = shell_detail_command(&normalized)?;
+    if command.chars().count() > MAX_REVIEWABLE_SHELL_COMMAND {
+        return Err(format!(
+            "approval: shell command is too long to review ({} characters, max {})",
+            command.chars().count(),
+            MAX_REVIEWABLE_SHELL_COMMAND
+        ));
+    }
+    if native && normalized.chars().count() > DIALOG_DETAIL_LEN {
+        return Err(format!(
+            "approval: detail exceeds the native review limit ({} characters)",
+            DIALOG_DETAIL_LEN
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_shell_execution_detail(
+    action: &str,
+    detail: &str,
+    command: &str,
+) -> Result<(), String> {
+    if action != "shell_run" && action != "shell_bg" {
+        return Ok(());
+    }
+    validate_shell_detail(action, detail, false)?;
+    let bound = shell_detail_command(&norm_detail(detail))?;
+    if bound != command {
+        return Err("shell_run: approval detail does not match the command".to_string());
+    }
+    Ok(())
+}
+
+fn validate_issue_with_mode(
     action: &str,
     detail: &Option<String>,
+    native: bool,
 ) -> Result<(String, String, usize, u64), String> {
     let action = action.trim().to_string();
     if action.is_empty() || action.len() > MAX_ACTION_LEN {
@@ -138,8 +213,16 @@ fn validate_issue(
     if detail.len() > MAX_DETAIL_LEN || detail.contains('\0') {
         return Err("approval: invalid detail".to_string());
     }
+    validate_shell_detail(&action, detail, native)?;
     let (full_len, full_hash) = full_detail_binding(detail);
     Ok((action, norm_detail(detail), full_len, full_hash))
+}
+
+fn validate_issue(
+    action: &str,
+    detail: &Option<String>,
+) -> Result<(String, String, usize, u64), String> {
+    validate_issue_with_mode(action, detail, false)
 }
 
 fn mint(
@@ -150,7 +233,7 @@ fn mint(
     detail_len: usize,
     detail_hash: u64,
 ) -> Result<String, String> {
-    let token = gen_token();
+    let token = gen_token()?;
     let mut map = store.0.lock().map_err(|e| e.to_string())?;
     prune(&mut map);
     map.insert(
@@ -214,12 +297,8 @@ pub(crate) fn shell_escape_warning(tool: &str, detail: &str) -> Option<String> {
 
 fn dialog_text(action: &str, detail: &str) -> String {
     let mut out = format!("Allow this action?\n\n{}", action);
-    let preview: String = detail.chars().take(DIALOG_DETAIL_LEN).collect();
-    if !preview.trim().is_empty() {
-        out.push_str(&format!("\n\n{}", preview.trim()));
-        if detail.chars().count() > DIALOG_DETAIL_LEN {
-            out.push_str("\n…[truncated]");
-        }
+    if !detail.trim().is_empty() {
+        out.push_str(&format!("\n\n{}", detail.trim()));
     }
     if let Some(warn) = shell_escape_warning(action, detail) {
         out.push_str(&format!("\n\nWARNING: {}", warn));
@@ -235,15 +314,15 @@ fn dialog_text(action: &str, detail: &str) -> String {
 /// agent turn reports `user rejected <action>` like any other refusal.
 /// NOTE: an unanswered dialog parks the turn, it never auto-approves.
 #[tauri::command]
-pub(crate) async fn approval_issue(
-    window: tauri::WebviewWindow,
+pub(crate) async fn approval_issue<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     store: tauri::State<'_, ApprovalStore>,
     action: String,
     detail: Option<String>,
     proto: Option<i32>,
 ) -> Result<String, String> {
     check_proto(&proto)?;
-    let (action, normed, full_len, full_hash) = validate_issue(&action, &detail)?;
+    let (action, normed, full_len, full_hash) = validate_issue_with_mode(&action, &detail, true)?;
     let (tx, rx) = std::sync::mpsc::channel::<bool>();
     window
         .dialog()
@@ -270,8 +349,8 @@ pub(crate) async fn approval_issue(
 /// clicks (Diff Approve, commit buttons, tree ops, manual browser driving).
 /// The agent turn pipeline (runTool) must never call this.
 #[tauri::command]
-pub(crate) fn approval_claim(
-    window: tauri::WebviewWindow,
+pub(crate) fn approval_claim<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
     store: tauri::State<'_, ApprovalStore>,
     action: String,
     detail: Option<String>,
@@ -301,6 +380,9 @@ pub(crate) fn approval_consume(
     if t.len() > 256 {
         return Err(format!("{}: invalid approval token", action));
     }
+    if action == "shell_run" || action == "shell_bg" {
+        validate_shell_detail(action, detail.as_deref().unwrap_or(""), false)?;
+    }
     let want = norm_detail(detail.as_deref().unwrap_or(""));
     let (want_len, want_hash) = full_detail_binding(detail.as_deref().unwrap_or(""));
     let mut map = store.0.lock().map_err(|e| e.to_string())?;
@@ -328,6 +410,17 @@ pub(crate) fn approval_consume(
             "{}: approval detail mismatch (arguments changed after approval — re-approve)",
             action
         ));
+    }
+    if action == "shell_run" || action == "shell_bg" {
+        let normalized = norm_detail(detail.as_deref().unwrap_or(""));
+        if let Ok(command) = shell_detail_command(&normalized) {
+            PENDING_SHELL_CONTEXT.with(|context| {
+                context.borrow_mut().replace(PendingShellContext {
+                    command,
+                    cwd: shell_detail_cwd(&normalized),
+                });
+            });
+        }
     }
     Ok(())
 }
@@ -363,17 +456,15 @@ mod tests {
         assert_eq!(norm_detail("  {\"a\":1}  "), "{\"a\":1}");
         assert_eq!(norm_detail("").as_str(), "");
         let long = "x".repeat(9000);
-        assert_eq!(norm_detail(&long).len(), DETAIL_STORE_LEN);
+        assert_eq!(norm_detail(&long).len(), 9000);
     }
 
     #[test]
-    fn full_binding_detects_suffix_mutation_past_truncation() {
-        // Same 4k prefix, different tail: norm_detail collides, but the
-        // full length+hash binding must differ.
-        let prefix = "x".repeat(DETAIL_STORE_LEN);
+    fn full_binding_detects_suffix_mutation() {
+        let prefix = "x".repeat(4000);
         let a = format!("{}{}", prefix, "AAAA-tail");
         let b = format!("{}{}", prefix, "BBBB-tail");
-        assert_eq!(norm_detail(&a), norm_detail(&b));
+        assert_ne!(norm_detail(&a), norm_detail(&b));
         assert_ne!(full_detail_binding(&a), full_detail_binding(&b));
         assert_eq!(full_detail_binding(&a), full_detail_binding(&a));
     }
@@ -390,10 +481,34 @@ mod tests {
     }
 
     #[test]
-    fn dialog_text_stays_bounded() {
-        let t = dialog_text("shell_run", &"y".repeat(5000));
-        assert!(t.contains("…[truncated]"));
-        assert!(t.len() < 3000);
+    fn dialog_text_keeps_the_reviewed_detail() {
+        let detail = "y".repeat(5000);
+        let text = dialog_text("fs_write", &detail);
+        assert!(text.contains(&detail));
+        assert!(!text.contains("truncated"));
+    }
+
+    #[test]
+    fn native_and_shell_review_limits_fail_closed() {
+        let long = "x".repeat(DIALOG_DETAIL_LEN + 1);
+        assert!(
+            validate_issue_with_mode("fs_write", &Some(long.clone()), true)
+                .unwrap_err()
+                .contains("native review limit")
+        );
+        assert!(validate_issue_with_mode("fs_write", &Some(long.clone()), false).is_ok());
+        assert!(validate_issue("fs_write", &Some(long)).is_ok());
+
+        let command = "x".repeat(MAX_REVIEWABLE_SHELL_COMMAND + 1);
+        let detail = format!(r#"{{"cwd":"/w","cmd":"{}"}}"#, command);
+        assert!(
+            validate_issue_with_mode("shell_run", &Some(detail.clone()), false)
+                .unwrap_err()
+                .contains("too long to review")
+        );
+        let exact = r#"{"cwd":"/w","cmd":"echo ok"}"#;
+        assert!(validate_shell_execution_detail("shell_run", exact, "echo ok").is_ok());
+        assert!(validate_shell_execution_detail("shell_run", exact, "echo changed").is_err());
     }
 
     #[test]
