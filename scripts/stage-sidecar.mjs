@@ -1,24 +1,35 @@
-// Cross-platform staging of the browser sidecar into the Tauri resources
-// (replaces the POSIX rm/cp script: CI builds Windows/macOS/Linux too).
-// Usage: node scripts/stage-sidecar.mjs
-import { cpSync, mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { NODE_VERSION, provisionNode, replaceDirectoryAtomically } from "./provision-node.mjs";
 
-const src = "sidecar/browser";
-const dst = join("src-tauri", "sidecar-stage", "browser");
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const src = join(projectRoot, "sidecar", "browser");
+const stageRoot = join(projectRoot, "src-tauri", "sidecar-stage");
+const dst = join(stageRoot, "browser");
+const cacheDir = join(projectRoot, ".cache", "node-runtime", NODE_VERSION);
+const nodeModules = join(src, "node_modules");
 
-rmSync(join("src-tauri", "sidecar-stage"), { recursive: true, force: true });
-mkdirSync(dst, { recursive: true });
-for (const f of ["server.js", "package.json"]) {
-  cpSync(join(src, f), join(dst, f));
-}
-const nm = join(src, "node_modules");
+mkdirSync(stageRoot, { recursive: true });
+let candidate = mkdtempSync(join(stageRoot, ".browser-stage-"));
 try {
-  // dereference = true: pnpm's symlinked store must be flattened for bundling.
-  cpSync(nm, join(dst, "node_modules"), { recursive: true, dereference: true });
-} catch (e) {
-  console.error(`stage-sidecar: ${nm} missing or unreadable (${e.code ?? e}).`);
-  console.error("Run: cd sidecar/browser && pnpm install --prod --ignore-scripts");
-  process.exit(1);
+  const runtime = await provisionNode({ stageDir: candidate, cacheDir });
+  for (const file of ["server.js", "runtime.js", "package.json"]) {
+    cpSync(join(src, file), join(candidate, file));
+  }
+  try {
+    cpSync(nodeModules, join(candidate, "node_modules"), { recursive: true, dereference: true });
+  } catch (error) {
+    console.error(`stage-sidecar: ${nodeModules} missing or unreadable (${error.code ?? error}).`);
+    console.error("Run: cd sidecar/browser && pnpm install --prod --ignore-scripts");
+    throw new Error("sidecar dependencies are unavailable");
+  }
+  await replaceDirectoryAtomically(candidate, dst);
+  candidate = null;
+  console.log(`stage-sidecar: staged into ${dst} (Node ${runtime.descriptor.key}, archive-backed)`);
+} catch (error) {
+  console.error(`stage-sidecar: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
+} finally {
+  if (candidate) rmSync(candidate, { recursive: true, force: true });
 }
-console.log(`stage-sidecar: staged into ${dst}`);
