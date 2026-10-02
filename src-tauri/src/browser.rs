@@ -894,10 +894,8 @@ pub async fn browser_start(
     if std::env::var("VTAI_BROWSER_NO_SANDBOX").as_deref() == Ok("1") {
         command.env("VTAI_BROWSER_NO_SANDBOX", "1");
     }
-    for key in ["VTAI_BROWSER_CHROME"] {
-        if let Ok(value) = std::env::var(key) {
-            command.env(key, value);
-        }
+    if let Ok(value) = std::env::var("VTAI_BROWSER_CHROME") {
+        command.env("VTAI_BROWSER_CHROME", value);
     }
     #[cfg(windows)]
     let job = match crate::windows_job::JobHandle::new() {

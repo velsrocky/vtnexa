@@ -36,6 +36,7 @@ jobs:
 
       - name: Node runtime, sidecar, and release tests
         run: |
+          pnpm --dir sidecar/browser install --prod --ignore-scripts
           pnpm test:provision
           pnpm test:sidecar
           pnpm test:node
@@ -117,6 +118,11 @@ jobs:
 
       - name: Install tauri-driver 2.0.6
         run: cargo install tauri-driver --version 2.0.6 --locked --force
+
+      - name: Stage the browser sidecar (required by bundle.resources)
+        run: |
+          pnpm --dir sidecar/browser install --prod --ignore-scripts
+          pnpm run stage-sidecar
 
       - name: Build the real Tauri app (frontend embedded)
         run: pnpm exec tauri build --debug --no-bundle
