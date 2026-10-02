@@ -133,7 +133,11 @@ export function configuredUpdaterPublicKey() {
 function parseUpdaterPublicKey(encoded) {
   const text = decodeUtf8(decodeBase64(encoded, "Tauri updater public key"), "Tauri updater public key");
   const lines = minisignLines(text, 2, "Tauri updater public key");
-  if (!/^untrusted comment: minisign public key(?::)? [0-9a-f]{16}$/i.test(lines[0])) {
+  // The comment carries the key id as hex, but `tauri signer generate` drops
+  // leading zeros (~6% of ids start with a 0x00-0x0F high byte -> 15 hex chars).
+  // The id used for verification is the payload bytes below, so the comment is
+  // decorative: accept 1-16 hex rather than failing a valid key.
+  if (!/^untrusted comment: minisign public key(?::)? [0-9a-f]{1,16}$/i.test(lines[0])) {
     fail("Tauri updater public key has a malformed comment");
   }
   const payload = decodeBase64(lines[1], "Tauri updater public key payload");

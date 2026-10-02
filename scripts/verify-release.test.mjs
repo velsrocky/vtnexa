@@ -73,6 +73,13 @@ function withEnvelopeKeyId(envelope, keyIdEnvelope) {
   return Buffer.from(lines.join("\n") + (text.endsWith("\n") ? "\n" : ""), "utf8").toString("base64");
 }
 
+function withKeyIdComment(envelope, hexKeyId) {
+  const text = Buffer.from(Buffer.isBuffer(envelope) ? envelope.toString("utf8") : envelope, "base64").toString("utf8");
+  const lines = text.trimEnd().split("\n");
+  lines[0] = `untrusted comment: minisign public key: ${hexKeyId}`;
+  return Buffer.from(lines.join("\n") + (text.endsWith("\n") ? "\n" : ""), "utf8").toString("base64");
+}
+
 function validFixture() {
   return {
     version,
@@ -247,6 +254,20 @@ describe("release artifact verifier", () => {
 
   it("rejects matching manifest and signature text verified with the wrong key", () => {
     assert.throws(() => verify({ publicKey: wrongPublicKey }), /signature verification failed/);
+  });
+
+  it("accepts a valid public key whose id comment dropped a leading zero", () => {
+    // `tauri signer generate` hex-encodes the 8-byte id as one integer, so ~6%
+    // of ids render as 15 hex chars (high byte 0x00-0x0F). The id that actually
+    // verifies is the payload byte range, so a short comment must still pass.
+    const truncated = withKeyIdComment(trustedPublicKey, "CE7E8D6D0E522B9");
+    const result = verify({ publicKey: truncated });
+    assert.deepEqual(result.windowsInstallers, [windowsAsset, msiAsset]);
+  });
+
+  it("still rejects a public key comment that is not a hex key id", () => {
+    const bogus = withKeyIdComment(trustedPublicKey, "ZZ7E8D6D0E522B90");
+    assert.throws(() => verify({ publicKey: bogus }), /malformed comment/);
   });
 
   it("rejects a signature mapped to different artifact bytes", () => {
