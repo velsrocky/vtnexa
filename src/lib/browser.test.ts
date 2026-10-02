@@ -49,25 +49,32 @@ describe("browser wire format (camelCase, like shell_run)", () => {
 });
 
 describe("browserStart", () => {
-  it("adopts the port of an already-running sidecar", async () => {
-    setBrowserPort(39317);
+  it("keeps the sidecar port separate from a page on another host and port", async () => {
+    setBrowserPort(40000);
     invokeMock.mockImplementation(async (cmd: string) =>
-      cmd === "browser_status" ? { running: true, url: "http://127.0.0.1:40001" } : {},
+      cmd === "browser_status"
+        ? {
+            running: true,
+            baseUrl: "http://127.0.0.1:40001",
+            port: 40001,
+            pageUrl: "https://app.example.test:8443/account",
+          }
+        : {},
     );
     const res = await browserStart(true);
-    expect(res).toEqual({ ok: true, baseUrl: "http://127.0.0.1:40001" });
+    expect(res).toMatchObject({ ok: true, baseUrl: "http://127.0.0.1:40001", port: 40001 });
     expect(getBrowserPort()).toBe(40001);
   });
 
   it("parses the port from a fresh start and nulls fall back safely", async () => {
-    setBrowserPort(39317);
+    setBrowserPort(40000);
     invokeMock.mockImplementation(async (cmd: string) =>
       cmd === "browser_status" ? { running: false } : { baseUrl: "http://127.0.0.1:40100", ok: true },
     );
     const res = await browserStart();
     expect(res).toMatchObject({ ok: true });
     expect(getBrowserPort()).toBe(40100);
-    expect(args(1)).toEqual({ port: 39317, headless: false });
+    expect(args(1)).toEqual({ headless: false });
   });
 
   it("null backend reply degrades to unknown error", async () => {
@@ -75,7 +82,7 @@ describe("browserStart", () => {
       if (cmd === "browser_status") return { running: false };
       return null;
     });
-    setBrowserPort(39317);
-    expect(await browserStart()).toEqual({ ok: false, error: "unknown error" });
+    setBrowserPort(40000);
+    expect(await browserStart()).toEqual({ ok: false, error: "browser_start returned no status; choose Recheck" });
   });
 });

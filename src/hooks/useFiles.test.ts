@@ -67,7 +67,7 @@ describe("useFiles.createEntry", () => {
     await act(async () => {
       await h.result.current.createEntry();
     });
-    expect(created[0]).toMatchObject({ path: "/w/new.txt", is_dir: false });
+    expect(created[0]).toMatchObject({ path: "/w/new.txt", isDir: false });
     expect(h.result.current.creating).toBeNull();
     expect(h.calls.opened).toEqual(["/w/new.txt"]);
     expect(h.calls.refreshFiles).toEqual(["/w"]);
@@ -119,7 +119,7 @@ describe("useFiles.doRename", () => {
     await act(async () => {
       await h.result.current.doRename();
     });
-    expect(renamed[0]).toMatchObject({ old_path: "/w/a.txt", new_path: "/w/b.txt" });
+    expect(renamed[0]).toMatchObject({ oldPath: "/w/a.txt", newPath: "/w/b.txt" });
     expect(h.calls.retargeted).toEqual([["/w/a.txt", "/w/b.txt"]]);
   });
 

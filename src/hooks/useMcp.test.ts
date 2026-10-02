@@ -62,6 +62,38 @@ describe("useMcp", () => {
     expect(result.current.servers.find((s) => s.name === "bad")?.error).toContain("spawn failed");
   });
 
+  it("does not discover tools for a workspace server awaiting consent", async () => {
+    localStorage.setItem("vtai.mcpEnabled", "1");
+    const calls: string[] = [];
+    const { result } = setup(async (cmd: string) => {
+      calls.push(cmd);
+      if (cmd === "mcp_list_servers") {
+        return [{
+          name: "consent",
+          kind: "local",
+          enabled: false,
+          configured: true,
+          configured_enabled: true,
+          trusted: false,
+          consent_required: true,
+          workspace_controlled: true,
+          fingerprint: "abc",
+        }];
+      }
+      if (cmd === "mcp_workspace_trust") {
+        return { workspace_servers: ["consent"], servers: {} };
+      }
+      if (cmd === "mcp_list_tools") throw new Error("must not discover");
+      throw new Error(`unexpected ${cmd}`);
+    });
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(calls).not.toContain("mcp_list_tools");
+    expect(result.current.servers[0].consent_required).toBe(true);
+    expect(result.current.note).toContain("Consent required");
+  });
+
   it("toggles a server then refreshes", async () => {
     const calls: string[] = [];
     const { result } = setup(async (cmd: string) => {

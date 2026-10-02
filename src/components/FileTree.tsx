@@ -1,8 +1,9 @@
-import type { FileEntry, SideTab } from "../types";
+import type { FileEntry, OperationState, SideTab } from "../types";
 import type { SkillInfo } from "../types";
 import type { CreatingState, RenamingState } from "../hooks/useFiles";
+import OperationStatus from "./OperationStatus";
 
-export default function FileTree({ cwd, workspaceRoot, files, creating, renaming, skills, conventionsName, width, skillH, onSkillResizerDown, setCreating, setRenaming, setCwd, openFile, createEntry, doRename, doDelete, createSkill, setInput, setSideTab }: {
+export default function FileTree({ cwd, workspaceRoot, files, creating, renaming, skills, conventionsName, width, skillH, onSkillResizerDown, setCreating, setRenaming, setCwd, openFile, createEntry, doRename, doDelete, createSkill, setInput, setSideTab, operation, workspaceOperation, agentActive = false }: {
   cwd: string;
   workspaceRoot: string;
   files: FileEntry[];
@@ -23,24 +24,37 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
   createSkill: () => void;
   setInput: (v: string) => void;
   setSideTab: (t: SideTab) => void;
+  operation?: OperationState;
+  workspaceOperation?: OperationState;
+  agentActive?: boolean;
 }) {
+  const workspacePending = workspaceOperation?.status === "pending";
+  const fileLocked = agentActive || workspacePending || operation?.status === "pending";
+  const lockReason = agentActive
+    ? "File changes pause while Commander is working."
+    : workspacePending
+      ? "Waiting for the workspace change to finish."
+      : "Waiting for the current file operation.";
   return (
     <aside className="files" style={{ width }}>
       <div className="pane-title row-between">
         <span className="ellipsis">{cwd || workspaceRoot || "(pick a workspace)"}</span>
         <span className="tabs small">
-          <button onClick={() => setCreating({ isDir: false, name: "" })} title="New file in this folder">＋file</button>
-          <button onClick={() => setCreating({ isDir: true, name: "" })} title="New folder here">＋dir</button>
+          <button onClick={() => setCreating({ isDir: false, name: "" })} disabled={fileLocked} title={fileLocked ? lockReason : "New file in this folder"}>＋file</button>
+          <button onClick={() => setCreating({ isDir: true, name: "" })} disabled={fileLocked} title={fileLocked ? lockReason : "New folder here"}>＋dir</button>
         </span>
       </div>
+      <OperationStatus state={operation} />
+      {fileLocked && operation?.status !== "pending" && <div className="muted small" role="status">{lockReason}</div>}
       <div className="filelist">
         {creating && (
           <div className="filerow">
             {creating.isDir ? "📁" : "📄"}{" "}
             <input
               autoFocus
-              value={creating.name}
-              onChange={(e) => setCreating({ ...creating, name: e.target.value })}
+               value={creating.name}
+               disabled={fileLocked}
+               onChange={(e) => setCreating({ ...creating, name: e.target.value })}
               onKeyDown={(e) => {
                 if (e.key === "Enter") createEntry();
                 if (e.key === "Escape") setCreating(null);
@@ -57,8 +71,9 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
               {f.is_dir ? "📁" : "📄"}{" "}
               <input
                 autoFocus
-                value={renaming.name}
-                onChange={(e) => setRenaming({ ...renaming, name: e.target.value })}
+                 value={renaming.name}
+                 disabled={fileLocked}
+                 onChange={(e) => setRenaming({ ...renaming, name: e.target.value })}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") doRename();
                   if (e.key === "Escape") setRenaming(null);
@@ -70,9 +85,18 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
           ) : (
             <div
               key={f.path}
-              className="filerow"
-              onClick={() => (f.is_dir ? setCwd(f.path) : openFile(f.path))}
-              onDoubleClick={() => f.is_dir && setCwd(f.path)}
+               className="filerow"
+               role="button"
+               tabIndex={0}
+               aria-label={`${f.is_dir ? "Open folder" : "Open file"} ${f.name}`}
+               onClick={() => (f.is_dir ? setCwd(f.path) : openFile(f.path))}
+               onDoubleClick={() => f.is_dir && setCwd(f.path)}
+               onKeyDown={(e) => {
+                 if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
+                 e.preventDefault();
+                 if (f.is_dir) setCwd(f.path);
+                 else openFile(f.path);
+               }}
             >
               <span className="ellipsis" style={{ flex: 1 }}>
                 {f.is_dir ? "📁" : "📄"} {f.name}
@@ -83,8 +107,9 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
                     e.stopPropagation();
                     setRenaming({ path: f.path, name: f.name });
                   }}
-                  title="Rename"
-                >
+                    title={fileLocked ? lockReason : "Rename"}
+                    disabled={fileLocked}
+                  >
                   ✎
                 </button>
                 <button
@@ -92,8 +117,9 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
                     e.stopPropagation();
                     doDelete(f.path, f.is_dir);
                   }}
-                  title="Delete (permanent)"
-                >
+                    title={fileLocked ? lockReason : "Delete (permanent)"}
+                    disabled={fileLocked}
+                  >
                   ×
                 </button>
               </span>
@@ -101,14 +127,14 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
           ),
         )}
       </div>
-      <button onClick={() => workspaceRoot && setCwd(workspaceRoot)}>⌂ workspace root</button>
+      <button onClick={() => workspaceRoot && setCwd(workspaceRoot)} disabled={fileLocked} title={fileLocked ? lockReason : "Go to workspace root"}>⌂ workspace root</button>
       <div className="hresizer" onMouseDown={onSkillResizerDown} title="Drag to resize skills panel" />
       <div className="pane-title row-between" style={{ marginTop: 8 }}>
         <span>
           skills ({skills.length}){conventionsName ? ` · ${conventionsName} ✓` : ""}
         </span>
         <span className="tabs small">
-          <button onClick={createSkill} title="New skill in .vtnexa/skills/">＋</button>
+          <button onClick={createSkill} disabled={fileLocked} title={fileLocked ? lockReason : "New skill in .vtnexa/skills/"}>＋</button>
         </span>
       </div>
       <div className="filelist" style={{ flex: "0 1 auto", maxHeight: skillH, overflowY: "auto" }}>
@@ -116,11 +142,19 @@ export default function FileTree({ cwd, workspaceRoot, files, creating, renaming
           <div
             key={s.name}
             className="filerow skillrow"
-            title={s.description ? `/${s.name} - ${s.description}` : `/${s.name}`}
-            onClick={() => {
-              setInput(`/${s.name} `);
-              setSideTab("chat");
-            }}
+             title={s.description ? `/${s.name} - ${s.description}` : `/${s.name}`}
+             role="button"
+             tabIndex={0}
+             onKeyDown={(e) => {
+               if (e.key !== "Enter" && e.key !== " ") return;
+               e.preventDefault();
+               setInput(`/${s.name} `);
+               setSideTab("chat");
+             }}
+             onClick={() => {
+               setInput(`/${s.name} `);
+               setSideTab("chat");
+             }}
           >
             <span className="ellipsis">⚡ /{s.name}</span>
             {s.description && <span className="muted small skilldesc">{s.description}</span>}

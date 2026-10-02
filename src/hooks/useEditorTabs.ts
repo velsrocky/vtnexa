@@ -1,6 +1,6 @@
 import type { CenterTab, Workspace } from "../types";
 import { fsRead } from "../lib/tauri";
-import { baseName, isWithin } from "../lib/utils";
+import { basenamePath, isPathInsideRoot, replacePathPrefix } from "../lib/path";
 import { useConfirm } from "../context/ConfirmContext";
 
 // Per-window tabs and buffers: open/close files, rename/delete retargeting,
@@ -104,7 +104,7 @@ export function useEditorTabs(opts: {
     };
   }
   async function openFile(path: string) {
-    if (workspaceRoot && !isWithin(workspaceRoot, path)) {
+    if (workspaceRoot && !isPathInsideRoot(path, workspaceRoot)) {
       updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nblocked: outside workspace` }));
       return;
     }
@@ -132,7 +132,7 @@ export function useEditorTabs(opts: {
 
   async function closeTab(path: string) {
     if ((buffers[path] ?? "") !== (originals[path] ?? "")) {
-      if (!(await confirm(`Close ${baseName(path)} with unsaved changes?`))) return;
+      if (!(await confirm(`Close ${basenamePath(path)} with unsaved changes?`))) return;
     }
     const idx = tabs.indexOf(path);
     const next = tabs.filter((p) => p !== path);
@@ -150,7 +150,7 @@ export function useEditorTabs(opts: {
   // After a rename, retarget every tab/buffer under the old path (handles
   // renamed directories containing open files) and the pending diff.
   function retargetTabs(oldP: string, newP: string) {
-    const swap = (p: string) => (p === oldP ? newP : p.startsWith(oldP + "/") ? newP + p.slice(oldP.length) : p);
+    const swap = (p: string) => replacePathPrefix(p, oldP, newP) ?? p;
     const rekey = (m: Record<string, string>) => {
       const n: Record<string, string> = {};
       for (const [k, v] of Object.entries(m)) n[swap(k)] = v;
@@ -159,9 +159,9 @@ export function useEditorTabs(opts: {
     setTabs((t) => t.map(swap));
     setBuffers(rekey);
     setOriginals(rekey);
-    if (openPath === oldP || openPath.startsWith(oldP + "/")) setOpenPath(swap(openPath));
+    if (isPathInsideRoot(openPath, oldP)) setOpenPath(swap(openPath));
     setWs((w) =>
-      w.pendingDiff && (w.pendingDiff.path === oldP || w.pendingDiff.path.startsWith(oldP + "/"))
+      w.pendingDiff && isPathInsideRoot(w.pendingDiff.path, oldP)
         ? { ...w, pendingDiff: { ...w.pendingDiff, path: swap(w.pendingDiff.path) } }
         : w,
     );
@@ -170,7 +170,7 @@ export function useEditorTabs(opts: {
   // After a delete, drop any tabs under the deleted path and clear a
   // dangling pending diff.
   function dropTabsUnder(path: string) {
-    const under = (p: string) => p === path || p.startsWith(path + "/");
+    const under = (p: string) => isPathInsideRoot(p, path);
     const next = tabs.filter((p) => !under(p));
     setTabs(next);
     setBuffers((b) => {

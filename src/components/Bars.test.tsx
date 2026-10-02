@@ -51,9 +51,8 @@ function stubCtx(over: Partial<AppContextValue> = {}): AppContextValue {
         { id: "s1", title: "First", directory: "/w", updated: Date.now(), message_count: 3, preview: "" } as never,
       ],
       currentId: "s1",
-      currentTitle: "First",
-      busy: false,
-      onNew: vi.fn(),
+       currentTitle: "First",
+       onNew: vi.fn(),
       onResume: vi.fn(),
       onDelete: vi.fn(),
       onRefresh: vi.fn(),
@@ -130,6 +129,15 @@ describe("bars read from AppContext", () => {
     expect(container.textContent).toContain("1 saved");
     fireEvent.click(screen.getByText("+ New"));
     expect(ctx.session.onNew).toHaveBeenCalledOnce();
+  });
+
+  it("keeps session actions available during an agent turn", () => {
+    const ctx = stubCtx();
+    ctx.session.agentActive = true;
+    renderWith(ctx, <SessionBar />);
+    expect((screen.getByText("+ New") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByText("Delete") as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("status").textContent).toMatch(/original session/i);
   });
 
   it("SessionBar throws outside the provider (fail-loud wiring)", () => {

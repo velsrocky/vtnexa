@@ -97,6 +97,55 @@ describe("useSessions.persistCurrent", () => {
   });
 });
 
+describe("useSessions persistence status", () => {
+  it("surfaces save failures and allows a retry", async () => {
+    let writes = 0;
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "sessions_list") return "[]";
+      if (cmd === "session_put") {
+        writes += 1;
+        if (writes === 1) throw new Error("disk full");
+        return {};
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup({ messages: [{ id: "m1", role: "user", content: "keep" }] });
+    await act(async () => {
+      await h.result.current.bootFresh("/w", "/w");
+    });
+    const source = { ...h.wsOf(), messages: [{ id: "m2", role: "user" as const, content: "retry me" }] };
+    await act(async () => {
+      await h.result.current.persistCurrent(source);
+    });
+    expect(h.result.current.operation).toMatchObject({ status: "error" });
+    expect(h.wsOf().messages).toEqual([]);
+    await act(async () => {
+      await h.result.current.persistCurrent(source);
+    });
+    expect(h.result.current.operation).toMatchObject({ status: "success" });
+    expect(writes).toBe(2);
+  });
+
+  it("does not claim deletion succeeded when the backend rejects it", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "sessions_list") return "[]";
+      if (cmd === "session_delete") throw new Error("permission denied");
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const h = setup({ messages: [{ id: "m1", role: "user", content: "keep" }] });
+    await act(async () => {
+      await h.result.current.bootFresh("/w", "/w");
+    });
+    const before = h.result.current.currentId;
+    await act(async () => {
+      await h.result.current.removeSession(before);
+    });
+    expect(h.result.current.operation).toMatchObject({ status: "error" });
+    expect(h.result.current.currentId).toBe(before);
+    expect(h.wsOf().messages).toEqual([]);
+  });
+});
+
 describe("useSessions resume/remove", () => {
   const FILE = {
     version: 8,

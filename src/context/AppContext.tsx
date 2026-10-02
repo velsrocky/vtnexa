@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { ProviderConfig } from "../types";
+import type { OperationState, ProviderConfig } from "../types";
 import type { ThemeId } from "../lib/theme";
 import type { ProviderEntry } from "../lib/providerHistory";
 import type { SessionMeta } from "../lib/tauri";
@@ -43,17 +43,26 @@ export interface WorkspaceBarSlice {
   browseWorkspace: () => void;
   cwd: string;
   setCwd: (v: string) => void;
+  operation?: OperationState;
+  sessionOperation?: OperationState;
+  agentActive?: boolean;
+  blockedReason?: string;
 }
 
 export interface SessionBarSlice {
   sessions: SessionMeta[];
   currentId: string;
   currentTitle: string;
-  busy: boolean;
+  operation?: OperationState;
+  listOperation?: OperationState;
+  workspaceOperation?: OperationState;
+  agentActive?: boolean;
+  conflictReason?: string;
   onNew: () => void;
   onResume: (id: string) => void;
   onDelete: (id: string) => void;
   onRefresh: () => void;
+  onRetrySave?: () => void;
 }
 
 export interface AppContextValue {

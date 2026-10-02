@@ -68,6 +68,15 @@ function setupGolden() {
   const audits: any[] = [];
   const centerTabs: string[] = [];
   const invoked: string[] = [];
+  const agentActiveRef = { current: false };
+  let sequence = 0;
+  const startAgentTurn = vi.fn(() => {
+    agentActiveRef.current = true;
+    return ++sequence;
+  });
+  const finishAgentTurn = vi.fn(() => {
+    agentActiveRef.current = false;
+  });
   setInvokeImpl(async (cmd) => {
     invoked.push(cmd);
     // Native dialog confirmed (mocked): issue a token like the backend would.
@@ -84,7 +93,10 @@ function setupGolden() {
       conventionsName: "",
       skills: [],
       provHistLength: 1,
-      busy: false,
+      agentActive: false,
+      agentActiveRef,
+      startAgentTurn,
+      finishAgentTurn,
       turnAbort: { current: null } as any,
       stopTurnIdRef: { current: "" } as any,
       streamRaf: { current: null } as any,
@@ -93,7 +105,6 @@ function setupGolden() {
       updateWs: (fn) => {
         ws = fn(ws);
       },
-      setBusy: () => {},
       logAudit: (e) => audits.push(e),
       rememberProvider: () => {},
       // Golden flow approves every gated tool: the mocked approval_issue

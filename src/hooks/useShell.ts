@@ -1,5 +1,6 @@
-import { useState } from "react";
-import type { Workspace } from "../types";
+import { useRef, useState } from "react";
+import type { MutableRefObject } from "react";
+import type { OperationState, Workspace } from "../types";
 import { claimFor } from "../lib/approval";
 import { shellRun } from "../lib/tauri";
 
@@ -10,29 +11,50 @@ import { shellRun } from "../lib/tauri";
 export function useShell(opts: {
   ws: Workspace;
   cwd: string;
-  setBusy: (v: boolean) => void;
   updateWs: (fn: (w: Workspace) => Workspace) => void;
+  workspaceGenerationRef?: MutableRefObject<number>;
+  sessionEpochRef?: MutableRefObject<number>;
 }) {
-  const [shellCmd, setShellCmd] = useState("ls -la");
+  const [shellCmd, setShellCmd] = useState("");
+  const [operation, setOperation] = useState<OperationState>({ status: "idle" });
+  const activeRef = useRef(false);
+  const sequenceRef = useRef(0);
 
-  async function runShell() {
-    const { ws, setBusy, updateWs } = opts;
+  async function runShell(): Promise<boolean> {
     const cmd = shellCmd.trim();
-    if (!cmd) return;
-    setBusy(true);
+    if (!cmd || activeRef.current) return false;
+    activeRef.current = true;
+    const sequence = ++sequenceRef.current;
+    const targetGeneration = opts.workspaceGenerationRef?.current;
+    const targetSessionEpoch = opts.sessionEpochRef?.current;
+    const targetWorkspace = opts.ws;
+    const targetCwd = targetWorkspace.cwd || opts.cwd;
+    setOperation({ status: "pending", message: "Running shell command…" });
+    const stillCurrent = () =>
+      (targetGeneration == null || opts.workspaceGenerationRef?.current === targetGeneration) &&
+      (targetSessionEpoch == null || opts.sessionEpochRef?.current === targetSessionEpoch);
     try {
-      const cwd = ws.cwd || opts.cwd;
-      const r = await shellRun(cwd, cmd, await claimFor("shell_run", { cwd, cmd }));
-      updateWs((w) => ({
-        ...w,
-        shellOut: w.shellOut + `\n$ ${cmd}\n${r.stdout}${r.stderr}(exit ${r.code})\n`,
-      }));
-    } catch (e) {
-      updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nshell error: ${e}` }));
+      const result = await shellRun(targetCwd, cmd, await claimFor("shell_run", { cwd: targetCwd, cmd }));
+      if (stillCurrent()) {
+        opts.updateWs((w) => ({
+          ...w,
+          shellOut: w.shellOut + `\n$ ${cmd}\n${result.stdout}${result.stderr}(exit ${result.code})\n`,
+        }));
+      }
+      setOperation({ status: "success", message: `Shell command finished (exit ${result.code}).` });
+      return true;
+    } catch (error) {
+      if (stillCurrent()) {
+        opts.updateWs((w) => ({ ...w, shellOut: w.shellOut + `\nshell error: ${error}` }));
+      }
+      setOperation({ status: "error", message: `Shell command failed: ${error}` });
+      return false;
     } finally {
-      setBusy(false);
+       if (sequenceRef.current === sequence) {
+         activeRef.current = false;
+       }
     }
   }
 
-  return { shellCmd, onShellCmdChange: setShellCmd, runShell };
+  return { shellCmd, onShellCmdChange: setShellCmd, runShell, operation, pending: operation.status === "pending" };
 }

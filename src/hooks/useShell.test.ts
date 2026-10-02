@@ -21,18 +21,16 @@ afterEach(() => {
 
 function setup() {
   let ws = newWorkspace("main:ws", "/w");
-  const busy: boolean[] = [];
   const hook = renderHook(() =>
     useShell({
       ws,
       cwd: "/w",
-      setBusy: (v) => busy.push(v),
       updateWs: (fn) => {
         ws = fn(ws);
       },
     }),
   );
-  return { ...hook, wsOf: () => ws, busy };
+  return { ...hook, wsOf: () => ws };
 }
 
 describe("useShell", () => {
@@ -44,12 +42,15 @@ describe("useShell", () => {
       return { stdout: "total 0\n", stderr: "", code: 0 };
     });
     const h = setup();
+    act(() => {
+      h.result.current.onShellCmdChange("echo hi");
+    });
     await act(async () => {
       await h.result.current.runShell();
     });
-    expect(h.wsOf().shellOut).toContain("$ ls -la");
+    expect(h.wsOf().shellOut).toContain("$ echo hi");
     expect(h.wsOf().shellOut).toContain("(exit 0)");
-    expect(h.busy).toEqual([true, false]);
+    expect(h.result.current.operation).toMatchObject({ status: "success" });
   });
 
   it("logs shell errors without throwing", async () => {
@@ -57,17 +58,20 @@ describe("useShell", () => {
       throw new Error("timed out");
     });
     const h = setup();
+    act(() => {
+      h.result.current.onShellCmdChange("echo hi");
+    });
     await act(async () => {
       await h.result.current.runShell();
     });
     expect(h.wsOf().shellOut).toMatch(/shell error/);
-    expect(h.busy[h.busy.length - 1]).toBe(false);
+    expect(h.result.current.operation).toMatchObject({ status: "error" });
   });
 
   it("tracks the command draft", () => {
     setInvokeImpl(async () => ({}));
     const { result } = setup();
-    expect(result.current.shellCmd).toBe("ls -la");
+    expect(result.current.shellCmd).toBe("");
     act(() => {
       result.current.onShellCmdChange("echo hi");
     });

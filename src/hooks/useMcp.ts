@@ -16,10 +16,15 @@ export interface McpServerRow {
   name: string;
   kind: string;
   enabled: boolean;
+  configured: boolean;
+  configured_enabled: boolean;
+  trusted: boolean;
+  consent_required: boolean;
+  workspace_controlled: boolean;
+  fingerprint: string;
   tools: number;
   error?: string;
   untrusted?: boolean;
-  /** Remote servers only: OAuth state (undefined while loading/failed). */
   auth?: McpAuthStatus;
 }
 
@@ -42,24 +47,30 @@ export function useMcp({ workspaceRoot }: { workspaceRoot: string }) {
         name: s.name,
         kind: s.kind,
         enabled: s.enabled,
+        configured: s.configured ?? true,
+        configured_enabled: s.configured_enabled ?? s.enabled,
+        trusted: s.trusted ?? !s.untrusted,
+        consent_required: s.consent_required ?? !!s.untrusted,
+        workspace_controlled: s.workspace_controlled ?? !!s.untrusted,
+        fingerprint: s.fingerprint ?? "",
         untrusted: !!s.untrusted,
         tools: 0,
       }));
-      // Trust prompt data: warn once when the workspace adds new servers.
       try {
         const trust = await mcpWorkspaceTrust();
-        const fresh = (trust.workspace_servers ?? []).filter(
-          (n) => !rows.find((r) => r.name === n)?.enabled,
+        const consentNames = (trust.workspace_servers ?? []).filter(
+          (name) => rows.find((row) => row.name === name)?.consent_required,
         );
-        if (fresh.length > 0) {
+        if (consentNames.length > 0) {
           setNote(
-            `Workspace wants to add MCP servers (${fresh.join(", ")}) — disabled until you enable them. Only enable servers you trust; workspace configs cannot use {env:} secrets.`,
+            `Consent required for workspace MCP server${consentNames.length === 1 ? "" : "s"}: ${consentNames.join(", ")}. Use Trust & enable to review the native confirmation.`,
           );
         }
       } catch {
         /* trust probe is best-effort */
       }
-      if (isMcpEnabled()) {
+      const canDiscover = rows.some((row) => row.enabled && row.trusted && row.configured_enabled);
+      if (isMcpEnabled() && canDiscover) {
         try {
           const raw = await mcpListToolsRaw();
           const counts = new Map<string, number>();
@@ -83,7 +94,7 @@ export function useMcp({ workspaceRoot }: { workspaceRoot: string }) {
       // OAuth state for remote servers (best-effort, never fails refresh).
       await Promise.all(
         rows
-          .filter((r) => r.kind === "remote")
+          .filter((r) => r.kind === "remote" && r.enabled && r.trusted)
           .map(async (r) => {
             try {
               r.auth = await mcpOAuthStatus(r.name);

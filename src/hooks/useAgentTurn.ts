@@ -2,7 +2,7 @@ import { useRef } from "react";
 import type { MutableRefObject } from "react";
 import type { AuditInput, CenterTab, ChatMsg, ProviderConfig, SkillInfo, UndoEntry, Workspace } from "../types";
 import { fsRead, skillRead, type NexaKind } from "../lib/tauri";
-import { actionFor, approvalIssue, detailFor } from "../lib/approval";
+import { actionFor, approvalDetailFor, approvalIssue } from "../lib/approval";
 import { chatWithTools, asksAuthQuestion, extractExplicitPaths, skillConfinement, type ToolDef } from "../lib/providers";
 import { isMcpEnabled, mcpListTools, setMcpToolCache, toMcpToolDefs } from "../lib/mcp";
 import { recordTurnRepairs, resolvePromptTier } from "../lib/modelBands";
@@ -24,14 +24,18 @@ interface Deps {
   gitSnapshot?: string;
   /** Currently open file in the editor. */
   openPath?: string;
-  busy: boolean;
+  agentActive?: boolean;
+  agentActiveRef?: MutableRefObject<boolean>;
+  startAgentTurn: () => number;
+  finishAgentTurn: (sequence: number, status: "success" | "error", message: string) => void;
+  workspaceGenerationRef?: MutableRefObject<number>;
+  sessionEpochRef?: MutableRefObject<number>;
   turnAbort: MutableRefObject<AbortController | null>;
   stopTurnIdRef: MutableRefObject<string>;
   streamRaf: MutableRefObject<number | null>;
   stickBottom: MutableRefObject<boolean>;
   lastSynced: MutableRefObject<{ pad: string; plan: string; memory: string }>;
   updateWs: (fn: (w: Workspace) => Workspace) => void;
-  setBusy: (v: boolean) => void;
   logAudit: (e: AuditInput) => void;
   rememberProvider: (used: ProviderConfig) => void;
   setCenterTab: (t: CenterTab) => void;
@@ -89,23 +93,41 @@ export function useAgentTurn(d: Deps) {
   // always run Build).
   async function runAgentTurn(promptText: string, opts?: { plan?: boolean }) {
     const target = d.ws;
-    if (d.busy) return;
+    const agentIsActive = d.agentActiveRef?.current || d.agentActive || false;
+    if (agentIsActive) return;
+    const turnGeneration = d.workspaceGenerationRef?.current;
+    const turnSessionEpoch = d.sessionEpochRef?.current;
+    let turnCurrent = true;
+    const turnScopeCurrent = () => {
+      if (!turnCurrent) return false;
+      if (turnGeneration != null && d.workspaceGenerationRef?.current !== turnGeneration) {
+        turnCurrent = false;
+        return false;
+      }
+      if (turnSessionEpoch != null && d.sessionEpochRef?.current !== turnSessionEpoch) {
+        turnCurrent = false;
+        return false;
+      }
+      return true;
+    };
+    const updateTurnWs = (fn: (w: Workspace) => Workspace) => {
+      if (!turnScopeCurrent()) return;
+      d.updateWs(fn);
+    };
+    const sequence = d.startAgentTurn();
     const plan = opts?.plan ?? d.planMode ?? false;
     d.stickBottom.current = true;
     d.setShowJump(false);
     const userMsg: ChatMsg = { id: uid(), role: "user", content: promptText };
-    // Skill confinement: a read-only skill (e.g. /rate) narrows this turn's
-    // tool surface to exactly its prescribed tools. runTool refuses the rest
-    // fail-closed BEFORE any approval dialog can appear.
     const confinement = skillConfinement(promptText);
     const usedCfg = { ...target.provider };
-    d.updateWs((w) => ({ ...w, messages: [...w.messages, userMsg] }));
-    d.setBusy(true);
+    updateTurnWs((w) => ({ ...w, messages: [...w.messages, userMsg] }));
     const ac = new AbortController();
     d.turnAbort.current = ac;
     d.stopTurnIdRef.current = target.id;
     let acc = "";
     let turnRepairs = 0;
+    let turnFailed = false;
     let toolCallsThisTurn = 0;
     // Set when the last approval was auto-claimed (no dialog); the matching
     // onAudit call tags it "auto". Sequential tool loop: no races.
@@ -122,7 +144,7 @@ export function useAgentTurn(d: Deps) {
       if (d.streamRaf.current != null) return;
       d.streamRaf.current = requestAnimationFrame(() => {
         d.streamRaf.current = null;
-        d.updateWs((w) => {
+        updateTurnWs((w) => {
           const msgs = [...w.messages];
           const last = msgs[msgs.length - 1];
           const streamMsg: ChatMsg = {
@@ -174,7 +196,7 @@ export function useAgentTurn(d: Deps) {
       const sys = {
         role: "system",
         content: [
-          `You are Commander, the VTNexa workspace agent. If asked who you are or who made you, answer Commander - never adopt another name, never discuss model identity. Driving a Linux workspace.`,
+          `You are Commander, the VTNexa workspace agent. If asked who you are or who made you, answer Commander - never adopt another name, never discuss model identity. Driving a cross-platform workspace.`,
           weak
             ? `Rules for this turn: ONE tool call per reply, sent as a real tool_call - talking about a tool does nothing, to act emit the call. Never narrate calls in prose, never write meta-commentary about the conversation - just answer or call tools. An invoked skill's output format is followed exactly: no extra notes, no renamed sections. Surveying without changing is stalling - after looking with read-only tools, act. Memory/Plan/Pad context is ALREADY pasted above - never call nexa_read unless the user explicitly asks about the notes. A greeting or "what can you do" needs NO tools - answer briefly and oriented (workspace, one line of state, what to work on). A bare "ok / go ahead / continue" means do the last proposed step NOW - don't re-list, don't ask. Write with fs_write directly. First reply: a tool call or the final answer - never a question. After each tool result: one line on what you learned, then the next call. Long commands go to shell_bg + shell_poll, not repeated shell_run calls. Output comes ONLY from a shell_run tool result, never from pasting a command. Grounding: never claim a file exists, is staged, or was saved, and never claim calls or results beyond THIS turn - unsure? Call fs_list/fs_read first. You CAN run shell commands and read files - never claim to be text-only.`
             : `Answer contract: Start acting on your first reply - no intent restatement, no upfront plan, and never open with a question when a tool can make progress. Bare continuations ("ok", "go ahead", "continue", "proceed", "yes", "do it") mean EXECUTE the last proposed next step immediately: never re-survey the workspace, never re-list what this chat already established, never ask what to do - the plan is in the history above, pick it up mid-stride. A plain greeting or smalltalk is the exception: answer briefly and oriented - workspace name, one line of live state from the context above, what to work on - no tools, no tool talk. Reconnaissance is not completion: listing files or reporting what is missing is never the final answer to a work request - after read-only discovery, immediately take the first mutating step. While working, each reply is one line stating what the last tool result showed, then the next tool call. Before the final summary, verify: re-read edited files and run lsp_diagnostics on edited ts/rs/py files. The final reply (task done or truly blocked) is the only long one: files changed, commands run, what remains - at most 5 lines, ending on a statement, never a question. Grounding: never assert a file exists, is staged, was saved, or is (un)available, and never claim tool calls or results beyond THIS turn's history - unsure? Call fs_list/fs_read first. You have shell/file tools: never claim to be text-only, and never present a command as its output - only shell_run results count as output.`,
@@ -232,77 +254,76 @@ export function useAgentTurn(d: Deps) {
             workspaceRoot: d.workspaceRoot,
             cwd: target.cwd || d.workspaceRoot,
             onAutoApproval: () => {
-              lastAuto = true;
+              if (turnScopeCurrent()) lastAuto = true;
             },
             onUndoCapture: d.pushUndo,
-            onProposeWrite: async (path, content) => {
-              let original = "";
-              try {
-                original = await fsRead(path);
-              } catch {
-                /* new or unreadable file */
-              }
-              d.updateWs((w) => ({ ...w, pendingDiff: { path, content, original } }));
-              d.setCenterTab("diff");
-            },
-            // Native OS dialog (outside page DOM): the model and injected
-            // content can trigger it but cannot click it. Workspace-confined
-            // ops skip it via runTool's auto-claim (tagged "auto" in audit).
-            // Rejection (or a closed dialog) maps to null = turn reports
-            // `user rejected …`. Backend failures are NOT silent: they land
-            // in the audit trail and shell log so "dialog never appeared" is
-            // distinguishable from "user clicked Reject".
-            requestApproval: async (tool, args) => {
-              try {
-                return await approvalIssue(actionFor(tool), detailFor(args));
-              } catch (e) {
-                const msg = String(e);
-                d.logAudit({
-                  tool,
-                  args: JSON.stringify(args).slice(0, 1000),
-                  decision: "rejected",
-                  ok: false,
-                  ms: 0,
-                  note: `approval dialog failed: ${msg.slice(0, 200)}`,
-                });
-                d.updateWs((w) => ({
-                  ...w,
-                  shellOut: w.shellOut + `\n⚠ approval dialog failed for ${tool}: ${msg}`,
-                }));
-                return null;
-              }
-            },
-            onNexaWrite: (kind: NexaKind, content: string) => {
-              d.lastSynced.current = { ...d.lastSynced.current, [kind]: content };
-              if (kind === "pad") d.setPadText(content);
-              else if (kind === "plan") d.setPlanText(content);
-              else d.setMemoryText(content);
-              d.setNexaState("saved");
-            },
-          },
-          onUsage: (u) => {
-            d.updateWs((w) => ({
-              ...w,
-              usage: {
-                input: w.usage.input + u.input,
-                output: w.usage.output + u.output,
-                cost: w.usage.cost + (u.cost ?? 0),
-                tools: w.usage.tools,
-                toolMs: w.usage.toolMs,
-              },
-            }));
-          },
-          onToolActivity: (a) => {
-            toolCallsThisTurn++;
-            d.updateWs((w) => ({
-              ...w,
-              usage: { ...w.usage, tools: w.usage.tools + 1, toolMs: w.usage.toolMs + a.ms },
-            }));
-          },
+             onProposeWrite: async (path, content) => {
+               let original = "";
+               try {
+                 original = await fsRead(path);
+               } catch {
+                 /* new or unreadable file */
+               }
+               if (!turnScopeCurrent()) return;
+               updateTurnWs((w) => ({ ...w, pendingDiff: { path, content, original } }));
+               if (turnScopeCurrent()) d.setCenterTab("diff");
+             },
+             requestApproval: async (tool, args) => {
+               if (!turnScopeCurrent()) return null;
+               try {
+                 return await approvalIssue(actionFor(tool), approvalDetailFor(tool, args));
+               } catch (e) {
+                 const msg = String(e);
+                 if (!turnScopeCurrent()) return null;
+                 d.logAudit({
+                   tool,
+                   args: JSON.stringify(args).slice(0, 1000),
+                   decision: "rejected",
+                   ok: false,
+                   ms: 0,
+                   note: `approval dialog failed: ${msg.slice(0, 200)}`,
+                 });
+                 updateTurnWs((w) => ({
+                   ...w,
+                   shellOut: w.shellOut + `\n⚠ approval dialog failed for ${tool}: ${msg}`,
+                 }));
+                 return null;
+               }
+             },
+             onNexaWrite: (kind: NexaKind, content: string) => {
+               if (!turnScopeCurrent()) return;
+               d.lastSynced.current = { ...d.lastSynced.current, [kind]: content };
+               if (kind === "pad") d.setPadText(content);
+               else if (kind === "plan") d.setPlanText(content);
+               else d.setMemoryText(content);
+               d.setNexaState("saved");
+             },
+           },
+           onUsage: (u) => {
+             updateTurnWs((w) => ({
+               ...w,
+               usage: {
+                 input: w.usage.input + u.input,
+                 output: w.usage.output + u.output,
+                 cost: w.usage.cost + (u.cost ?? 0),
+                 tools: w.usage.tools,
+                 toolMs: w.usage.toolMs,
+               },
+             }));
+           },
+           onToolActivity: (a) => {
+             if (!turnScopeCurrent()) return;
+             toolCallsThisTurn++;
+             updateTurnWs((w) => ({
+               ...w,
+               usage: { ...w.usage, tools: w.usage.tools + 1, toolMs: w.usage.toolMs + a.ms },
+             }));
+           },
           onRepair: () => {
             turnRepairs++;
           },
           onAudit: (e) => {
+            if (!turnScopeCurrent()) return;
             // Tag auto-claimed approvals honestly: no dialog was shown.
             const entry = lastAuto && e.decision === "approved"
               ? { ...e, decision: "auto" as const, note: "auto-approved: workspace-confined, no dialog" }
@@ -316,6 +337,7 @@ export function useAgentTurn(d: Deps) {
           },
           extraTools: mcpTools,
           onThinking: (t) => {
+            if (!turnScopeCurrent()) return;
             thinkingAcc = (thinkingAcc + t).slice(-600);
             publishStream();
           },
@@ -332,7 +354,7 @@ export function useAgentTurn(d: Deps) {
       } else {
         stallRef.current.questionTurns = 0;
       }
-      d.updateWs((w) => ({
+      updateTurnWs((w) => ({
         ...w,
         messages: w.messages
           .filter((m) => m.id !== "stream")
@@ -348,6 +370,7 @@ export function useAgentTurn(d: Deps) {
     } catch (e) {
       d.flushStreamFrame();
       const stopped = ac.signal.aborted;
+      turnFailed = !stopped;
       let errText = stopped ? "⏹ turn stopped by user (side effects already applied are not undone)" : `provider error: ${e}`;
       const msg = String(e);
       if (
@@ -358,7 +381,7 @@ export function useAgentTurn(d: Deps) {
       ) {
         errText += `\n\n[first run?] Nothing is listening at ${usedCfg.baseUrl}. Start Ollama (\`ollama serve\`) and pull a model (\`ollama pull ${usedCfg.model}\`), or point baseUrl at any OpenAI-compatible endpoint (or pick Anthropic/Gemini above with an API key).`;
       }
-      d.updateWs((w) => ({
+      updateTurnWs((w) => ({
         ...w,
         messages: w.messages
           .filter((m) => m.id !== "stream")
@@ -372,7 +395,12 @@ export function useAgentTurn(d: Deps) {
           ]),
       }));
     } finally {
-      d.setBusy(false);
+      turnCurrent = false;
+      d.finishAgentTurn(
+        sequence,
+        turnFailed ? "error" : "success",
+        turnFailed ? "Commander turn failed." : "Commander turn complete.",
+      );
       recordTurnRepairs(usedCfg.baseUrl, usedCfg.model, turnRepairs);
       if (d.turnAbort.current === ac) {
         d.turnAbort.current = null;

@@ -1,8 +1,8 @@
 import { useCallback, useRef, useState } from "react";
 import type { FileEntry, Workspace } from "../types";
 import { fsList } from "../lib/tauri";
-import { ptyWrite } from "../lib/pty";
-import { isWithin } from "../lib/utils";
+import { ptySetCwd } from "../lib/pty";
+import { isWithinPath } from "../lib/path";
 
 export const WS_KEY = "vtai.workspaceRoot";
 
@@ -42,7 +42,7 @@ export function useWorkspace(opts: {
   function setCwd(next: string) {
     const { updateWs, ptyId } = live.current;
     const root = rootRef.current;
-    if (next && root && !isWithin(root, next)) {
+    if (next && root && !isWithinPath(root, next)) {
       updateWs((w) => ({
         ...w,
         shellOut: w.shellOut + `\nblocked: ${next} is outside workspace ${root}`,
@@ -52,8 +52,7 @@ export function useWorkspace(opts: {
     setCwdState(next);
     if (next) {
       updateWs((w) => (w.cwd === next ? w : { ...w, cwd: next }));
-      // Keep interactive PTY in sync - best-effort, no error surface.
-      ptyWrite(ptyId, `cd '${next.replace(/'/g, "'\\''")}'\n`).catch(() => {});
+      ptySetCwd(ptyId, next).catch(() => {});
     }
   }
 

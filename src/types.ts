@@ -1,3 +1,5 @@
+import { basenamePath } from "./lib/path";
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -102,6 +104,12 @@ export type SideTab = "chat" | "pad" | "plan" | "memory" | "audit";
 
 export type ProviderKind = "auto" | "openai" | "anthropic" | "gemini";
 
+export type OperationState =
+  | { status: "idle" }
+  | { status: "pending"; message: string }
+  | { status: "success"; message: string }
+  | { status: "error"; message: string };
+
 export interface Routine {
   id: string;
   name: string;
@@ -109,6 +117,7 @@ export interface Routine {
   /** repeat interval ms; 0 = manual only (Run now button) */
   everyMs: number;
   enabled: boolean;
+  trusted?: boolean;
   lastRun?: number;
   nextRun?: number;
   runCount: number;
@@ -153,7 +162,7 @@ export function undoEntrySize(e: UndoEntry): number {
 }
 
 export function undoEntryLabel(e: UndoEntry): string {
-  const short = (p: string) => p.split("/").pop() ?? p;
+  const short = basenamePath;
   switch (e.kind) {
     case "write":
       return e.existedBefore ? `write ${short(e.path)}` : `create ${short(e.path)}`;

@@ -22,7 +22,7 @@ beforeEach(() => {
 
 describe("isMcpToolName", () => {
   it("accepts qualified names, rejects the rest", () => {
-    expect(isMcpToolName("mcp_sentry_list_issues")).toBe(true);
+    expect(isMcpToolName("mcp_sentry_list_issues_1234abcd")).toBe(true);
     expect(isMcpToolName("fs_read")).toBe(false);
     expect(isMcpToolName("mcp_")).toBe(false);
     expect(isMcpToolName("mcp_a-b")).toBe(false);
@@ -57,8 +57,12 @@ describe("splitQualifiedName", () => {
       server: "my",
       tool: "list",
     });
-    expect(splitQualifiedName("mcp_my_mcp_list", ["my", "my_mcp"])).toEqual({
+    expect(splitQualifiedName("mcp_my_mcp_list_deadbeef", ["my", "my_mcp"])).toEqual({
       server: "my_mcp",
+      tool: "list",
+    });
+    expect(splitQualifiedName("mcp_my_mcp_list_deadbeef", ["my-mcp"])).toEqual({
+      server: "my-mcp",
       tool: "list",
     });
   });
@@ -71,8 +75,15 @@ describe("resolveMcpQualified", () => {
     ]);
     expect(resolveMcpQualified("mcp_s_get_issue")).toEqual({ server: "s", tool: "get.Issue" });
   });
+  it("rejects duplicate qualified names in the live cache", () => {
+    expect(() => setMcpToolCache([
+      { server: "a", name: "x", qualified_name: "mcp_a_x_deadbeef", description: "", input_schema: {} },
+      { server: "b", name: "y", qualified_name: "mcp_a_x_deadbeef", description: "", input_schema: {} },
+    ])).toThrow(/duplicate/);
+  });
   it("returns null with an empty cache", () => {
     expect(resolveMcpQualified("mcp_s_add")).toBeNull();
+    expect(resolveMcpQualified("mcp_s_add_deadbeef")).toBeNull();
   });
 });
 

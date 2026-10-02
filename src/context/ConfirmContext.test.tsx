@@ -35,7 +35,7 @@ describe("ConfirmContext", () => {
     fireEvent.click(screen.getByText("ask"));
     expect(await screen.findByRole("alertdialog")).toBeTruthy();
     expect(screen.getByText("delete everything?")).toBeTruthy();
-    fireEvent.click(screen.getByText("Confirm"));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     await waitFor(() => expect(results).toEqual([true]));
 
     fireEvent.click(screen.getByText("ask"));

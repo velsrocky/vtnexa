@@ -33,13 +33,13 @@ export async function fsWrite(path: string, content: string, approval?: Approval
 }
 
 export async function fsCreate(path: string, isDir?: boolean): Promise<string> {
-  return invoke<string>("fs_create", { path, is_dir: isDir ?? false });
+  return invoke<string>("fs_create", { path, isDir: isDir ?? false });
 }
 
 export async function fsRename(oldPath: string, newPath: string, approval?: Approval): Promise<string> {
   return invoke<string>("fs_rename", {
-    old_path: oldPath,
-    new_path: newPath,
+    oldPath,
+    newPath,
     ...approvalArgs(approval),
   });
 }
@@ -204,7 +204,7 @@ export async function workspaceRoot(): Promise<string> {
 }
 
 export async function setWorkspaceRoot(path: string, confirmDangerous?: boolean): Promise<string> {
-  return invoke<string>("set_workspace_root", { path, confirm_dangerous: confirmDangerous ?? null });
+  return invoke<string>("set_workspace_root", { path, confirmDangerous: confirmDangerous ?? null });
 }
 
 export type NexaKind = "pad" | "plan" | "memory";

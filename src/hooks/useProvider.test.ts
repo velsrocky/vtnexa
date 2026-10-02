@@ -16,6 +16,22 @@ function setInvokeImpl(fn: (cmd: string, args?: any) => Promise<any>) {
   (globalThis as any).__invokeImpl = fn;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
 beforeEach(() => {
   localStorage.clear();
 });
@@ -27,8 +43,8 @@ afterEach(() => {
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
-function setup() {
-  let ws: Workspace = newWorkspace("main:ws", "/w");
+function setup(provider?: Workspace["provider"]) {
+  let ws: Workspace = newWorkspace("main:ws", "/w", provider);
   const hook = renderHook(() =>
     useProvider({
       ws,
@@ -93,7 +109,7 @@ describe("useProvider keychain", () => {
     expect(result.current.keychainOk).toBe(false);
   });
 
-  it("rememberProvider mirrors keys and records history", () => {
+  it("rememberProvider records a keyless entry and mirrors the key", async () => {
     const keySets: any[] = [];
     setInvokeImpl(async (cmd, args?: any) => {
       if (cmd === "key_set") {
@@ -103,14 +119,16 @@ describe("useProvider keychain", () => {
       return "";
     });
     const { result } = setup();
-    act(() => {
+    await act(async () => {
       result.current.rememberProvider({ baseUrl: "https://x.test", model: "m", apiKey: "S", kind: "auto" });
+      await Promise.resolve();
+      await Promise.resolve();
     });
     expect(keySets).toEqual([{ baseUrl: "https://x.test", model: "m", secret: "S" }]);
-    // No keychain yet: the key stays in local history so reloads keep working.
-    expect(result.current.provHist[0]).toMatchObject({ baseUrl: "https://x.test", apiKey: "S" });
+    expect(result.current.provHist[0]).toMatchObject({ baseUrl: "https://x.test", apiKey: "" });
     const saved = JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]");
     expect(saved[0].baseUrl).toBe("https://x.test");
+    expect(JSON.stringify(saved)).not.toContain("S");
   });
 });
 
@@ -140,7 +158,7 @@ describe("useProvider key loss", () => {
     ]);
   });
 
-  it("explicit clears propagate the deletion on the next turn", () => {
+  it("explicit clears cancel pending writes and persist only the deletion", async () => {
     const keySets: any[] = [];
     setInvokeImpl(async (cmd, args?: any) => {
       if (cmd === "key_set") {
@@ -159,11 +177,7 @@ describe("useProvider key loss", () => {
     const { result } = setup();
     act(() => {
       result.current.setEditCfg({ apiKey: "K2" });
-    });
-    act(() => {
       result.current.setEditCfg({ apiKey: "" });
-    });
-    act(() => {
       result.current.rememberProvider({
         baseUrl: "http://localhost:11434/v1",
         model: "qwen2.5-coder:7b",
@@ -171,11 +185,17 @@ describe("useProvider key loss", () => {
         kind: "auto",
       });
     });
-    expect(keySets).toContainEqual({
-      baseUrl: "http://localhost:11434/v1",
-      model: "qwen2.5-coder:7b",
-      secret: "",
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
     });
+    expect(keySets).toEqual([
+      {
+        baseUrl: "http://localhost:11434/v1",
+        model: "qwen2.5-coder:7b",
+        secret: "",
+      },
+    ]);
     expect(result.current.provHist[0]).toMatchObject({ apiKey: "" });
   });
 
@@ -195,6 +215,7 @@ describe("useProvider key loss", () => {
       h.rerender();
     });
     expect(h.wsOf().provider.apiKey).toBe("K-LOCAL");
+    await advance(300);
     act(() => {
       h.result.current.setEditCfg({ model: "other" });
       h.rerender();
@@ -239,7 +260,7 @@ describe("useProvider draft persistence", () => {
   it("keeps the key in the local draft when no keychain exists, and refills it on reload", async () => {
     vi.useFakeTimers();
     setInvokeImpl(async (cmd) => {
-      if (cmd === "key_get") throw new Error("no daemon");
+      if (cmd === "key_get" || cmd === "key_set") throw new Error("no daemon");
       return {};
     });
     const h1 = setup();
@@ -247,6 +268,8 @@ describe("useProvider draft persistence", () => {
       h1.result.current.setEditCfg({ apiKey: "sk-local" });
       h1.rerender();
     });
+    expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain("sk-local");
+    await advance(300);
     const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}");
     expect(Object.values(draft)[0]).toMatchObject({ apiKey: "sk-local" });
 
@@ -278,14 +301,18 @@ describe("useProvider draft persistence", () => {
     act(() => {
       result.current.setEditCfg({ apiKey: "typed" });
     });
+    expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain("typed");
+    await advance(300);
     const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}");
     expect(Object.values(draft)[0]).toMatchObject({ apiKey: "" });
+    expect(JSON.stringify(draft)).not.toContain("typed");
     void wsOf;
   });
 });
 
 describe("useProvider key mirroring", () => {
-  it("writes the key to the keychain immediately on edit", () => {
+  it("writes a debounced key edit to the keychain", async () => {
+    vi.useFakeTimers();
     const keySets: any[] = [];
     setInvokeImpl(async (cmd, args?: any) => {
       if (cmd === "key_set") {
@@ -296,13 +323,15 @@ describe("useProvider key mirroring", () => {
     });
     const { result } = setup();
     act(() => {
-      result.current.setEditCfg({ apiKey: "sk-immediate" });
+      result.current.setEditCfg({ apiKey: "sk-debounced" });
     });
+    expect(keySets).toEqual([]);
+    await advance(300);
     expect(keySets).toEqual([
       {
         baseUrl: "http://localhost:11434/v1",
         model: "qwen2.5-coder:7b",
-        secret: "sk-immediate",
+        secret: "sk-debounced",
       },
     ]);
   });
@@ -344,5 +373,288 @@ describe("useProvider key mirroring", () => {
       await vi.advanceTimersByTimeAsync(600);
     });
     expect(ws.provider.apiKey).toBe("K-BIG");
+  });
+});
+
+describe("useProvider credential persistence", () => {
+  it("purges confirmed key material from the draft and matching history pair", async () => {
+    vi.useFakeTimers();
+    const baseUrl = "http://localhost:11434/v1";
+    const model = "qwen2.5-coder:7b";
+    localStorage.setItem(
+      "vtai.providerHistory",
+      JSON.stringify([
+        { baseUrl, model, apiKey: "OLD-HISTORY", kind: "auto" },
+        { baseUrl: "https://other.test", model: "other", apiKey: "OTHER-HISTORY", kind: "auto" },
+      ]),
+    );
+    localStorage.setItem(
+      "vtai.providerDraft",
+      JSON.stringify({
+        main: {
+          baseUrl,
+          model,
+          apiKey: "OLD-DRAFT",
+          keys: { [`${baseUrl}|${model}`]: "OLD-DRAFT", "https://other.test|other": "OTHER-DRAFT" },
+        },
+      }),
+    );
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "key_set") return {};
+      return "";
+    });
+    const { result, wsOf } = setup();
+    act(() => {
+      result.current.setEditCfg({ apiKey: "CONFIRMED" });
+    });
+    expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain("CONFIRMED");
+    expect(localStorage.getItem("vtai.providerHistory") ?? "").not.toContain("CONFIRMED");
+    await advance(300);
+    expect(result.current.keychainOk).toBe(true);
+    expect(wsOf().provider.apiKey).toBe("CONFIRMED");
+    const history = JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]");
+    const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}").main;
+    expect(history[0]).toMatchObject({ baseUrl, model, apiKey: "" });
+    expect(history[1].apiKey).toBe("OTHER-HISTORY");
+    expect(draft.apiKey).toBe("");
+    expect(draft.keys).toEqual({ "https://other.test|other": "OTHER-DRAFT" });
+  });
+
+  it("persists a fallback only after the keySet fails", async () => {
+    vi.useFakeTimers();
+    const write = deferred<void>();
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "key_set") return write.promise;
+      throw new Error("no daemon");
+    });
+    const { result } = setup();
+    act(() => {
+      result.current.setEditCfg({ apiKey: "FALLBACK" });
+    });
+    await advance(300);
+    expect(result.current.keychainOk).toBeNull();
+    expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain("FALLBACK");
+    await act(async () => {
+      write.reject(new Error("keychain unavailable"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.keychainOk).toBe(false);
+    expect(localStorage.getItem("vtai.providerDraft") ?? "").toContain("FALLBACK");
+  });
+
+  it("serializes rapid writes so the latest value is last", async () => {
+    vi.useFakeTimers();
+    const writes: Array<{ args: any; gate: ReturnType<typeof deferred<void>> }> = [];
+    let stored = "";
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "key_set") {
+        const gate = deferred<void>();
+        writes.push({ args, gate });
+        return gate.promise.then(() => {
+          stored = args.secret;
+        });
+      }
+      return "";
+    });
+    const { result } = setup();
+    act(() => {
+      result.current.setEditCfg({ apiKey: "sk-old" });
+    });
+    await advance(300);
+    act(() => {
+      result.current.setEditCfg({ apiKey: "sk-latest" });
+    });
+    await advance(300);
+    expect(writes.map((write) => write.args.secret)).toEqual(["sk-old"]);
+    await act(async () => {
+      writes[0].gate.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(stored).toBe("sk-old");
+    expect(writes.map((write) => write.args.secret)).toEqual(["sk-old", "sk-latest"]);
+    await act(async () => {
+      writes[1].gate.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(stored).toBe("sk-latest");
+  });
+
+  it("lets explicit clear win over an in-flight write and purges only its pair", async () => {
+    vi.useFakeTimers();
+    const baseUrl = "http://localhost:11434/v1";
+    const model = "qwen2.5-coder:7b";
+    const writes: Array<{ args: any; gate: ReturnType<typeof deferred<void>> }> = [];
+    let stored = "OLD";
+    localStorage.setItem(
+      "vtai.providerHistory",
+      JSON.stringify([
+        { baseUrl, model, apiKey: "OLD-HISTORY", kind: "auto" },
+        { baseUrl: "https://other.test", model: "other", apiKey: "OTHER-HISTORY", kind: "auto" },
+      ]),
+    );
+    localStorage.setItem(
+      "vtai.providerDraft",
+      JSON.stringify({
+        main: {
+          baseUrl,
+          model,
+          apiKey: "OLD-DRAFT",
+          keys: { [`${baseUrl}|${model}`]: "OLD-DRAFT", "https://other.test|other": "OTHER-DRAFT" },
+        },
+      }),
+    );
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "key_set") {
+        const gate = deferred<void>();
+        writes.push({ args, gate });
+        return gate.promise.then(() => {
+          stored = args.secret;
+        });
+      }
+      return "";
+    });
+    const { result } = setup();
+    act(() => {
+      result.current.setEditCfg({ apiKey: "NEW" });
+    });
+    await advance(300);
+    act(() => {
+      result.current.setEditCfg({ apiKey: "" });
+    });
+    expect(writes).toHaveLength(1);
+    expect(JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]")[0].apiKey).toBe("");
+    expect(JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}").main.keys).toEqual({
+      "https://other.test|other": "OTHER-DRAFT",
+    });
+    await act(async () => {
+      writes[0].gate.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(writes.map((write) => write.args.secret)).toEqual(["NEW", ""]);
+    await act(async () => {
+      writes[1].gate.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(stored).toBe("");
+    expect(JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]")[1].apiKey).toBe("OTHER-HISTORY");
+  });
+
+  it("purges successful migration pairs and retains only failed plaintext", async () => {
+    vi.useFakeTimers();
+    const current = { baseUrl: "https://failed.test", model: "m" };
+    const migrated = { baseUrl: "https://ok.test", model: "m" };
+    const draftOnly = { baseUrl: "https://draft.test", model: "m" };
+    const keychainWrites: any[] = [];
+    localStorage.setItem(
+      "vtai.providerHistory",
+      JSON.stringify([
+        { ...migrated, apiKey: "MIGRATED-HISTORY", kind: "auto" },
+        { ...current, apiKey: "FAILED-HISTORY", kind: "auto" },
+      ]),
+    );
+    localStorage.setItem(
+      "vtai.providerDraft",
+      JSON.stringify({
+        main: {
+          ...current,
+          apiKey: "FAILED-DRAFT",
+          keys: {
+            [`${migrated.baseUrl}|${migrated.model}`]: "MIGRATED-DRAFT",
+            [`${current.baseUrl}|${current.model}`]: "FAILED-DRAFT",
+            [`${draftOnly.baseUrl}|${draftOnly.model}`]: "DRAFT-ONLY",
+          },
+        },
+      }),
+    );
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "key_get") return "";
+      if (cmd === "key_set") {
+        keychainWrites.push(args);
+        if (args.baseUrl === current.baseUrl) throw new Error("write failed");
+        return {};
+      }
+      return "";
+    });
+    const { result } = setup({ ...current, apiKey: "", kind: "auto" });
+    await advance(600);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(keychainWrites.map((write) => write.baseUrl)).toEqual([
+      migrated.baseUrl,
+      current.baseUrl,
+      draftOnly.baseUrl,
+    ]);
+    const history = JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]");
+    const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}").main;
+    expect(history[0].apiKey).toBe("");
+    expect(history[1].apiKey).toBe("FAILED-HISTORY");
+    expect(draft.apiKey).toBe("FAILED-DRAFT");
+    expect(draft.keys).toEqual({ [`${current.baseUrl}|${current.model}`]: "FAILED-DRAFT" });
+    expect(result.current.keychainOk).toBe(false);
+  });
+
+  it("ignores a keychain result that resolves after an endpoint switch", async () => {
+    vi.useFakeTimers();
+    const probe = deferred<string>();
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "key_get") return probe.promise;
+      return "";
+    });
+    const { result, wsOf } = setup();
+    await advance(500);
+    act(() => {
+      result.current.setEditCfg({ model: "new-model" });
+    });
+    await act(async () => {
+      probe.resolve("STALE-KEY");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(wsOf().provider.model).toBe("new-model");
+    expect(wsOf().provider.apiKey).toBe("");
+    expect(result.current.keychainOk).toBeNull();
+  });
+
+  it("does not apply a deferred write result after unmount", async () => {
+    vi.useFakeTimers();
+    const baseUrl = "http://localhost:11434/v1";
+    const model = "qwen2.5-coder:7b";
+    const write = deferred<void>();
+    localStorage.setItem(
+      "vtai.providerDraft",
+      JSON.stringify({
+        main: {
+          baseUrl,
+          model,
+          apiKey: "OLD-DRAFT",
+          keys: { [`${baseUrl}|${model}`]: "OLD-DRAFT" },
+        },
+      }),
+    );
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "key_set") return write.promise;
+      return "";
+    });
+    const hook = setup();
+    act(() => {
+      hook.result.current.setEditCfg({ apiKey: "UNMOUNTED" });
+    });
+    await advance(300);
+    hook.unmount();
+    await act(async () => {
+      write.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}").main;
+    expect(draft.apiKey).toBe("OLD-DRAFT");
+    expect(draft.keys).toEqual({ [`${baseUrl}|${model}`]: "OLD-DRAFT" });
   });
 });

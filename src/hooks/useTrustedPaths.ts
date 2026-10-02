@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
 import type { TrustedPath } from "../types";
+import { pathSegments } from "../lib/path";
 
 const STORAGE_KEY = "vtai.trustedPaths";
 
 /** Mirror of the backend's normalize_trusted_pattern (workspace.rs): fail
  *  fast in the UI so the backend isn't the only place saying no. */
 export function validateTrustedPattern(raw: string): string | null {
-  const t = raw.trim().replace(/\\/g, "/");
+  const t = raw.trim();
   if (!t) return "Pattern is empty";
   if (t.length > 256) return "Pattern too long (256 max)";
   if (t.includes("\0")) return "Invalid pattern";
-  const parts = t.split("/").map((s) => s.trim()).filter(Boolean);
+  const parts = pathSegments(t);
   if (parts.length === 0) return "Pattern matches everything (refused)";
   for (const s of parts) {
     if (s === "." || s === "..") return "'..' and '.' are not allowed";
@@ -20,13 +21,7 @@ export function validateTrustedPattern(raw: string): string | null {
 }
 
 export function normalizeTrustedPattern(raw: string): string {
-  return raw
-    .trim()
-    .replace(/\\/g, "/")
-    .split("/")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .join("/");
+  return pathSegments(raw).join("/");
 }
 
 export function useTrustedPaths() {

@@ -57,8 +57,8 @@ export function draftPairKey(baseUrl: string, model: string): string {
   return `${baseUrl.trim()}|${model.trim()}`;
 }
 
-function pairMatches(baseUrl: string, model: string, kind: unknown, e: ProviderEntry): boolean {
-  return e.baseUrl === baseUrl && e.model === model && (e.kind ?? "auto") === (kind ?? "auto");
+function pairMatches(baseUrl: string, model: string, e: ProviderEntry): boolean {
+  return e.baseUrl.trim() === baseUrl.trim() && e.model.trim() === model.trim();
 }
 
 /** Strip one pair's key from history entries (explicit removal) but keep keyless entries for reuse. Pure. */
@@ -66,9 +66,9 @@ export function stripHistoryKey(
   entries: ProviderEntry[],
   baseUrl: string,
   model: string,
-  kind?: ProviderKind,
+  _kind?: ProviderKind,
 ): ProviderEntry[] {
-  return entries.map((e) => (pairMatches(baseUrl, model, kind, e) ? { ...e, apiKey: "" } : e));
+  return entries.map((e) => (pairMatches(baseUrl, model, e) ? { ...e, apiKey: "" } : e));
 }
 
 // ---- Explicit-clear intent ----
@@ -154,6 +154,52 @@ export function saveDrafts(all: Record<string, DraftSlot>): void {
   } catch {
     /* ignore */
   }
+}
+
+export function stripDraftPair(
+  all: Record<string, DraftSlot>,
+  label: string,
+  baseUrl: string,
+  model: string,
+): Record<string, DraftSlot> {
+  const slot = all[label];
+  if (!slot) return all;
+  const pair = draftPairKey(baseUrl, model);
+  const keys = { ...(slot.keys ?? {}) };
+  delete keys[pair];
+  return {
+    ...all,
+    [label]: {
+      ...slot,
+      apiKey: draftPairKey(slot.baseUrl, slot.model) === pair ? "" : slot.apiKey,
+      keys,
+    },
+  };
+}
+
+export function setDraftKey(
+  all: Record<string, DraftSlot>,
+  label: string,
+  baseUrl: string,
+  model: string,
+  secret: string,
+): Record<string, DraftSlot> {
+  const slot: DraftSlot = all[label] ?? {
+    baseUrl,
+    model,
+    kind: "auto",
+    apiKey: "",
+    keys: {},
+  };
+  const pair = draftPairKey(baseUrl, model);
+  return {
+    ...all,
+    [label]: {
+      ...slot,
+      apiKey: draftPairKey(slot.baseUrl, slot.model) === pair ? secret : slot.apiKey,
+      keys: capKeys({ ...(slot.keys ?? {}), [pair]: secret }),
+    },
+  };
 }
 
 /** Local backup lookup for one pair (caller decides fallback policy). */
