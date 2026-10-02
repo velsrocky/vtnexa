@@ -45,7 +45,7 @@
       "digestAlgorithm": "sha256",
       "signCommand": {
         "cmd": "node",
-        "args": ["scripts/sign-windows.mjs", "%1"]
+        "args": ["../scripts/sign-windows.mjs", "%1"]
       }
     },
     "icon": [
