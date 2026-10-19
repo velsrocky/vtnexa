@@ -145,21 +145,24 @@ jobs:
           node-version: 24.18.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Require exact tag and release signing material
+      - name: Validate and export the Apple signing material
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: node scripts/apple-signing.mjs --export-github-env
+
+      - name: Require exact tag and release signing material
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
         run: node scripts/release-preflight.mjs --tag "$GITHUB_REF_NAME"
 
   release:
@@ -272,44 +275,28 @@ jobs:
         if: matrix.os == 'macos-latest'
         shell: bash
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
           set -e
           # macOS signing and notarization are MANDATORY for a public release:
           # an ad-hoc or unsigned build is blocked by Gatekeeper, and Tauri
-          # cannot update an unsigned macOS app. Fail closed BEFORE the build
-          # so a release can never be produced without them.
-          for v in APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
-                   APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
-                   APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
-            val="${!v}"
-            if [ -n "$val" ]; then
-              printf '%s<<GITHUB_ENV_EOF\n%s\nGITHUB_ENV_EOF\n' "$v" "$val" >> "$GITHUB_ENV"
-            fi
-          done
-          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ] && [ -z "${APPLE_CERTIFICATE:-}" ]; then
-            echo "::error::macOS release requires APPLE_SIGNING_IDENTITY or APPLE_CERTIFICATE (Developer ID Application)"
-            exit 1
-          fi
-          if [ -z "${APPLE_ID:-}" ] && [ -z "${APPLE_API_KEY:-}" ]; then
-            echo "::error::macOS release requires notarization credentials (APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID, or APPLE_API_KEY + APPLE_API_KEY_ID + APPLE_API_ISSUER)"
-            exit 1
-          fi
-          if [ -n "${APPLE_API_KEY:-}" ]; then
-            # The App Store Connect API key is a file, not an inline value:
-            # materialise it from the secret and hand Tauri the path.
-            printf '%s' "$APPLE_API_KEY" > "$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-            chmod 600 "$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-            echo "APPLE_API_KEY=$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8" >> "$GITHUB_ENV"
-          fi
+          # cannot update an unsigned macOS app. This fails closed BEFORE the
+          # build, so a release can never be produced without them.
+          #
+          # The script writes the credentials to $GITHUB_ENV, materialises the
+          # App Store Connect .p8 when that route is used, and exports
+          # APPLE_API_KEY_PATH for Tauri. It reports names only.
+          node scripts/apple-signing.mjs --export-github-env
+          # Tauri imports the .p12 itself. Do NOT also set
+          # APPLE_SIGNING_IDENTITY in CI: Tauri fails the build when a
+          # supplied identity does not match the imported certificate.
 
       - uses: tauri-apps/tauri-action@v1
         env:

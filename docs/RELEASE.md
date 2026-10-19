@@ -2,6 +2,10 @@
 
 Public releases are fail-closed. A tag never publishes an unsigned release.
 
+> Looking for the Apple Developer certificate? See
+> [APPLE-SIGNING.md](APPLE-SIGNING.md) - it walks through the enrolment, the
+> certificate and the four GitHub secrets.
+
 1. **Version the three manifests together.** Set the same version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. The pushed tag must be exactly `v<manifest version>`.
 2. **Run the local checks.**
    ```sh
@@ -23,18 +27,22 @@ Public releases are fail-closed. A tag never publishes an unsigned release.
    - `WINDOWS_TIMESTAMP_URL`: the configured RFC 3161 timestamp service URL.
    - **macOS signing and notarization are mandatory, not optional.** An ad-hoc or
      unsigned macOS build is blocked by Gatekeeper, and Tauri cannot update an
-     unsigned macOS app at all. Provide ONE of:
-     - signing: `APPLE_SIGNING_IDENTITY` (a Developer ID Application identity
-       already in the runner keychain) **or** `APPLE_CERTIFICATE` +
-       `APPLE_CERTIFICATE_PASSWORD` (base64 P12, imported by Tauri); and
-     - notarization: `APPLE_ID` + `APPLE_PASSWORD` (an app-specific password)
-       + `APPLE_TEAM_ID` **or** `APPLE_API_KEY` + `APPLE_API_KEY_ID` +
-       `APPLE_API_ISSUER` (App Store Connect API key).
+     unsigned macOS app at all. Provide BOTH:
+     - signing: `APPLE_CERTIFICATE` (base64 `.p12`) + `APPLE_CERTIFICATE_PASSWORD`.
+       Tauri imports the `.p12` itself; do NOT also set `APPLE_SIGNING_IDENTITY`
+       in CI, because Tauri fails the build when the supplied identity does not
+       match the imported certificate.
+     - notarization, one of:
+       - `APPLE_ID` + `APPLE_PASSWORD` (an app-specific password) + `APPLE_TEAM_ID`
+       - `APPLE_API_KEY` (the Key ID) + `APPLE_API_ISSUER` + `APPLE_API_KEY_CONTENT`
+         (the `.p8` private key). A path cannot be a secret, so the workflow
+         writes the key to a `0600` file and exports `APPLE_API_KEY_PATH` for
+         Tauri.
 
-     The preflight fails closed when neither alternative of a category is
-     completely configured, and reports the missing NAMES only - never a
-     secret value.
+     The preflight fails closed when either category is incomplete, and reports
+     the missing NAMES only - never a secret value.
 
+     See [APPLE-SIGNING.md](APPLE-SIGNING.md) for the step-by-step.
      The updater key password is optional only when the private key is not
      encrypted.
 4. **Tag and push.**
@@ -43,7 +51,7 @@ Public releases are fail-closed. A tag never publishes an unsigned release.
    git push origin v1.2.3
    ```
 5. **Wait for the tagged pipeline.** `release-preflight` checks the exact tag, all three manifest versions, and the required secret names before any release build. A missing or malformed value fails without printing secret contents.
-6. **Build each platform.** The matrix stages the checksum-verified Node sidecar, builds Tauri bundles, imports the PFX into the Windows runner, derives its code-signing thumbprint, and signs the app and installer artifacts through `bundle.windows.signCommand`. The command uses SHA-256 for both the file digest and timestamp digest and uses the configured timestamp URL. On macOS the runner fails closed unless Apple signing and notarization material is present, and the App Store Connect API key (when used) is materialised from the secret to a `0600` file before Tauri reads it. Tauri then creates the updater artifacts and `.sig` files with `TAURI_SIGNING_PRIVATE_KEY`.
+6. **Build each platform.** The matrix stages the checksum-verified Node sidecar, builds Tauri bundles, imports the PFX into the Windows runner, derives its code-signing thumbprint, and signs the app and installer artifacts through `bundle.windows.signCommand`. The command uses SHA-256 for both the file digest and timestamp digest and uses the configured timestamp URL. On macOS the runner fails closed unless Apple signing and notarization material is present: `scripts/apple-signing.mjs --export-github-env` validates it, writes the credentials to `$GITHUB_ENV` and materialises the `.p8` when the App Store Connect route is used. Tauri then creates the updater artifacts and `.sig` files with `TAURI_SIGNING_PRIVATE_KEY`.
 7. **Keep the GitHub release draft.** `tauri-action` uploads to a draft only. Two verification jobs then run against that draft, and the release is published only if BOTH pass:
    - `release-verify-windows` (Windows): the final verification job waits for every matrix build, downloads the draft assets, parses `latest.json`, requires every updater asset and matching `.sig`, requires both Windows installer formats, and rejects malformed or mismatched data. It then checks every downloaded Windows `.exe`/`.msi` for `Valid` status, the expected certificate thumbprint, SHA-256, and a trusted timestamp verified by `signtool`.
    - `release-verify-macos` (macOS): extracts the shipped `.app` bundle and verifies the Developer ID Application signature, the expected team identifier, Gatekeeper acceptance (`source=Notarized Developer ID`) and the stapled notarization ticket. An ad-hoc signature, a missing ticket, or a signature from another team fails the release.

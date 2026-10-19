@@ -25,9 +25,9 @@ export const REQUIRED_APPLE_SECRET_GROUPS = Object.freeze({
     "APPLE_ID",
     "APPLE_PASSWORD",
     "APPLE_TEAM_ID",
-    "APPLE_API_KEY",
-    "APPLE_API_KEY_ID",
     "APPLE_API_ISSUER",
+    "APPLE_API_KEY",
+    "APPLE_API_KEY_PATH",
   ]),
 });
 

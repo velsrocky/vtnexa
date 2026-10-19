@@ -27,7 +27,7 @@ export const APPLE_SIGNING_ENV_NAMES = Object.freeze([
   "APPLE_PASSWORD",
   "APPLE_TEAM_ID",
   "APPLE_API_KEY",
-  "APPLE_API_KEY_ID",
+  "APPLE_API_KEY_PATH",
   "APPLE_API_ISSUER",
 ]);
 
@@ -37,10 +37,22 @@ export const APPLE_SIGNING_GROUPS = Object.freeze([
   Object.freeze(["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD"]),
 ]);
 
-/** Ways to present notarization credentials to Tauri. */
+/**
+ * Ways to present notarization credentials to Tauri.
+ *
+ * These are the EXACT names Tauri v2 reads (crates/tauri-bundler ->
+ * bundle/macos/sign.rs -> notarize_auth):
+ *   - Apple ID:  APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID
+ *   - API key:   APPLE_API_KEY (the Key ID) + APPLE_API_ISSUER +
+ *                APPLE_API_KEY_PATH (the path to the .p8)
+ *
+ * The release workflow materialises the .p8 from `APPLE_API_KEY_CONTENT`
+ * and exports `APPLE_API_KEY_PATH` for Tauri, because a path cannot be a
+ * GitHub secret.
+ */
 export const APPLE_NOTARIZATION_GROUPS = Object.freeze([
   Object.freeze(["APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"]),
-  Object.freeze(["APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"]),
+  Object.freeze(["APPLE_API_ISSUER", "APPLE_API_KEY", "APPLE_API_KEY_PATH"]),
 ]);
 
 function present(value) {
@@ -128,6 +140,11 @@ export function validateAppleSecretValues(env = {}) {
       throw new Error(`invalid release secret: ${name}`);
     }
     if (name === "APPLE_API_ISSUER" && !/^[0-9a-fA-F-]{36}$/.test(String(env[name]).trim())) {
+      throw new Error(`invalid release secret: ${name}`);
+    }
+    if (name === "APPLE_API_KEY" && !/^[A-Z0-9]{10}$/.test(String(env[name]).trim())) {
+      // Tauri's API-key notarization uses the Key ID, which is 10 uppercase
+      // alphanumerics - the same shape as a Team ID.
       throw new Error(`invalid release secret: ${name}`);
     }
   }
@@ -343,6 +360,107 @@ export async function verifyMacosReleaseDirectory({
 }
 
 // ---------------------------------------------------------------------------
+// CI environment export
+// ---------------------------------------------------------------------------
+
+/**
+ * The GitHub Actions secret that holds the App Store Connect `.p8` private
+ * key CONTENTS. A path cannot be a secret, so the workflow writes this to
+ * disk and hands Tauri the path via `APPLE_API_KEY_PATH`.
+ */
+export const APPLE_API_KEY_CONTENT_ENV = "APPLE_API_KEY_CONTENT";
+
+/**
+ * Prepare the Apple environment for a CI job.
+ *
+ * - Validates the credentials (fail closed, names only).
+ * - Writes the plain values to the GitHub env file.
+ * - Materialises the `.p8` private key to a 0600 file and exports
+ *   `APPLE_API_KEY_PATH` for Tauri.
+ *
+ * Returns the names that were exported - never their values.
+ */
+export async function exportAppleEnvironment({
+  env = process.env,
+  githubEnvPath = process.env.GITHUB_ENV,
+  runnerTemp = process.env.RUNNER_TEMP,
+  writeFile,
+  mkdir,
+} = {}) {
+  // In CI the certificate must be the .p12 route: Tauri imports it itself,
+  // and a bare APPLE_SIGNING_IDENTITY would refer to a keychain entry that
+  // does not exist on a fresh runner. Tauri also refuses to build when a
+  // supplied identity does not match the imported certificate, so the two
+  // must never be combined here.
+  if (!present(env.APPLE_CERTIFICATE) || !present(env.APPLE_CERTIFICATE_PASSWORD)) {
+    throw new Error("missing release secrets: APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD");
+  }
+  const state = evaluateAppleCredentials(env);
+  // The API-key group is expressed with Tauri's `APPLE_API_KEY_PATH`, but in
+  // CI the path is produced here from the secret that holds the key file.
+  const apiKeyContent = env[APPLE_API_KEY_CONTENT_ENV];
+  if (apiKeyContent && !env.APPLE_API_KEY_PATH) {
+    state.notarization.groups = state.notarization.groups.map((group) =>
+      group.names.includes("APPLE_API_KEY_PATH")
+        ? {
+            ...group,
+            present: group.present.includes("APPLE_API_KEY_PATH")
+              ? group.present
+              : [...group.present, "APPLE_API_KEY_PATH"],
+            missing: group.missing.filter((name) => name !== "APPLE_API_KEY_PATH"),
+            complete: true,
+          }
+        : group,
+    );
+    const complete = state.notarization.groups.find((group) => group.complete);
+    state.notarization.satisfied = Boolean(complete);
+    state.notarization.selected = complete ? complete.names : [];
+    state.notarization.missing = complete ? [] : state.notarization.groups.flatMap((g) => g.missing);
+  }
+
+  const missing = [];
+  if (!state.signing.satisfied) missing.push(...state.signing.missing);
+  if (!state.notarization.satisfied) missing.push(...state.notarization.missing);
+  if (missing.length > 0) {
+    throw new Error(`missing release secrets: ${[...new Set(missing)].join(", ")}`);
+  }
+  validateAppleSecretValues(env);
+
+  const exported = [];
+  const lines = [];
+  // CI always signs with the imported .p12, so the certificate group is the
+  // one that gets exported - never a bare identity.
+  const signingNames = ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD"];
+  for (const name of [
+    ...signingNames,
+    ...state.notarization.selected.filter((name) => name !== "APPLE_API_KEY_PATH"),
+  ]) {
+    if (name === APPLE_API_KEY_CONTENT_ENV) continue;
+    const value = env[name];
+    if (!present(value)) continue;
+    lines.push(`${name}<<VTNEXA_GITHUB_ENV_EOF\n${value}\nVTNEXA_GITHUB_ENV_EOF`);
+    exported.push(name);
+  }
+
+  if (apiKeyContent && state.notarization.selected.includes("APPLE_API_KEY_PATH")) {
+    if (!runnerTemp) throw new Error("RUNNER_TEMP is required to materialise the Apple API key");
+    if (!githubEnvPath) throw new Error("GITHUB_ENV is required to export the Apple environment");
+    const keyPath = join(runnerTemp, `AuthKey_${env.APPLE_API_KEY}.p8`);
+    if (mkdir) await mkdir(runnerTemp, { recursive: true });
+    if (writeFile) {
+      await writeFile(keyPath, apiKeyContent, { mode: 0o600 });
+    }
+    lines.push(`APPLE_API_KEY_PATH=${keyPath}`);
+    exported.push("APPLE_API_KEY_PATH");
+  }
+
+  if (githubEnvPath && writeFile) {
+    await writeFile(githubEnvPath, `${lines.join("\n")}\n`, { mode: 0o600 });
+  }
+  return { exported, keyPath: exported.includes("APPLE_API_KEY_PATH") ? lines.at(-1).split("=")[1] : null };
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -352,6 +470,7 @@ function parseArgs(argv) {
     if (argv[index] === "--directory" || argv[index] === "--dir") result.directory = argv[++index];
     else if (argv[index] === "--bundle") result.bundle = argv[++index];
     else if (argv[index] === "--team") result.team = argv[++index];
+    else if (argv[index] === "--export-github-env") result.exportGithubEnv = true;
     else throw new Error(`unknown argument: ${argv[index]}`);
   }
   return result;
@@ -361,7 +480,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const args = parseArgs(process.argv.slice(2));
     const expectedTeam = args.team || process.env.APPLE_TEAM_ID || "";
-    if (args.bundle) {
+    if (args.exportGithubEnv) {
+      const { writeFile, mkdir } = await import("node:fs/promises");
+      const result = await exportAppleEnvironment({ writeFile, mkdir });
+      console.log(`apple environment exported: ${result.exported.join(", ")}`);
+    } else if (args.bundle) {
       const asset = await verifyMacosArtifact(args.bundle, { expectedTeam });
       console.log(
         `apple verification passed for ${asset.artifact} (team ${asset.teamIdentifier || "unknown"})`,
@@ -378,7 +501,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       }
     } else {
       throw new Error(
-        "usage: node scripts/apple-signing.mjs (--bundle <path> | --directory <dir>) [--team <TEAMID>]",
+        "usage: node scripts/apple-signing.mjs (--bundle <path> | --directory <dir> | --export-github-env) [--team <TEAMID>]",
       );
     }
   } catch (error) {

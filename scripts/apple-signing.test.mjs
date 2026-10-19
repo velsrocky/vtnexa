@@ -1,10 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  APPLE_API_KEY_CONTENT_ENV,
   APPLE_NOTARIZATION_GROUPS,
   APPLE_SIGNING_ENV_NAMES,
   APPLE_SIGNING_GROUPS,
   evaluateAppleCredentials,
+  exportAppleEnvironment,
   isDeveloperIdSigned,
   macosReleaseAssets,
   parseCodesignAuthorities,
@@ -60,14 +62,26 @@ describe("apple signing credentials", () => {
     const state = evaluateAppleCredentials({
       APPLE_CERTIFICATE: "YnVja2V0IHBmaXg=",
       APPLE_CERTIFICATE_PASSWORD: "pfx password",
-      APPLE_API_KEY: "/tmp/AuthKey.p8",
-      APPLE_API_KEY_ID: "KEYID",
       APPLE_API_ISSUER: "00000000-0000-0000-0000-000000000000",
+      APPLE_API_KEY: "ABCDE12345",
+      APPLE_API_KEY_PATH: "/tmp/AuthKey_ABCDE12345.p8",
     });
     assert.equal(state.signing.satisfied, true);
     assert.equal(state.notarization.satisfied, true);
     assert.deepEqual(state.signing.selected, ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD"]);
-    assert.deepEqual(state.notarization.selected, ["APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"]);
+    assert.deepEqual(state.notarization.selected, [
+      "APPLE_API_ISSUER",
+      "APPLE_API_KEY",
+      "APPLE_API_KEY_PATH",
+    ]);
+  });
+
+  it("uses the exact variable names Tauri v2 reads", () => {
+    // crates/tauri-bundler -> bundle/macos/sign.rs -> notarize_auth reads
+    // APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID or
+    // APPLE_API_KEY (key id) + APPLE_API_ISSUER + APPLE_API_KEY_PATH.
+    assert.ok(APPLE_NOTARIZATION_GROUPS.flat().includes("APPLE_API_KEY_PATH"));
+    assert.ok(!APPLE_NOTARIZATION_GROUPS.flat().includes("APPLE_API_KEY_ID"));
   });
 
   it("fails closed when signing material is missing", () => {
@@ -121,7 +135,7 @@ describe("apple signing credentials", () => {
     ]);
     assert.deepEqual(APPLE_NOTARIZATION_GROUPS, [
       ["APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"],
-      ["APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"],
+      ["APPLE_API_ISSUER", "APPLE_API_KEY", "APPLE_API_KEY_PATH"],
     ]);
     for (const name of APPLE_SIGNING_ENV_NAMES) {
       assert.ok(
@@ -129,6 +143,24 @@ describe("apple signing credentials", () => {
         `${name} is not part of any group`,
       );
     }
+  });
+
+  it("rejects a malformed API key id", () => {
+    const env = { ...validEnv };
+    delete env.APPLE_ID;
+    delete env.APPLE_PASSWORD;
+    delete env.APPLE_TEAM_ID;
+    env.APPLE_API_ISSUER = "00000000-0000-0000-0000-000000000000";
+    env.APPLE_API_KEY = "not-a-key-id";
+    env.APPLE_API_KEY_PATH = "/tmp/AuthKey.p8";
+    assert.throws(
+      () => validateAppleReleaseSecrets(env),
+      (error) => {
+        assert.equal(error.message, "invalid release secret: APPLE_API_KEY");
+        assert.doesNotMatch(error.message, /not-a-key-id/);
+        return true;
+      },
+    );
   });
 });
 
@@ -224,5 +256,112 @@ describe("apple artifact verification", () => {
       () => verifyMacosReleaseDirectory({ directory: "/tmp", names: ["latest.json"] }),
       /no macOS artifact/,
     );
+  });
+});
+
+describe("apple CI environment export", () => {
+  function fakeIo() {
+    const files = new Map();
+    return {
+      files,
+      writeFile: async (path, contents) => files.set(path, contents),
+      mkdir: async () => {},
+    };
+  }
+
+  it("exports the plain credentials to the GitHub env file", async () => {
+    const io = fakeIo();
+    const result = await exportAppleEnvironment({
+      env: { ...validEnv, APPLE_CERTIFICATE: "YnVja2V0IHBmaXg=", APPLE_CERTIFICATE_PASSWORD: "pfx password" },
+      githubEnvPath: "/gh/env",
+      runnerTemp: "/tmp/runner",
+      writeFile: io.writeFile,
+      mkdir: io.mkdir,
+    });
+    assert.deepEqual(result.exported, [
+      "APPLE_CERTIFICATE",
+      "APPLE_CERTIFICATE_PASSWORD",
+      "APPLE_ID",
+      "APPLE_PASSWORD",
+      "APPLE_TEAM_ID",
+    ]);
+    const written = io.files.get("/gh/env");
+    assert.match(written, /APPLE_TEAM_ID<<VTNEXA_GITHUB_ENV_EOF\nABCDE12345/);
+  });
+
+  it("requires the .p12 route, because a bare identity does not exist on a runner", async () => {
+    const io = fakeIo();
+    await assert.rejects(
+      () =>
+        exportAppleEnvironment({
+          env: { ...validEnv },
+          githubEnvPath: "/gh/env",
+          runnerTemp: "/tmp/runner",
+          writeFile: io.writeFile,
+          mkdir: io.mkdir,
+        }),
+      (error) => {
+        assert.match(error.message, /APPLE_CERTIFICATE/);
+        return true;
+      },
+    );
+  });
+
+  it("materialises the .p8 and exports APPLE_API_KEY_PATH for Tauri", async () => {
+    const io = fakeIo();
+    const result = await exportAppleEnvironment({
+      env: {
+        APPLE_CERTIFICATE: "YnVja2V0IHBmaXg=",
+        APPLE_CERTIFICATE_PASSWORD: "pfx password",
+        APPLE_API_KEY: "ABCDE12345",
+        APPLE_API_ISSUER: "00000000-0000-0000-0000-000000000000",
+        [APPLE_API_KEY_CONTENT_ENV]: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n",
+      },
+      githubEnvPath: "/gh/env",
+      runnerTemp: "/tmp/runner",
+      writeFile: io.writeFile,
+      mkdir: io.mkdir,
+    });
+    assert.ok(result.exported.includes("APPLE_API_KEY_PATH"));
+    const written = io.files.get("/gh/env");
+    assert.match(written, /APPLE_API_KEY_PATH=\/tmp\/runner\/AuthKey_ABCDE12345\.p8/);
+    // The key contents must be written to the file, not to the env file.
+    assert.ok(io.files.has("/tmp/runner/AuthKey_ABCDE12345.p8"));
+    assert.match(io.files.get("/tmp/runner/AuthKey_ABCDE12345.p8"), /BEGIN PRIVATE KEY/);
+    assert.doesNotMatch(written, /BEGIN PRIVATE KEY/);
+  });
+
+  it("fails closed when the credentials are incomplete", async () => {
+    const io = fakeIo();
+    await assert.rejects(
+      () =>
+        exportAppleEnvironment({
+          env: {
+            APPLE_CERTIFICATE: "YnVja2V0IHBmaXg=",
+            APPLE_CERTIFICATE_PASSWORD: "pfx password",
+          },
+          githubEnvPath: "/gh/env",
+          runnerTemp: "/tmp/runner",
+          writeFile: io.writeFile,
+          mkdir: io.mkdir,
+        }),
+      (error) => {
+        assert.match(error.message, /APPLE_ID|APPLE_API_KEY/);
+        assert.doesNotMatch(error.message, /Example Corp/);
+        return true;
+      },
+    );
+  });
+
+  it("never writes secret values into the exported names list", async () => {
+    const io = fakeIo();
+    const result = await exportAppleEnvironment({
+      env: { ...validEnv, APPLE_CERTIFICATE: "YnVja2V0IHBmaXg=", APPLE_CERTIFICATE_PASSWORD: "pfx password" },
+      githubEnvPath: "/gh/env",
+      runnerTemp: "/tmp/runner",
+      writeFile: io.writeFile,
+      mkdir: io.mkdir,
+    });
+    assert.ok(!result.exported.some((name) => name.includes("ABCDE12345")));
   });
 });

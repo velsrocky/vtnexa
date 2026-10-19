@@ -105,15 +105,15 @@ describe("release preflight", () => {
     delete env.APPLE_TEAM_ID;
     env.APPLE_CERTIFICATE = "YnVja2V0IHBmaXg=";
     env.APPLE_CERTIFICATE_PASSWORD = "pfx password";
-    env.APPLE_API_KEY = "/tmp/AuthKey.p8";
-    env.APPLE_API_KEY_ID = "KEYID";
+    env.APPLE_API_KEY = "ABCDE12345";
+    env.APPLE_API_KEY_PATH = "/tmp/AuthKey_ABCDE12345.p8";
     env.APPLE_API_ISSUER = "00000000-0000-0000-0000-000000000000";
     const result = validateReleaseSecrets(env);
     assert.deepEqual(result.apple.signing, ["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD"]);
     assert.deepEqual(result.apple.notarization, [
-      "APPLE_API_KEY",
-      "APPLE_API_KEY_ID",
       "APPLE_API_ISSUER",
+      "APPLE_API_KEY",
+      "APPLE_API_KEY_PATH",
     ]);
   });
 

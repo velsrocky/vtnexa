@@ -35,6 +35,13 @@ The release that makes VTNexa usable by someone other than its author.
   ticket before the release is published. The release verification is now
   split into per-platform jobs with a separate `release-publish` job that
   needs both.
+  - `docs/APPLE-SIGNING.md` is the step-by-step: enrolling in the paid Apple
+    Developer Program, creating the certificate, and turning it into the
+    four GitHub secrets.
+  - `scripts/apple-local-export.mjs` automates the fiddly part - it lists the
+    Developer ID identities in the login keychain, exports the `.p12`,
+    base64-encodes it the way Tauri expects, and prints the `gh secret set`
+    commands. It never prints the certificate or the password.
 - **Install documentation.** The README documents every published artifact
   (macOS `.dmg`, Windows `.msi`/`.exe`, Linux `.deb`/`.rpm`/`.AppImage`),
   the per-platform install steps, the 60-second first run, the Browser Use
