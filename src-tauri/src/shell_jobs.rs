@@ -667,7 +667,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The sleeper for the tree tests.
+    ///
+    /// Linux deliberately uses `setsid` so the grandchild ESCAPES the managed
+    /// process group - the tree is then only reachable through the /proc
+    /// + token path. macOS has no `setsid`; there the grandchild stays in
+    /// the managed group, and the process-group kill is what reaps it.
     #[cfg(any(target_os = "linux", target_os = "android"))]
+    const TREE_SLEEPER: &str = "setsid sleep 30";
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    const TREE_SLEEPER: &str = "sleep 30";
+
+    #[cfg(unix)]
     #[test]
     fn background_expiry_kills_escaped_tree() {
         let dir = fixture("supervisor-expiry-tree");
@@ -677,7 +688,7 @@ mod tests {
         let err_file = create_job_file(&err_path).unwrap();
         let child_pid_path = dir.join("child.pid");
         let grandchild_pid_path = dir.join("grandchild.pid");
-        let script = "setsid sleep 30 & grandchild=$!; printf '%s' \"$grandchild\" > \"$VTNEXA_BG_GRANDCHILD_PID\"; printf '%s' \"$$\" > \"$VTNEXA_BG_CHILD_PID\"; wait \"$grandchild\"";
+        let script = format!("{TREE_SLEEPER} & grandchild=$!; printf '%s' \"$grandchild\" > \"$VTNEXA_BG_GRANDCHILD_PID\"; printf '%s' \"$$\" > \"$VTNEXA_BG_CHILD_PID\"; wait \"$grandchild\"");
         let mut command = std::process::Command::new("sh");
         command
             .arg("-c")
@@ -708,7 +719,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(unix)]
     #[test]
     fn background_cleanup_kills_shell_grandchild_tree() {
         let dir = fixture("supervisor-tree");
@@ -718,7 +729,7 @@ mod tests {
         let err_file = create_job_file(&err_path).unwrap();
         let child_pid_path = dir.join("child.pid");
         let grandchild_pid_path = dir.join("grandchild.pid");
-        let script = "setsid sleep 30 & grandchild=$!; printf '%s' \"$grandchild\" > \"$VTNEXA_BG_GRANDCHILD_PID\"; printf '%s' \"$$\" > \"$VTNEXA_BG_CHILD_PID\"; wait \"$grandchild\"";
+        let script = format!("{TREE_SLEEPER} & grandchild=$!; printf '%s' \"$grandchild\" > \"$VTNEXA_BG_GRANDCHILD_PID\"; printf '%s' \"$$\" > \"$VTNEXA_BG_CHILD_PID\"; wait \"$grandchild\"");
         let mut command = std::process::Command::new("sh");
         command
             .arg("-c")
