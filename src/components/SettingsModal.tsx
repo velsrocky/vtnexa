@@ -2,6 +2,8 @@ import { useState } from "react";
 import { normalizeTrustedPattern, useTrustedPaths } from "../hooks/useTrustedPaths";
 import { useUpdater } from "../hooks/useUpdater";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { PROJECT_LINKS } from "../lib/links";
 import AccessibleDialog from "./AccessibleDialog";
 
 export default function SettingsModal({
@@ -153,6 +155,36 @@ export default function SettingsModal({
             </button>
           )}
         </div>
+      </section>
+      <section>
+        <h3>Help &amp; feedback</h3>
+        <p>
+          VTNexa sends no telemetry, so the only way to hear about a problem is
+          if you tell us. Issues are the fastest route.
+        </p>
+        <div className="dialog-actions">
+          <button type="button" onClick={() => void openUrl(PROJECT_LINKS.issues)}>
+            Report an issue
+          </button>
+          <button type="button" onClick={() => void openUrl(PROJECT_LINKS.releases)}>
+            Release notes
+          </button>
+          <button type="button" onClick={() => void openUrl(PROJECT_LINKS.repository)}>
+            Source &amp; docs
+          </button>
+        </div>
+        <p className="muted small">
+          Found a security issue? Please use the private advisory form instead
+          of a public issue:{" "}
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => void openUrl(PROJECT_LINKS.security)}
+          >
+            report it privately
+          </button>
+          .
+        </p>
       </section>
     </AccessibleDialog>
   );

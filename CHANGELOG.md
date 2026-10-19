@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.0.7
+
+The release that makes VTNexa usable by someone other than its author.
+
+- **macOS process control actually works.** The managed process tree was
+  broken on macOS in three independent ways, all invisible because CI only
+  ran `cargo test` on Linux:
+  - The tree token was invisible for Apple platform binaries — macOS strips
+    the environment block from `sysctl KERN_PROCARGS2` for `/bin/sh` and
+    friends, so a re-parented descendant could never be found and survived.
+    Managed children are now torn down by **process group**
+    (`kill(-pgid)`), which still reaches an orphan after its parent exits.
+  - `proc_listallpids` silently truncates under process-table churn (measured:
+    6 of ~780 pids), so the tree walk saw almost nothing. The per-parent
+    child list is now authoritative and a child the snapshot does not know is
+    read directly.
+  - `proc_pidinfo` cannot read a zombie on macOS, so a command that exited
+    immediately sometimes failed to spawn at all ("entity not found"). The
+    root's start-time fingerprint now degrades to "unknown" instead of
+    failing the spawn.
+  - `proc_listchildpids` answers with the *global* process count for a zombie
+    parent, which put hundreds of unrelated pids into the tree.
+  - The Rust suite on macOS went from 157 passed / 6 failed to **168 passed /
+    0 failed**, stable across 20 consecutive parallel runs. The
+    background-job tree tests now run on macOS too, and `cargo clippy
+    --all-targets` is clean on macOS (it was not before).
+- **macOS Developer ID signing and notarization are enforced.** The published
+  macOS builds were ad-hoc signed, so Gatekeeper blocked them and the macOS
+  auto-updater could never have worked. The Apple secrets are now REQUIRED
+  by the release preflight, the macOS release job fails closed without them,
+  and a new `release-verify-macos` job checks the shipped `.app` bundle's
+  signature, team identifier, Gatekeeper acceptance and stapled notarization
+  ticket before the release is published. The release verification is now
+  split into per-platform jobs with a separate `release-publish` job that
+  needs both.
+- **Install documentation.** The README documents every published artifact
+  (macOS `.dmg`, Windows `.msi`/`.exe`, Linux `.deb`/`.rpm`/`.AppImage`),
+  the per-platform install steps, the 60-second first run, the Browser Use
+  prerequisite and the uninstall path. Previously only the Linux `.deb` was
+  mentioned.
+- **A feedback path in the app.** Settings → Help & feedback links to the
+  issue tracker, the release notes and the private security advisory form.
+  The app sends no telemetry, so this is the only way a problem reaches the
+  maintainer.
+- **Documentation honesty.** The README claimed a "Health monitoring"
+  feature (uptime tracking, memory usage, turn count, heartbeat checks) that
+  does not exist in the codebase. It has been removed. Every other feature
+  claim was checked against the implementation and is accurate.
+
 ## 1.0.6
 This release lands the subsystems that were sitting uncommitted and hardens
 release + security around them.

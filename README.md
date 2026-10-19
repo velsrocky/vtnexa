@@ -85,14 +85,79 @@ Most coding agents either (a) ask for permission on every keystroke or
   approval + timeout path (no second, unsandboxed execution).
 - **Rate limiting** — 30 turns per minute per window, 500 turns per day (prevents token exhaustion)
 - **Audit log export** — Export full audit trail with cryptographic hash verification
-- **Health monitoring** — Uptime tracking, memory usage, turn count, heartbeat checks
 - **Trusted paths** — Skip approval dialogs for safe directories (e.g., `docs/`, `src/generated/`, `tests/__snapshots__/`). Configure via Settings → Trusted Paths to reduce UX verbosity without compromising safety.
 
 ## Install
 
-**Linux (deb):** grab the latest release `.deb` and `sudo dpkg -i`.
+Download the latest release from
+[GitHub Releases](https://github.com/velsrocky/vtnexa/releases/latest).
 
-**From source:**
+| Platform | Architecture | Asset | Notes |
+|---|---|---|---|
+| macOS | Apple Silicon (arm64) | `VTNexa_<version>_aarch64.dmg` | Signed and notarized — drag to Applications |
+| Windows | x86_64 | `VTNexa_<version>_x64_en-US.msi` | Signed; Windows SmartScreen may ask once |
+| Windows | x86_64 | `VTNexa_<version>_x64-setup.exe` | NSIS installer, same signature |
+| Linux | x86_64 | `VTNexa_<version>_amd64.deb` | Debian/Ubuntu |
+| Linux | x86_64 | `VTNexa-<version>-1.x86_64.rpm` | Fedora/RHEL |
+| Linux | x86_64 | `VTNexa_<version>_amd64.AppImage` | Portable, no install |
+
+**macOS.** Open the `.dmg` and drag **VTNexa** into **Applications**. The app is
+Developer ID signed and notarized, so Gatekeeper opens it without a warning.
+There is no Intel (x86_64) build yet — Apple Silicon only.
+
+**Windows.** Run the `.msi` (or the `.exe` — pick either; both are signed with
+the same certificate). Windows SmartScreen shows an "unrecognized app" prompt
+for any newly published app the first time; choose **More info → Run anyway**.
+
+**Linux.**
+
+```sh
+sudo dpkg -i VTNexa_<version>_amd64.deb     # Debian/Ubuntu
+sudo rpm -i VTNexa-<version>-1.x86_64.rpm    # Fedora/RHEL
+chmod +x VTNexa_<version>_amd64.AppImage && ./VTNexa_<version>_amd64.AppImage
+```
+
+### First run (60 seconds)
+
+1. **Pick a workspace.** VTNexa opens on a first-run screen and asks for the
+   folder Commander should work in. Everything the agent does is confined to
+   that folder; pick a project root.
+2. **Pick a model.** Either point the provider bar at a local Ollama
+   (`http://localhost:11434/v1`, model `qwen2.5-coder:7b`) or paste any
+   OpenAI-compatible `baseUrl` + key, or choose Anthropic/Gemini. The key is
+   stored in the **OS keychain** (Keychain / Credential Manager / Secret
+   Service), never in the workspace and never in a session file.
+3. **Start one local model** if you want to run fully offline:
+
+   ```sh
+   ollama serve
+   ollama pull qwen2.5-coder:7b
+   ```
+
+4. **Talk to it.** Type in the Commander pane: *"read README.md and summarise
+   this project"*. In-workspace reads and writes run without popups; anything
+   reaching outside the workspace asks first.
+
+### Optional: Browser Use
+
+Browser Use needs a **system Chromium browser** (Google Chrome, Microsoft Edge
+including the built-in Windows Edge, or Chromium). It is not bundled. The
+Browser pane shows what is missing and offers a **Recheck** action. Set
+`VTAI_BROWSER_CHROME` to point at an executable if discovery cannot find one.
+See [Browser Use runtime](#browser-use-runtime) below for the details.
+
+### Uninstall
+
+- **macOS** — delete the app from Applications; `rm -rf
+  ~/Library/Application\ Support/VTNexa` removes the workspace-independent
+  settings, the browser profile and the session store.
+- **Windows** — Settings → Apps → VTNexa → Uninstall.
+- **Linux** — `sudo dpkg -r vtnexa` (or `sudo rpm -e vtnexa`).
+
+Your workspace data lives in the folder you picked, under `.nexa/` — nothing is
+copied out of it, and nothing is uploaded.
+
+### From source
 
 ```sh
 # prereqs: Node 24.18.0/pnpm, Rust, and Tauri's system deps
@@ -251,6 +316,10 @@ changes in `CHANGELOG.md`.
 
 Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Early
 project: expect rough edges, label experiments accordingly.
+
+Looking for the current build? Grab it from
+[GitHub Releases](https://github.com/velsrocky/vtnexa/releases/latest) — the
+[install steps are above](#install).
 
 ## License
 
