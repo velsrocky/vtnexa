@@ -960,8 +960,13 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
         }
         let record = match read_macos_record(pid) {
             Ok(record) => record,
-            Err(error) if process_is_gone(&error) => continue,
-            Err(error) => return Err(error),
+            // A foreign PID we cannot read (exited mid-scan, or a protected
+            // system process rejecting proc_pidinfo with EPERM/EINVAL/EIO) is
+            // never a token-bearing descendant of ours. Skip it: aborting the
+            // whole scan on one unreadable PID would fail every managed spawn
+            // (git, shell) on a busy host. The token-missing guard below still
+            // fails loudly if nothing at all can be read.
+            Err(_) => continue,
         };
         if let Some(token) = token {
             if record.state == b'Z' {
@@ -974,19 +979,16 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
                         marked.insert(pid, record.identity);
                     }
                     Ok(_) => {}
-                    Err(error) if process_is_gone(&error) => {}
-                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
-                    Err(error) => return Err(error),
+                    // Unreadable now (exited/recycled/protected): never a
+                    // confirmable descendant of ours. Skip; refresh re-scans.
+                    Err(_) => {}
                 },
                 Ok(false) => {}
-                Err(error) if process_is_gone(&error) => {}
-                Err(error)
-                    if error.kind() == io::ErrorKind::PermissionDenied
-                        || matches!(
-                            error.raw_os_error(),
-                            Some(libc::EACCES) | Some(libc::EPERM)
-                        ) => {}
-                Err(error) => return Err(error),
+                // sysctl KERN_PROCARGS2 returns EINVAL/EIO/EPERM/EACCES for
+                // protected or vanished PIDs and some system tasks. Those can
+                // never carry our token (only processes we spawned do), so a
+                // read failure means "not ours", not "scan is fatal".
+                Err(_) => {}
             }
         }
         records.insert(pid, record);
