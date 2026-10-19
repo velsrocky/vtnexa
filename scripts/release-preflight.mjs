@@ -1,6 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  evaluateAppleCredentials,
+  validateAppleReleaseSecrets,
+} from "./apple-signing.mjs";
 
 export const REQUIRED_RELEASE_SECRETS = Object.freeze([
   "TAURI_SIGNING_PRIVATE_KEY",
@@ -9,12 +13,38 @@ export const REQUIRED_RELEASE_SECRETS = Object.freeze([
   "WINDOWS_TIMESTAMP_URL",
 ]);
 
+/**
+ * Apple Developer ID signing and notarization are NOT optional for a public
+ * release: an ad-hoc or unsigned macOS build is blocked by Gatekeeper, and
+ * Tauri cannot update an unsigned macOS app at all. The credential set is
+ * enforced by `scripts/apple-signing.mjs` (identity + notarization groups).
+ */
+export const REQUIRED_APPLE_SECRET_GROUPS = Object.freeze({
+  signing: Object.freeze(["APPLE_SIGNING_IDENTITY", "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD"]),
+  notarization: Object.freeze([
+    "APPLE_ID",
+    "APPLE_PASSWORD",
+    "APPLE_TEAM_ID",
+    "APPLE_API_KEY",
+    "APPLE_API_KEY_ID",
+    "APPLE_API_ISSUER",
+  ]),
+});
+
 function valuePresent(value) {
   return typeof value === "string" && value.trim() !== "";
 }
 
 export function missingReleaseSecrets(env = {}) {
-  return REQUIRED_RELEASE_SECRETS.filter((name) => !valuePresent(env[name]));
+  const missing = REQUIRED_RELEASE_SECRETS.filter((name) => !valuePresent(env[name]));
+  const apple = evaluateAppleCredentials(env);
+  if (!apple.signing.satisfied) {
+    missing.push(...apple.signing.missing);
+  }
+  if (!apple.notarization.satisfied) {
+    missing.push(...apple.notarization.missing);
+  }
+  return [...new Set(missing)];
 }
 
 export function cargoPackageVersion(cargoToml) {
@@ -88,7 +118,13 @@ export function validateReleaseSecrets(env = {}) {
   const missing = missingReleaseSecrets(env);
   if (missing.length > 0) throw new Error(`missing release secrets: ${missing.join(", ")}`);
   for (const name of REQUIRED_RELEASE_SECRETS) validateSecretValue(name, env[name]);
-  return { required: [...REQUIRED_RELEASE_SECRETS] };
+  // Apple signing + notarization are mandatory: fail closed, and report the
+  // missing NAMES only - never a secret value.
+  const apple = validateAppleReleaseSecrets(env);
+  return {
+    required: [...REQUIRED_RELEASE_SECRETS],
+    apple: { signing: apple.signing, notarization: apple.notarization },
+  };
 }
 
 export async function preflight({ tag, root = process.cwd(), env = process.env } = {}) {
