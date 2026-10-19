@@ -94,16 +94,18 @@ Download the latest release from
 
 | Platform | Architecture | Asset | Notes |
 |---|---|---|---|
-| macOS | Apple Silicon (arm64) | `VTNexa_<version>_aarch64.dmg` | Signed and notarized — drag to Applications |
+| macOS | Apple Silicon (arm64) | `VTNexa_<version>_aarch64.dmg` | Signed and notarized from v1.0.7 — drag to Applications |
 | Windows | x86_64 | `VTNexa_<version>_x64_en-US.msi` | Signed; Windows SmartScreen may ask once |
 | Windows | x86_64 | `VTNexa_<version>_x64-setup.exe` | NSIS installer, same signature |
 | Linux | x86_64 | `VTNexa_<version>_amd64.deb` | Debian/Ubuntu |
 | Linux | x86_64 | `VTNexa-<version>-1.x86_64.rpm` | Fedora/RHEL |
 | Linux | x86_64 | `VTNexa_<version>_amd64.AppImage` | Portable, no install |
 
-**macOS.** Open the `.dmg` and drag **VTNexa** into **Applications**. The app is
-Developer ID signed and notarized, so Gatekeeper opens it without a warning.
-There is no Intel (x86_64) build yet — Apple Silicon only.
+**macOS.** Open the `.dmg` and drag **VTNexa** into **Applications**. From
+v1.0.7 the app is Developer ID signed and notarized, so Gatekeeper opens it
+without a warning; builds before that were ad-hoc signed and will ask you to
+open them anyway (right-click → Open). There is no Intel (x86_64) build yet —
+Apple Silicon only.
 
 **Windows.** Run the `.msi` (or the `.exe` — pick either; both are signed with
 the same certificate). Windows SmartScreen shows an "unrecognized app" prompt
@@ -148,14 +150,18 @@ See [Browser Use runtime](#browser-use-runtime) below for the details.
 
 ### Uninstall
 
-- **macOS** — delete the app from Applications; `rm -rf
-  ~/Library/Application\ Support/VTNexa` removes the workspace-independent
-  settings, the browser profile and the session store.
-- **Windows** — Settings → Apps → VTNexa → Uninstall.
-- **Linux** — `sudo dpkg -r vtnexa` (or `sudo rpm -e vtnexa`).
+- **macOS** — delete the app from Applications. The Browser Use profile
+  (your signed-in Chromium session) lives in
+  `~/Library/Application Support/VTNexa/browser-profile` — remove that folder
+  to forget it.
+- **Windows** — Settings → Apps → VTNexa → Uninstall. The browser profile is
+  in `%LOCALAPPDATA%\VTNexa\browser-profile`.
+- **Linux** — `sudo dpkg -r vt-nexa` (or `sudo rpm -e vt-nexa`).
 
-Your workspace data lives in the folder you picked, under `.nexa/` — nothing is
-copied out of it, and nothing is uploaded.
+**Your data is not in the app.** Notes, plans, memory, routines and chat
+sessions live in `<your workspace>/.nexa/` — delete that folder to remove
+them. API keys live in the OS keychain and are removed with the keychain
+entry, not with the app. Nothing is copied anywhere else.
 
 ### From source
 
