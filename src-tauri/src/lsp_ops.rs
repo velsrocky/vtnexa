@@ -866,9 +866,17 @@ while True:
         let dir = std::env::temp_dir();
         let file = dir.join("vtnexa-mock-lsp.txt");
         let _ = std::fs::remove_file(&file);
+        // The mock server is a Python script, so the interpreter has to be
+        // the one that actually exists on this machine: Windows has no
+        // `python3` by default, and the Microsoft Store `python3` alias is a
+        // redirector that never runs the script.
+        let (program, prefix) = crate::lsp::python_interpreter();
+        let mut args = prefix;
+        args.push("-c".to_string());
+        args.push(MOCK.to_string());
         let out = run_lsp_op(
-            "python3",
-            &["-c".to_string(), MOCK.to_string()],
+            &program,
+            &args,
             &dir,
             &dir.join("vtnexa-mock-lsp.txt"),
             "plaintext",
