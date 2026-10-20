@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   CODE_SIGNING_EKU,
   PFX_INSPECTION_SCRIPT,
@@ -99,5 +102,31 @@ describe("windows signing setup", () => {
       !PFX_INSPECTION_SCRIPT.includes("#"),
       "the joined command string must not contain comments",
     );
+  });
+
+  it("uses the same EKU expression as the release workflow", () => {
+    // The workflow selects the code-signing certificate with the same
+    // expression; if one changes, the other has to change with it.
+    const root = dirname(dirname(fileURLToPath(import.meta.url)));
+    return readFile(join(root, ".github", "workflows", "ci.yml"), "utf8").then((workflow) => {
+      // Only the executable lines matter; the comment that explains the old
+      // expression still mentions it.
+      const code = workflow
+        .split(/\r?\n/)
+        .filter((line) => !line.trim().startsWith("#"))
+        .join("\n");
+      assert.ok(
+        code.includes('2.5.29.37') && code.includes("1.3.6.1.5.5.7.3.3"),
+        "the workflow must select the certificate by its code-signing EKU",
+      );
+      assert.ok(
+        !code.includes("ObjectId.Value"),
+        "the workflow must not read the EKU through ObjectId.Value",
+      );
+      assert.ok(
+        !code.includes("EnhancedKeyUsageList"),
+        "the workflow must not read the EKU from EnhancedKeyUsageList",
+      );
+    });
   });
 });
