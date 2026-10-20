@@ -974,12 +974,21 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
     if count > MAX_PROCESS_TABLE {
         return Err(io::Error::other("process table exceeds cleanup bound"));
     }
-    // The process table grows between counting and reading, and macOS reports
-    // a buffer that is no longer large enough as EINVAL rather than as a
-    // larger count. Retry with room to spare instead of failing the whole
-    // capture: every spawn on the machine goes through this path, so one
-    // unlucky timing took down all of them.
-    let mut capacity = count;
+    // Two things go wrong between counting the table and reading it.
+    //
+    // The table grows, and macOS fills the buffer with the pids that fit and
+    // returns that count rather than reporting an error - so a buffer that
+    // is even slightly too small silently drops the tail of the table. The
+    // tail is where the newest processes live, which are exactly the
+    // children the tree has to be able to kill, so a truncated table means a
+    // truncated cleanup. Allocate headroom, and treat a buffer that filled
+    // exactly as truncated and try again with more room.
+    //
+    // A buffer that is too small can also be refused outright with EINVAL.
+    let mut capacity = count
+        .saturating_add(count / 4)
+        .max(count.saturating_add(64))
+        .min(MAX_PROCESS_TABLE);
     let (pids, got) = loop {
         let mut pids = vec![0 as libc::pid_t; capacity];
         let bytes = std::mem::size_of_val(&pids);
@@ -993,6 +1002,12 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
                 continue;
             }
             return Err(error);
+        }
+        if got as usize == capacity && capacity < MAX_PROCESS_TABLE {
+            // The buffer filled exactly, so the table is at least that long
+            // and the tail may have been dropped.
+            capacity = (capacity * 2).min(MAX_PROCESS_TABLE);
+            continue;
         }
         break (pids, got as usize);
     };
