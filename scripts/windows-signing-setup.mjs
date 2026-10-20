@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
-import { join } from "node:path";import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+import { resolvePowerShell } from "./powershell.mjs";
 
 // Extended Key Usage OID for Code Signing (1.3.6.1.5.5.7.3.3).
 export const CODE_SIGNING_EKU = "1.3.6.1.5.5.7.3.3";
@@ -93,53 +94,41 @@ function run(command, args, options = {}) {
   });
 }
 
-/// Resolves a PowerShell that can actually be executed.
+/// The PowerShell that reads the certificate metadata out of a PFX.
 ///
-/// `powershell.exe` (Windows PowerShell 5.1) is only on `PATH` on some
-/// images; on a stock Windows install it lives in
-/// `%SystemRoot%\System32\WindowsPowerShell\v1.0\`, which is not on `PATH`.
-async function resolvePowerShell() {
-  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT;
-  if (systemRoot) {
-    const candidate = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-    try {
-      await access(candidate);
-      return candidate;
-    } catch {
-      // Not there; fall through to the PATH lookup.
-    }
-  }
-  for (const candidate of ["pwsh.exe", "powershell.exe"]) {
-    try {
-      await run(candidate, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "exit 0"]);
-      return candidate;
-    } catch {
-      // Not runnable; try the next candidate.
-    }
-  }
-  throw new Error(
-    "no PowerShell found; install PowerShell 7 (`pwsh`) or make powershell.exe resolvable",
-  );
-}
+/// Exported so the test suite can assert on it: the EKU has to be read from
+/// the 2.5.29.37 extension, and that is exactly the detail that silently
+/// broke the release pipeline.
+export const PFX_INSPECTION_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "$flagsName = 'Exportable'",
+  "if ('EphemeralKeySet' -in [enum]::GetNames([System.Security.Cryptography.X509Certificates.X509KeyStorageFlags])) { $flagsName = 'EphemeralKeySet' }",
+  "$flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::$flagsName",
+  "$cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($env:PFX_PATH, $env:PFX_PASSWORD, $flags)",
+  "$eku = ($cert.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.37' } | ForEach-Object { $_.EnhancedKeyUsages } | ForEach-Object { $_.Value }) -join ','",
+  "[pscustomobject]@{ thumbprint = $cert.Thumbprint; eku = $eku; notAfter = $cert.NotAfter.ToString('o'); hasPrivateKey = [bool]$cert.HasPrivateKey; subject = $cert.Subject } | ConvertTo-Json -Compress",
+].join("; ");
 
-/// Reads the certificate details out of a PFX using the Windows certificate
-/// store, so the same machinery the release pipeline uses is what validates
-/// the file here.
+/// Reads the certificate details out of a PFX, the way the release pipeline
+/// will read them.
+///
+/// The PFX is opened through the .NET loader rather than
+/// `Import-PfxCertificate` so that no `ConvertTo-SecureString` is needed: a
+/// Windows PowerShell 5.1 install whose `Microsoft.PowerShell.Security`
+/// module fails to load cannot create a secure string, and that failure
+/// would look like a broken PFX. The ephemeral key set keeps the private key
+/// out of the machine's key store, since only the metadata is read here.
+///
+/// The code-signing EKU is read from the 2.5.29.37 extension rather than
+/// from `EnhancedKeyUsageList`: on PowerShell 7 that property yields
+/// EnhancedKeyUsageRepresentation objects whose Value and Oid are empty, so
+/// the release pipeline's older `$_.ObjectId.Value` expression never matched
+/// and the signing step rejected a perfectly valid PFX.
 async function inspectPfx(pfxPath, password) {
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    "$secure = ConvertTo-SecureString -String $env:PFX_PASSWORD -AsPlainText -Force",
-    "$certs = @(Import-PfxCertificate -FilePath $env:PFX_PATH -CertStoreLocation Cert:\\CurrentUser\\My -Password $secure | Where-Object { $_.HasPrivateKey })",
-    "$cert = $certs | Where-Object { $_.EnhancedKeyUsageList | ForEach-Object { $_.ObjectId.Value } | Where-Object { $_ -eq '1.3.6.1.5.5.7.3.3' } } | Select-Object -First 1",
-    "if ($null -eq $cert) { $cert = $certs | Select-Object -First 1 }",
-    "if ($null -eq $cert) { throw 'the PFX contained no certificate with a private key' }",
-    "$eku = ($cert.EnhancedKeyUsageList | ForEach-Object { $_.ObjectId.Value }) -join ','",
-    "[pscustomobject]@{ thumbprint = $cert.Thumbprint; eku = $eku; notAfter = $cert.NotAfter.ToString('o'); hasPrivateKey = [bool]$cert.HasPrivateKey; subject = $cert.Subject } | ConvertTo-Json -Compress",
-  ].join("; ");
-  const powershell = await resolvePowerShell();
+  const powershell = await resolvePowerShell([]);
   const { stdout } = await run(
     powershell,
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", PFX_INSPECTION_SCRIPT],
     { env: { ...process.env, PFX_PATH: pfxPath, PFX_PASSWORD: password } },
   );
   return JSON.parse(stdout.trim().split(/\r?\n/).pop());
