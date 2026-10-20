@@ -524,7 +524,7 @@ fn process_is_gone(error: &io::Error) -> bool {
 ///
 /// The scan's "most of the table was unreadable" guard is what keeps a
 /// genuinely broken read from passing as an empty tree.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn process_args_unavailable(raw_os_error: Option<i32>) -> bool {
     matches!(raw_os_error, Some(libc::EINVAL) | Some(libc::EIO))
 }
@@ -2613,7 +2613,7 @@ mod tests {
     /// macOS reports a pid whose argument area does not exist as EINVAL or
     /// EIO, and the scan has to skip it rather than abort: every spawn on the
     /// machine goes through that scan.
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_unreadable_argument_area_is_skipped_not_fatal() {
         assert!(process_args_unavailable(Some(libc::EINVAL)));
