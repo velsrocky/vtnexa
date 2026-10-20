@@ -90,10 +90,24 @@ fn screening_form(path: &std::path::Path) -> String {
 /// refusing everything under `%APPDATA%` also refuses the temp roots the app
 /// and its tests legitimately work in. The temp directory holds no
 /// credential material, so it is carved out of the `appdata` refusal below.
+///
+/// The same directory has two spellings on Windows: `canonicalize` expands
+/// the 8.3 short name (`RUNNER~1`) to the long one (`runneradmin`), so a
+/// path that was canonicalized before it was checked no longer shares a
+/// prefix with the raw temp directory. Both spellings are accepted.
 fn is_under_temp_dir(normalized: &str) -> bool {
-    let temp = screening_form(&std::env::temp_dir());
-    let temp = temp.trim_end_matches('/');
-    !temp.is_empty() && (normalized == temp || normalized.starts_with(&format!("{temp}/")))
+    let mut prefixes = vec![screening_form(&std::env::temp_dir())];
+    if let Ok(canonical) = std::env::temp_dir().canonicalize() {
+        let canonical = screening_form(&canonical);
+        if !canonical.is_empty() && !prefixes.contains(&canonical) {
+            prefixes.push(canonical);
+        }
+    }
+    prefixes.iter().any(|prefix| {
+        let prefix = prefix.trim_end_matches('/');
+        !prefix.is_empty()
+            && (normalized == prefix || normalized.starts_with(&format!("{prefix}/")))
+    })
 }
 
 pub(crate) fn reject_sensitive(path: &std::path::Path) -> Result<(), String> {
@@ -199,6 +213,22 @@ mod tests {
         assert!(
             reject_sensitive(&temp).is_ok(),
             "the temp directory must stay usable"
+        );
+    }
+
+    #[test]
+    fn a_canonicalized_temp_path_is_still_usable() {
+        // `canonicalize` expands the Windows 8.3 short name (`RUNNER~1`) to
+        // the long one (`runneradmin`), so a path checked after being
+        // canonicalized no longer shares a prefix with the raw temp
+        // directory. Both spellings have to be accepted.
+        let Ok(canonical) = std::env::temp_dir().canonicalize() else {
+            return;
+        };
+        let probe = canonical.join("vtnexa-sensitive-canonical-probe");
+        assert!(
+            reject_sensitive(&probe).is_ok(),
+            "a canonicalized temp path must stay usable"
         );
     }
 
