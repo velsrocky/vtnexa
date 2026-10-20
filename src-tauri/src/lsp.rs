@@ -113,15 +113,62 @@ pub(crate) fn command_for(
             ],
         ),
         // Per-file and instant; accurate without project context.
-        LspProvider::Python => (
-            "python3".to_string(),
-            vec![
-                "-m".to_string(),
-                "py_compile".to_string(),
-                file.to_string_lossy().to_string(),
-            ],
-        ),
+        LspProvider::Python => {
+            let (program, prefix) = python_interpreter();
+            let mut args = prefix;
+            args.push("-m".to_string());
+            args.push("py_compile".to_string());
+            args.push(file.to_string_lossy().to_string());
+            (program, args)
+        }
     }
+}
+
+/// Resolves the Python interpreter used for `py_compile` diagnostics.
+///
+/// POSIX systems ship `python3`. Windows does not: python.org's installer
+/// provides `python.exe` plus the `py` launcher, and a `python3` on PATH is
+/// usually the Microsoft Store App Execution Alias — a redirector that
+/// prints an install prompt and exits non-zero instead of running Python.
+/// The Store alias directory is therefore skipped, and the `py -3` launcher
+/// is the last resort.
+pub(crate) fn python_interpreter() -> (String, Vec<String>) {
+    #[cfg(windows)]
+    {
+        if let Some(found) = find_real_interpreter_on_path(&["python.exe", "python3.exe"]) {
+            return (found, Vec::new());
+        }
+        ("py".to_string(), vec!["-3".to_string()])
+    }
+    #[cfg(not(windows))]
+    {
+        ("python3".to_string(), Vec::new())
+    }
+}
+
+/// Finds the first of `names` on `PATH` that is a real interpreter rather
+/// than a Microsoft Store App Execution Alias redirector.
+#[cfg(windows)]
+fn find_real_interpreter_on_path(names: &[&str]) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let directory_text = directory
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_lowercase();
+        if directory_text.contains("/microsoft/windowsapps/") {
+            // Store aliases: `python3.exe` here is a redirector to the
+            // Microsoft Store, not an interpreter.
+            continue;
+        }
+        for name in names {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn timeout_for(provider: LspProvider) -> Duration {
@@ -178,10 +225,15 @@ pub(crate) fn filter_to_file(
     absolute: &std::path::Path,
     project_root: &std::path::Path,
 ) -> (String, usize) {
-    let abs = absolute.to_string_lossy().to_string();
+    // Language servers report paths with forward slashes on every platform
+    // (tsserver on Windows emits `src/a.ts`), while `Path` renders Windows
+    // paths with backslashes. Comparing the raw forms silently dropped
+    // every diagnostic on Windows, so both sides are normalized to forward
+    // slashes before matching.
+    let abs = absolute.to_string_lossy().replace('\\', "/");
     let rel = absolute
         .strip_prefix(project_root)
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
     let kept: Vec<&str> = output
         .lines()
@@ -352,13 +404,36 @@ mod tests {
         let (prog, _) = command_for(LspProvider::Rust, &root, &root.join("main.rs"));
         assert_eq!(prog, "cargo");
         let (prog, args) = command_for(LspProvider::Python, &root, &file);
+        // POSIX ships `python3`; Windows resolves a real interpreter or falls
+        // back to the `py -3` launcher.
+        #[cfg(not(windows))]
         assert_eq!(prog, "python3");
+        #[cfg(windows)]
+        assert!(
+            prog.to_lowercase().contains("python") || prog.to_lowercase().contains("py"),
+            "unexpected interpreter: {prog}"
+        );
         assert!(args.iter().any(|a| a.ends_with("a.ts")));
     }
 
     #[test]
     fn filter_keeps_only_matching_lines() {
         let root = std::path::Path::new("/ws/proj");
+        let abs = root.join("src").join("a.ts");
+        let out = "src/a.ts(1,2): error TS2322: nope\nsrc/b.ts(3,4): error TS0000: other\n";
+        let (kept, total) = filter_to_file(out, &abs, root);
+        assert_eq!(total, 2);
+        assert!(kept.contains("a.ts"));
+        assert!(!kept.contains("b.ts"));
+    }
+
+    /// Language servers report forward-slash paths on every platform, so the
+    /// filter has to match them even when the paths it is given are Windows
+    /// paths rendered with backslashes.
+    #[cfg(windows)]
+    #[test]
+    fn filter_matches_forward_slash_diagnostics_for_windows_paths() {
+        let root = std::path::Path::new(r"C:\ws\proj");
         let abs = root.join("src").join("a.ts");
         let out = "src/a.ts(1,2): error TS2322: nope\nsrc/b.ts(3,4): error TS0000: other\n";
         let (kept, total) = filter_to_file(out, &abs, root);

@@ -50,8 +50,69 @@ pub(crate) fn truncate_chars(s: String, max: usize) -> String {
     format!("{}…[truncated {} chars]", &s[..end], s.len() - end)
 }
 
+/// Renders a path for display, for the frontend, and for storage.
+///
+/// `canonicalize()` on Windows returns the extended-length form
+/// (`\\?\C:\Users\me\project`). That form is accepted by Win32 calls but it
+/// is meaningless to a person, rejected by some tools, and it is what the
+/// workspace picker would otherwise show, so it is stripped here.
+pub(crate) fn display_path(path: &std::path::Path) -> String {
+    let raw = path.to_string_lossy().into_owned();
+    let Some(stripped) = raw.strip_prefix(r"\\?\") else {
+        return raw;
+    };
+    // `\\?\UNC\server\share` is the verbatim UNC form; it becomes
+    // `\\server\share`.
+    match stripped.strip_prefix(r"UNC\") {
+        Some(unc) => format!(r"\\{unc}"),
+        None => stripped.to_string(),
+    }
+}
+
+/// Normalizes a path for substring screening: forward slashes, lower case,
+/// and without the Windows `\\?\` verbatim prefix that `canonicalize` adds.
+///
+/// Without the prefix strip, a canonicalized Windows path
+/// (`\\?\C:\Users\...\AppData\Local\Temp`) would never match the equivalent
+/// non-canonical path, so both the sensitive-pattern check and the temp
+/// directory carve-out below would silently miss it.
+fn screening_form(path: &std::path::Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    // `\\?\C:\...` becomes `//?/c:/...`; drop only that prefix and keep the
+    // leading slash of POSIX paths, which the system-path prefixes rely on.
+    raw.strip_prefix("//?/").unwrap_or(&raw).to_string()
+}
+
+/// True when the normalized path sits inside the platform's temporary
+/// directory.
+///
+/// On Windows the scratch directory lives under `%LOCALAPPDATA%\Temp`, so
+/// refusing everything under `%APPDATA%` also refuses the temp roots the app
+/// and its tests legitimately work in. The temp directory holds no
+/// credential material, so it is carved out of the `appdata` refusal below.
+///
+/// The same directory has two spellings on Windows: `canonicalize` expands
+/// the 8.3 short name (`RUNNER~1`) to the long one (`runneradmin`), so a
+/// path that was canonicalized before it was checked no longer shares a
+/// prefix with the raw temp directory. Both spellings are accepted.
+fn is_under_temp_dir(normalized: &str) -> bool {
+    let mut prefixes = vec![screening_form(&std::env::temp_dir())];
+    if let Ok(canonical) = std::env::temp_dir().canonicalize() {
+        let canonical = screening_form(&canonical);
+        if !canonical.is_empty() && !prefixes.contains(&canonical) {
+            prefixes.push(canonical);
+        }
+    }
+    prefixes.iter().any(|prefix| {
+        let prefix = prefix.trim_end_matches('/');
+        !prefix.is_empty()
+            && (normalized == prefix || normalized.starts_with(&format!("{prefix}/")))
+    })
+}
+
 pub(crate) fn reject_sensitive(path: &std::path::Path) -> Result<(), String> {
-    let s = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    let s = screening_form(path);
+    let under_temp = is_under_temp_dir(&s);
     for pat in [
         ".ssh",
         ".gnupg",
@@ -67,6 +128,11 @@ pub(crate) fn reject_sensitive(path: &std::path::Path) -> Result<(), String> {
         "windows/system32/config",
         "windows/system32/drivers/etc",
     ] {
+        // `appdata` is a credential-store guard on Windows, but the temp
+        // directory is a legitimate scratch area underneath it.
+        if pat == "appdata" && under_temp {
+            continue;
+        }
         if s.contains(pat) {
             return Err(format!("refused: sensitive path ({})", pat));
         }
@@ -117,9 +183,82 @@ pub(crate) fn safe_absolute(raw: String, what: &str) -> Result<std::path::PathBu
     reject_sensitive(&norm)?;
     Ok(norm)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_path_strips_the_windows_verbatim_prefix() {
+        assert_eq!(
+            display_path(std::path::Path::new(r"\\?\C:\Users\me\project")),
+            r"C:\Users\me\project"
+        );
+        assert_eq!(
+            display_path(std::path::Path::new(r"\\?\UNC\server\share\file.txt")),
+            r"\\server\share\file.txt"
+        );
+        assert_eq!(
+            display_path(std::path::Path::new("/home/me/project")),
+            "/home/me/project"
+        );
+    }
+
+    #[test]
+    fn the_temp_directory_is_never_a_sensitive_path() {
+        // On Windows the scratch directory lives under `%LOCALAPPDATA%\Temp`,
+        // so refusing everything under `%APPDATA%` would block every path
+        // the app and its tests legitimately write to.
+        let temp = std::env::temp_dir().join("vtnexa-sensitive-probe");
+        assert!(
+            reject_sensitive(&temp).is_ok(),
+            "the temp directory must stay usable"
+        );
+    }
+
+    #[test]
+    fn a_canonicalized_temp_path_is_still_usable() {
+        // `canonicalize` expands the Windows 8.3 short name (`RUNNER~1`) to
+        // the long one (`runneradmin`), so a path checked after being
+        // canonicalized no longer shares a prefix with the raw temp
+        // directory. Both spellings have to be accepted.
+        let Ok(canonical) = std::env::temp_dir().canonicalize() else {
+            return;
+        };
+        let probe = canonical.join("vtnexa-sensitive-canonical-probe");
+        assert!(
+            reject_sensitive(&probe).is_ok(),
+            "a canonicalized temp path must stay usable"
+        );
+    }
+
+    #[test]
+    fn appdata_outside_the_temp_directory_is_still_refused() {
+        // `%APPDATA%` holds credential stores; only the scratch area under it
+        // is carved out.
+        let appdata = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\Users\someone\AppData\Roaming\VTNexa")
+        } else {
+            std::path::PathBuf::from("/home/someone/AppData/Roaming/VTNexa")
+        };
+        let error = reject_sensitive(&appdata).unwrap_err();
+        assert!(error.contains("appdata"), "got: {error}");
+    }
+
+    #[test]
+    fn credential_paths_are_still_refused() {
+        for path in [
+            "/home/someone/.ssh/id_rsa",
+            r"C:\Users\someone\.ssh\id_rsa",
+            "/home/someone/.aws/credentials",
+            "/home/someone/.config/gh/hosts.yml",
+        ] {
+            assert!(
+                reject_sensitive(std::path::Path::new(path)).is_err(),
+                "must refuse {path}"
+            );
+        }
+    }
 
     #[test]
     fn write_atomic_leaves_no_temp_files() {

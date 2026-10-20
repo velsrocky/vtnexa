@@ -5114,6 +5114,7 @@ name = "vtnexa"
 version = "1.0.6"
 dependencies = [
  "base64 0.23.1",
+ "embed-resource",
  "getrandom 0.3.4",
  "keyring",
  "libc",

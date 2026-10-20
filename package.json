@@ -21,7 +21,7 @@
     "tauri": "tauri",
     "install-local": "bash scripts/install-local.sh",
     "test": "vitest run && pnpm test:node",
-    "test:node": "node --test --test-concurrency=1 scripts/tauri-driver-client.test.mjs scripts/sign-windows.test.mjs scripts/release-preflight.test.mjs scripts/verify-release.test.mjs",
+    "test:node": "node --test --test-concurrency=1 scripts/tauri-driver-client.test.mjs scripts/sign-windows.test.mjs scripts/release-preflight.test.mjs scripts/verify-release.test.mjs scripts/windows-signing-setup.test.mjs",
     "test:tauri-smoke": "node scripts/tauri-windows-smoke.mjs",
     "test:tauri-smoke-linux": "bash scripts/tauri-smoke.sh --build",
     "test:provision": "node --test scripts/provision-node.test.mjs",

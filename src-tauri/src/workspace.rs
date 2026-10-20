@@ -584,9 +584,10 @@ pub(crate) fn workspace_root(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, WorkspaceRoots>,
 ) -> Result<String, String> {
-    Ok(root_snapshot(&state, window.label())
-        .to_string_lossy()
-        .to_string())
+    Ok(crate::util::display_path(&root_snapshot(
+        &state,
+        window.label(),
+    )))
 }
 
 #[tauri::command]
@@ -625,7 +626,7 @@ pub(crate) fn set_workspace_root<R: tauri::Runtime>(
         .lock()
         .map_err(|e| e.to_string())?
         .insert(window.label().to_string(), canon.clone());
-    Ok(canon.to_string_lossy().to_string())
+    Ok(crate::util::display_path(&canon))
 }
 
 #[tauri::command]
