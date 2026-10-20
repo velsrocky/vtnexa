@@ -276,12 +276,49 @@ async function findFile(root, names) {
   return null;
 }
 
+/// Resolves a PowerShell that can actually be executed.
+///
+/// `powershell.exe` (Windows PowerShell 5.1) is only on `PATH` on some
+/// images; on a stock Windows install it lives in
+/// `%SystemRoot%\System32\WindowsPowerShell\v1.0\`, which is not on `PATH`.
+/// Spawning it by bare name therefore fails with `ENOENT` and the Windows
+/// bundle cannot be built. PowerShell 7 (`pwsh`) is preferred when present
+/// because it is the one that is on `PATH` after a normal install.
+async function resolvePowerShell() {
+  const candidates = [];
+  if (process.platform === "win32") {
+    const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT;
+    if (systemRoot) {
+      candidates.push(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
+    }
+    candidates.push("pwsh.exe", "powershell.exe");
+  } else {
+    candidates.push("pwsh");
+  }
+  for (const candidate of candidates) {
+    if (candidate.includes("/") || candidate.includes("\\")) {
+      if (await exists(candidate)) return candidate;
+      continue;
+    }
+    try {
+      await executableVersion(candidate);
+      return candidate;
+    } catch {
+      // Not runnable; try the next candidate.
+    }
+  }
+  throw new Error(
+    "node runtime: no PowerShell found; install PowerShell 7 (`pwsh`) or make " +
+      "powershell.exe resolvable",
+  );
+}
+
 async function extractArchive(archivePath, descriptor) {
   const destination = await mkdtemp(join(tmpdir(), "vtnexa-node-"));
   try {
     if (descriptor.format === "zip") {
       if (process.platform === "win32") {
-        const powershell = process.env.ComSpec ? "powershell.exe" : "pwsh";
+        const powershell = await resolvePowerShell();
         const escapedArchive = archivePath.replaceAll("'", "''");
         const escapedDestination = destination.replaceAll("'", "''");
         await runCommand(powershell, [
