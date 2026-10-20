@@ -515,17 +515,18 @@ fn process_is_gone(error: &io::Error) -> bool {
 
 /// Classifies a failed per-process argument read on macOS.
 ///
-/// macOS reports a pid whose argument area does not exist as `EINVAL`: the
-/// process exited, is a zombie, or is a kernel task. That is a property of
-/// the pid, not of the scan, so the caller skips the process instead of
-/// failing the whole capture — and every spawn on the machine goes through
-/// that capture, so one unlucky pid used to take down all of them.
+/// macOS reports a pid whose argument area does not exist as `EINVAL` or
+/// `EIO`: the process exited, is a zombie, or is a kernel task. That is a
+/// property of the pid, not of the scan, so the caller skips the process
+/// instead of failing the whole capture — and every spawn on the machine
+/// goes through that capture, so one unlucky pid used to take down all of
+/// them.
 ///
-/// The size query in front of the read is the systematic check: if that
-/// fails, the scan itself is broken and the error still propagates.
+/// The scan's "most of the table was unreadable" guard is what keeps a
+/// genuinely broken read from passing as an empty tree.
 #[cfg(unix)]
 fn process_args_unavailable(raw_os_error: Option<i32>) -> bool {
-    raw_os_error == Some(libc::EINVAL)
+    matches!(raw_os_error, Some(libc::EINVAL) | Some(libc::EIO))
 }
 
 #[cfg(unix)]
@@ -850,6 +851,21 @@ fn macos_procargs_has_exact_token(data: &[u8], token: &str) -> io::Result<bool> 
 
 #[cfg(target_os = "macos")]
 fn read_macos_process_args(pid: libc::pid_t) -> io::Result<Vec<u8>> {
+    read_macos_process_args_with(pid, false)
+}
+
+/// Reads the argument area of a pid.
+///
+/// `soft` decides what a failure means. Both sysctl calls fail when the pid
+/// has no argument area — the size query just as much as the data read — so
+/// while scanning the table every such failure has to be a skip rather than
+/// an error. The caller that asks for its own pid reads strictly, because
+/// there the failure is real.
+///
+/// The scan's "most of the table was unreadable" guard is what keeps a
+/// genuinely broken read from passing as an empty tree.
+#[cfg(target_os = "macos")]
+fn read_macos_process_args_with(pid: libc::pid_t, soft: bool) -> io::Result<Vec<u8>> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     let miblen = mib.len() as libc::c_uint;
     let mut length: libc::size_t = 0;
@@ -864,7 +880,11 @@ fn read_macos_process_args(pid: libc::pid_t) -> io::Result<Vec<u8>> {
         )
     };
     if queried != 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        if soft && process_args_unavailable(error.raw_os_error()) {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        return Err(error);
     }
     if length == 0 || length > MAX_PROCESS_ARGS_BYTES as libc::size_t {
         return Err(io::Error::other("process arguments exceed cleanup bound"));
@@ -883,9 +903,7 @@ fn read_macos_process_args(pid: libc::pid_t) -> io::Result<Vec<u8>> {
     };
     if read != 0 {
         let error = io::Error::last_os_error();
-        // A pid whose argument area does not exist is skipped, not fatal; the
-        // size query above stays the systematic check.
-        if process_args_unavailable(error.raw_os_error()) {
+        if soft && process_args_unavailable(error.raw_os_error()) {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
         return Err(error);
@@ -899,7 +917,7 @@ fn read_macos_process_args(pid: libc::pid_t) -> io::Result<Vec<u8>> {
 
 #[cfg(target_os = "macos")]
 fn macos_process_has_token(pid: libc::pid_t, token: &str) -> io::Result<bool> {
-    macos_procargs_has_exact_token(&read_macos_process_args(pid)?, token)
+    macos_procargs_has_exact_token(&read_macos_process_args_with(pid, true)?, token)
 }
 
 #[cfg(target_os = "macos")]
@@ -1028,11 +1046,11 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
         records.insert(pid, record);
     }
     // A pid whose argument area cannot be read is normally a process that
-    // exited during the scan, and skipping it is correct. If that is most of
-    // the table then the reads themselves are broken, and a partial tree
-    // would quietly leave descendants behind — exactly the outcome the tree
-    // exists to prevent. Fail loudly instead.
-    if token.is_some() && got > 0 && unreadable * 2 > got {
+    // exited during the scan, and skipping it is correct. If that is nearly
+    // all of the table then the reads themselves are broken, and a partial
+    // tree would quietly leave descendants behind — exactly the outcome the
+    // tree exists to prevent. Fail loudly instead.
+    if token.is_some() && got >= 8 && unreadable * 10 > got * 9 {
         return Err(io::Error::other(
             "macOS process arguments are unreadable for most of the process table",
         ));
@@ -2577,15 +2595,15 @@ mod tests {
         command
     }
 
-    /// macOS reports a pid whose argument area does not exist as EINVAL, and
-    /// the scan has to skip it rather than abort: every spawn on the machine
-    /// goes through that scan.
+    /// macOS reports a pid whose argument area does not exist as EINVAL or
+    /// EIO, and the scan has to skip it rather than abort: every spawn on the
+    /// machine goes through that scan.
     #[cfg(unix)]
     #[test]
     fn an_unreadable_argument_area_is_skipped_not_fatal() {
         assert!(process_args_unavailable(Some(libc::EINVAL)));
+        assert!(process_args_unavailable(Some(libc::EIO)));
         // Everything else stays fatal, so a broken scan is still loud.
-        assert!(!process_args_unavailable(Some(libc::EIO)));
         assert!(!process_args_unavailable(Some(libc::EPERM)));
         assert!(!process_args_unavailable(Some(libc::ESRCH)));
         assert!(!process_args_unavailable(None));
