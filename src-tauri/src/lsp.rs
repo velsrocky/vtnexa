@@ -152,7 +152,10 @@ pub(crate) fn python_interpreter() -> (String, Vec<String>) {
 fn find_real_interpreter_on_path(names: &[&str]) -> Option<String> {
     let path = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path) {
-        let directory_text = directory.to_string_lossy().replace('\\', "/").to_lowercase();
+        let directory_text = directory
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_lowercase();
         if directory_text.contains("/microsoft/windowsapps/") {
             // Store aliases: `python3.exe` here is a redirector to the
             // Microsoft Store, not an interpreter.

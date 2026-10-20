@@ -584,7 +584,10 @@ pub(crate) fn workspace_root(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, WorkspaceRoots>,
 ) -> Result<String, String> {
-    Ok(crate::util::display_path(&root_snapshot(&state, window.label())))
+    Ok(crate::util::display_path(&root_snapshot(
+        &state,
+        window.label(),
+    )))
 }
 
 #[tauri::command]
