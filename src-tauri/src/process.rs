@@ -959,18 +959,27 @@ fn read_macos_children(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
 
 #[cfg(target_os = "macos")]
 fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
-    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if count < 0 {
-        return Err(io::Error::last_os_error());
+    // The count call is the only source of the buffer size. A table that
+    // grew between the two calls is only detected by the fill, so the buffer
+    // gets generous headroom, and an empty table is treated as an error
+    // rather than as "there are no processes": an empty snapshot means the
+    // cleanup finds nothing to kill, and a silent empty tree is exactly the
+    // outcome the tree exists to prevent.
+    let mut count = 0usize;
+    for _ in 0..3 {
+        let probed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        if probed < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        count = probed as usize;
+        if count > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
     if count == 0 {
-        return Ok(ProcessSnapshot {
-            records: HashMap::new(),
-            children: HashMap::new(),
-            marked: HashMap::new(),
-        });
+        return Err(io::Error::other("macOS process table is empty"));
     }
-    let count = count as usize;
     if count > MAX_PROCESS_TABLE {
         return Err(io::Error::other("process table exceeds cleanup bound"));
     }
@@ -986,8 +995,8 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
     //
     // A buffer that is too small can also be refused outright with EINVAL.
     let mut capacity = count
-        .saturating_add(count / 4)
-        .max(count.saturating_add(64))
+        .saturating_mul(2)
+        .saturating_add(256)
         .min(MAX_PROCESS_TABLE);
     let (pids, got) = loop {
         let mut pids = vec![0 as libc::pid_t; capacity];
