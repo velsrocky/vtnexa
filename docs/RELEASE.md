@@ -22,6 +22,21 @@ Public releases are fail-closed. A tag never publishes an unsigned release.
    - `WINDOWS_CERTIFICATE_PASSWORD`: the PFX export/import password.
    - `WINDOWS_TIMESTAMP_URL`: the configured RFC 3161 timestamp service URL.
    The updater key password is optional only when the private key is not encrypted. Apple signing remains supported through the optional `APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` secrets.
+
+   The three Windows secrets are provisioned from a code-signing certificate
+   with `scripts/windows-signing-setup.mjs`. It imports the PFX through the
+   Windows certificate store — the same machinery the release pipeline uses —
+   and refuses a certificate that is expired, has no private key, or lacks the
+   code-signing EKU (`1.3.6.1.5.5.7.3.3`) before anything is uploaded:
+   ```sh
+   export WINDOWS_CERTIFICATE_PASSWORD='<the PFX password>'
+   node scripts/windows-signing-setup.mjs \
+     --pfx 'C:\certs\vtnexa.pfx' \
+     --timestamp-url 'https://timestamp.example.com' \
+     --dry-run   # drop --dry-run to write the secrets
+   ```
+   The password is read from the environment, never from the command line, and
+   neither the password nor the PFX contents are printed.
 4. **Tag and push.**
    ```sh
    git tag -a v1.2.3 -m "VTNexa v1.2.3"
