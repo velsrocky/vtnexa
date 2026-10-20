@@ -513,6 +513,21 @@ fn process_is_gone(error: &io::Error) -> bool {
         || matches!(error.raw_os_error(), Some(libc::ESRCH) | Some(libc::ENOENT))
 }
 
+/// Classifies a failed per-process argument read on macOS.
+///
+/// macOS reports a pid whose argument area does not exist as `EINVAL`: the
+/// process exited, is a zombie, or is a kernel task. That is a property of
+/// the pid, not of the scan, so the caller skips the process instead of
+/// failing the whole capture — and every spawn on the machine goes through
+/// that capture, so one unlucky pid used to take down all of them.
+///
+/// The size query in front of the read is the systematic check: if that
+/// fails, the scan itself is broken and the error still propagates.
+#[cfg(unix)]
+fn process_args_unavailable(raw_os_error: Option<i32>) -> bool {
+    raw_os_error == Some(libc::EINVAL)
+}
+
 #[cfg(unix)]
 fn environment_has_exact_token(data: &[u8], token: &str) -> bool {
     if token.is_empty() || token.as_bytes().contains(&0) {
@@ -867,7 +882,13 @@ fn read_macos_process_args(pid: libc::pid_t) -> io::Result<Vec<u8>> {
         )
     };
     if read != 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        // A pid whose argument area does not exist is skipped, not fatal; the
+        // size query above stays the systematic check.
+        if process_args_unavailable(error.raw_os_error()) {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        return Err(error);
     }
     if actual > MAX_PROCESS_ARGS_BYTES as libc::size_t || actual > data.len() as libc::size_t {
         return Err(io::Error::other("process arguments changed during read"));
@@ -935,21 +956,36 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
     if count > MAX_PROCESS_TABLE {
         return Err(io::Error::other("process table exceeds cleanup bound"));
     }
-    let mut pids = vec![0 as libc::pid_t; count];
-    let bytes = std::mem::size_of_val(&pids);
-    let got = unsafe {
-        libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, bytes as libc::c_int)
+    // The process table grows between counting and reading, and macOS reports
+    // a buffer that is no longer large enough as EINVAL rather than as a
+    // larger count. Retry with room to spare instead of failing the whole
+    // capture: every spawn on the machine goes through this path, so one
+    // unlucky timing took down all of them.
+    let mut capacity = count;
+    let (pids, got) = loop {
+        let mut pids = vec![0 as libc::pid_t; capacity];
+        let bytes = std::mem::size_of_val(&pids);
+        let got = unsafe {
+            libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, bytes as libc::c_int)
+        };
+        if got < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINVAL) && capacity < MAX_PROCESS_TABLE {
+                capacity = (capacity * 2).min(MAX_PROCESS_TABLE);
+                continue;
+            }
+            return Err(error);
+        }
+        break (pids, got as usize);
     };
-    if got < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if got as usize > count {
+    if got > capacity {
         return Err(invalid_process_data("process count changed during read"));
     }
     let started = Instant::now();
     let mut records = HashMap::new();
     let mut marked = HashMap::new();
-    for (index, pid) in pids.into_iter().take(got as usize).enumerate() {
+    let mut unreadable = 0usize;
+    for (index, pid) in pids.into_iter().take(got).enumerate() {
         if index & 63 == 0 && started.elapsed() >= TREE_CLEANUP_TIMEOUT {
             return Err(io::Error::other(
                 "macOS process scan exceeded cleanup time bound",
@@ -979,7 +1015,7 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
                     Err(error) => return Err(error),
                 },
                 Ok(false) => {}
-                Err(error) if process_is_gone(&error) => {}
+                Err(error) if process_is_gone(&error) => unreadable += 1,
                 Err(error)
                     if error.kind() == io::ErrorKind::PermissionDenied
                         || matches!(
@@ -990,6 +1026,16 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
             }
         }
         records.insert(pid, record);
+    }
+    // A pid whose argument area cannot be read is normally a process that
+    // exited during the scan, and skipping it is correct. If that is most of
+    // the table then the reads themselves are broken, and a partial tree
+    // would quietly leave descendants behind — exactly the outcome the tree
+    // exists to prevent. Fail loudly instead.
+    if token.is_some() && got > 0 && unreadable * 2 > got {
+        return Err(io::Error::other(
+            "macOS process arguments are unreadable for most of the process table",
+        ));
     }
     let mut children: HashMap<libc::pid_t, Vec<libc::pid_t>> = HashMap::new();
     for (&pid, record) in &records {
@@ -2529,6 +2575,20 @@ mod tests {
             .args(["--exact", "process::tests::process_helper", "--nocapture"])
             .env(HELPER_MODE, mode);
         command
+    }
+
+    /// macOS reports a pid whose argument area does not exist as EINVAL, and
+    /// the scan has to skip it rather than abort: every spawn on the machine
+    /// goes through that scan.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_argument_area_is_skipped_not_fatal() {
+        assert!(process_args_unavailable(Some(libc::EINVAL)));
+        // Everything else stays fatal, so a broken scan is still loud.
+        assert!(!process_args_unavailable(Some(libc::EIO)));
+        assert!(!process_args_unavailable(Some(libc::EPERM)));
+        assert!(!process_args_unavailable(Some(libc::ESRCH)));
+        assert!(!process_args_unavailable(None));
     }
 
     fn temp_path(label: &str) -> PathBuf {
