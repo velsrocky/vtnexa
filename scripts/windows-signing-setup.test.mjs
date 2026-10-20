@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   CODE_SIGNING_EKU,
+  PFX_INSPECTION_SCRIPT,
   WINDOWS_SIGNING_SECRETS,
   parseArgs,
   validateCertificate,
@@ -74,6 +75,29 @@ describe("windows signing setup", () => {
           notAfter: new Date(Date.now() - 1000).toISOString(),
         }),
       /expired/,
+    );
+  });
+
+  it("reads the code-signing EKU from the extension, not EnhancedKeyUsageList", () => {
+    // On PowerShell 7 `EnhancedKeyUsageList` yields
+    // EnhancedKeyUsageRepresentation objects whose Value and Oid are empty
+    // and whose ObjectId does not exist, so reading the EKU from that
+    // property silently yields nothing and a valid PFX is rejected.
+    assert.ok(PFX_INSPECTION_SCRIPT.includes("2.5.29.37"));
+    assert.ok(PFX_INSPECTION_SCRIPT.includes("EnhancedKeyUsages"));
+    assert.ok(
+      !PFX_INSPECTION_SCRIPT.includes("EnhancedKeyUsageList"),
+      "must not read the EKU from EnhancedKeyUsageList",
+    );
+    assert.ok(
+      !PFX_INSPECTION_SCRIPT.includes("ObjectId.Value"),
+      "must not read the EKU through ObjectId.Value",
+    );
+    // A `#` comment inside the `;`-joined command string comments out the
+    // rest of the script.
+    assert.ok(
+      !PFX_INSPECTION_SCRIPT.includes("#"),
+      "the joined command string must not contain comments",
     );
   });
 });
