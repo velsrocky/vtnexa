@@ -889,7 +889,12 @@ fn read_macos_process_args_with(pid: libc::pid_t, soft: bool) -> io::Result<Vec<
     if length == 0 || length > MAX_PROCESS_ARGS_BYTES as libc::size_t {
         return Err(io::Error::other("process arguments exceed cleanup bound"));
     }
-    let mut data = vec![0u8; length as usize];
+    // The size macOS reports is a lower bound: the argument area grows when
+    // the process touches its environment, and the kernel writes only what
+    // fits. A buffer sized exactly to the reported length therefore comes
+    // back truncated, with the executable path unterminated. Leaving room
+    // is the standard workaround.
+    let mut data = vec![0u8; (length as usize).saturating_add(4096)];
     let mut actual = length;
     let read = unsafe {
         libc::sysctl(
@@ -1512,7 +1517,7 @@ fn capture_process_snapshot(
 static SUBREAPER_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
-static MACOS_TREE_READY: OnceLock<Result<(), String>> = OnceLock::new();
+static MACOS_TREE_READY: OnceLock<()> = OnceLock::new();
 
 #[cfg(all(
     unix,
@@ -1564,27 +1569,20 @@ fn initialize_unix_tree_ready() -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn initialize_macos_tree_ready() -> io::Result<()> {
-    clear_parent_tree_token();
-    let result = MACOS_TREE_READY.get_or_init(|| {
-        let pid = match pid_from_u32(std::process::id()) {
-            Ok(pid) => pid,
-            Err(error) => return Err(error.to_string()),
-        };
-        if let Err(error) = capture_macos_snapshot(None) {
-            return Err(error.to_string());
-        }
-        match read_macos_process_args(pid) {
-            Ok(data) => match macos_environment_offset(&data) {
-                Ok(_) => Ok(()),
-                Err(error) => Err(error.to_string()),
-            },
-            Err(error) => Err(error.to_string()),
-        }
-    });
-    match result {
-        Ok(()) => Ok(()),
-        Err(message) => Err(io::Error::other(message.clone())),
+    if MACOS_TREE_READY.get().is_some() {
+        return Ok(());
     }
+    // Only a success is cached. Caching the failure would mean that one
+    // unlucky process-table read permanently broke process spawning for
+    // the whole process - every later spawn would report the same error
+    // without ever trying again.
+    clear_parent_tree_token();
+    let pid = pid_from_u32(std::process::id())?;
+    capture_macos_snapshot(None)?;
+    let data = read_macos_process_args(pid)?;
+    macos_environment_offset(&data)?;
+    let _ = MACOS_TREE_READY.set(());
+    Ok(())
 }
 
 #[cfg(all(
