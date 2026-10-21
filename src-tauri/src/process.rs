@@ -941,7 +941,8 @@ fn read_macos_children(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
         ));
     }
     let mut children = vec![0 as libc::pid_t; count];
-    let bytes = std::mem::size_of_val(&children);
+    // Bytes, not entries: size_of_val on the Vec is the Vec struct size.
+    let bytes = std::mem::size_of_val(children.as_slice());
     let got = unsafe {
         libc::proc_listchildpids(
             pid,
@@ -1005,7 +1006,10 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
         .min(MAX_PROCESS_TABLE);
     let (pids, got) = loop {
         let mut pids = vec![0 as libc::pid_t; capacity];
-        let bytes = std::mem::size_of_val(&pids);
+        // The buffer size is in bytes, not entries: size_of_val on the Vec
+        // itself is the size of the Vec struct, which made every scan see
+        // only the first six processes.
+        let bytes = std::mem::size_of_val(pids.as_slice());
         let got = unsafe {
             libc::proc_listallpids(pids.as_mut_ptr() as *mut libc::c_void, bytes as libc::c_int)
         };
@@ -2756,8 +2760,25 @@ mod tests {
         let pid = pid_from_u32(std::process::id()).unwrap();
         let record = read_process_record(pid).unwrap();
         assert_eq!(record.identity.pid, pid);
+        // List the table independently so the scan can be checked against it.
+        // A buffer sized in bytes rather than entries used to cap the scan at
+        // six processes, and checking only the self pid missed that whenever
+        // the test process happened to be among the first six.
+        let mut raw = vec![0 as libc::pid_t; MAX_PROCESS_TABLE];
+        let raw_bytes = std::mem::size_of_val(raw.as_slice()) as libc::c_int;
+        let raw_got =
+            unsafe { libc::proc_listallpids(raw.as_mut_ptr() as *mut libc::c_void, raw_bytes) };
+        assert!(raw_got > 0, "the process table could not be listed");
+        let listed = raw_got as usize;
         let snapshot = capture_macos_snapshot(None).unwrap();
         assert!(snapshot.records.contains_key(&pid));
+        // Processes can exit between the two reads, but the scan must see the
+        // bulk of the table, not a truncated prefix of it.
+        assert!(
+            snapshot.records.len() * 2 >= listed,
+            "snapshot captured {} of {listed} listed processes",
+            snapshot.records.len()
+        );
     }
 
     #[cfg(target_os = "macos")]
