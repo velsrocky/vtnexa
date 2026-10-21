@@ -1,0 +1,11 @@
+[advisories]
+# Reviewed exceptions. Everything not listed here fails `cargo audit`.
+ignore = [
+  # tauri-plugin-updater 2.x pins zip ^4; the fixes exist only in zip 9.x.
+  # Update archives are signature-verified against the configured updater
+  # pubkey before extraction, so a malicious archive requires the signing key.
+  # Revisit when tauri-plugin-updater supports a patched zip release.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
+]

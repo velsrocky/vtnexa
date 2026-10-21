@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useProvider } from "./useProvider";
+import { resetLegacyScrubForTests } from "../lib/providerHistory";
 import { newWorkspace } from "../lib/utils";
 import type { Workspace } from "../types";
 
@@ -34,12 +35,14 @@ async function advance(ms: number) {
 
 beforeEach(() => {
   localStorage.clear();
+  resetLegacyScrubForTests();
 });
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   localStorage.clear();
+  resetLegacyScrubForTests();
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
 
@@ -92,21 +95,55 @@ describe("useProvider keychain", () => {
     expect(keySets).toContainEqual(
       expect.objectContaining({ baseUrl: "http://localhost:11434/v1", secret: "PLAIN" }),
     );
-    expect(result.current.provHist[0].apiKey).toBe("");
+    expect(result.current.provHist[0]).toEqual({
+      baseUrl: "http://localhost:11434/v1",
+      model: "qwen2.5-coder:7b",
+      kind: "auto",
+    });
+    expect(localStorage.getItem("vtai.providerHistory") ?? "").not.toContain("PLAIN");
   });
 
-  it("falls back to local storage without a credential store", async () => {
+  it("marks the keychain unavailable without persisting typed keys", async () => {
     vi.useFakeTimers();
     setInvokeImpl(async (cmd) => {
       if (cmd === "key_get") throw new Error("no daemon");
       if (cmd === "key_set") throw new Error("no daemon");
       return {};
     });
-    const { result } = setup();
+    const { result, wsOf } = setup();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600);
     });
     expect(result.current.keychainOk).toBe(false);
+    act(() => {
+      result.current.setEditCfg({ apiKey: "K-SESSION" });
+    });
+    await advance(300);
+    expect(wsOf().provider.apiKey).toBe("K-SESSION");
+    expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain("K-SESSION");
+    expect(localStorage.getItem("vtai.providerHistory") ?? "").not.toContain("K-SESSION");
+  });
+
+  it("keeps a legacy plaintext key in memory for the session when no keychain exists", async () => {
+    vi.useFakeTimers();
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "key_get" || cmd === "key_set") throw new Error("no daemon");
+      return {};
+    });
+    localStorage.setItem(
+      "vtai.providerHistory",
+      JSON.stringify([
+        { baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder:7b", apiKey: "LEGACY", kind: "auto" },
+      ]),
+    );
+    const { result, wsOf } = setup();
+    expect(localStorage.getItem("vtai.providerHistory") ?? "").not.toContain("LEGACY");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(result.current.keychainOk).toBe(false);
+    expect(wsOf().provider.apiKey).toBe("LEGACY");
+    expect(localStorage.getItem("vtai.providerHistory") ?? "").not.toContain("LEGACY");
   });
 
   it("rememberProvider records a keyless entry and mirrors the key", async () => {
@@ -125,7 +162,7 @@ describe("useProvider keychain", () => {
       await Promise.resolve();
     });
     expect(keySets).toEqual([{ baseUrl: "https://x.test", model: "m", secret: "S" }]);
-    expect(result.current.provHist[0]).toMatchObject({ baseUrl: "https://x.test", apiKey: "" });
+    expect(result.current.provHist[0]).toEqual({ baseUrl: "https://x.test", model: "m", kind: "auto" });
     const saved = JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]");
     expect(saved[0].baseUrl).toBe("https://x.test");
     expect(JSON.stringify(saved)).not.toContain("S");
@@ -133,7 +170,7 @@ describe("useProvider keychain", () => {
 });
 
 describe("useProvider key loss", () => {
-  it("stale empty turn-end mirrors never delete the saved key", () => {
+  it("stale empty turn-end mirrors never write an empty key", () => {
     const keySets: any[] = [];
     setInvokeImpl(async (cmd, args?: any) => {
       if (cmd === "key_set") {
@@ -153,9 +190,8 @@ describe("useProvider key loss", () => {
       result.current.rememberProvider({ baseUrl: "https://a.test", model: "m", apiKey: "", kind: "auto" });
     });
     expect(keySets).toEqual([]);
-    expect(result.current.provHist).toEqual([
-      { baseUrl: "https://a.test", model: "m", apiKey: "K", kind: "auto" },
-    ]);
+    expect(result.current.provHist).toEqual([{ baseUrl: "https://a.test", model: "m", kind: "auto" }]);
+    expect(localStorage.getItem("vtai.providerHistory") ?? "").not.toContain('"K"');
   });
 
   it("explicit clears cancel pending writes and persist only the deletion", async () => {
@@ -196,10 +232,14 @@ describe("useProvider key loss", () => {
         secret: "",
       },
     ]);
-    expect(result.current.provHist[0]).toMatchObject({ apiKey: "" });
+    expect(result.current.provHist[0]).toEqual({
+      baseUrl: "http://localhost:11434/v1",
+      model: "qwen2.5-coder:7b",
+      kind: "auto",
+    });
   });
 
-  it("survives endpoint flips without a keychain via per-pair backups", async () => {
+  it("keeps per-pair keys in memory for the session when no keychain exists", async () => {
     vi.useFakeTimers();
     setInvokeImpl(async (cmd) => {
       if (cmd === "key_get") throw new Error("no daemon");
@@ -257,7 +297,7 @@ describe("useProvider.refreshModels", () => {
 });
 
 describe("useProvider draft persistence", () => {
-  it("keeps the key in the local draft when no keychain exists, and refills it on reload", async () => {
+  it("keeps the key in memory but never on disk; a restart requires re-entry", async () => {
     vi.useFakeTimers();
     setInvokeImpl(async (cmd) => {
       if (cmd === "key_get" || cmd === "key_set") throw new Error("no daemon");
@@ -270,10 +310,12 @@ describe("useProvider draft persistence", () => {
     });
     expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain("sk-local");
     await advance(300);
+    expect(h1.wsOf().provider.apiKey).toBe("sk-local");
     const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}");
-    expect(Object.values(draft)[0]).toMatchObject({ apiKey: "sk-local" });
+    expect(Object.values(draft)[0]).not.toHaveProperty("apiKey");
+    expect(JSON.stringify(draft)).not.toContain("sk-local");
 
-    // Simulate restart: fresh window, session-stripped key, no keychain.
+    // Simulate restart: a fresh window has no key and no disk copy to refill.
     let ws2: Workspace = newWorkspace("main:ws", "/w", {
       baseUrl: "http://localhost:11434/v1",
       apiKey: "",
@@ -284,7 +326,7 @@ describe("useProvider draft persistence", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(600);
     });
-    expect(ws2.provider.apiKey).toBe("sk-local");
+    expect(ws2.provider.apiKey).toBe("");
   });
 
   it("does not duplicate the key into the draft when the keychain works", async () => {
@@ -304,7 +346,7 @@ describe("useProvider draft persistence", () => {
     expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain("typed");
     await advance(300);
     const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}");
-    expect(Object.values(draft)[0]).toMatchObject({ apiKey: "" });
+    expect(Object.values(draft)[0]).not.toHaveProperty("apiKey");
     expect(JSON.stringify(draft)).not.toContain("typed");
     void wsOf;
   });
@@ -377,7 +419,7 @@ describe("useProvider key mirroring", () => {
 });
 
 describe("useProvider credential persistence", () => {
-  it("purges confirmed key material from the draft and matching history pair", async () => {
+  it("never leaves key material in storage, including legacy plaintext", async () => {
     vi.useFakeTimers();
     const baseUrl = "http://localhost:11434/v1";
     const model = "qwen2.5-coder:7b";
@@ -404,6 +446,11 @@ describe("useProvider credential persistence", () => {
       return "";
     });
     const { result, wsOf } = setup();
+    // The mount scrub removes every legacy plaintext secret before any dialog.
+    for (const secret of ["OLD-HISTORY", "OTHER-HISTORY", "OLD-DRAFT", "OTHER-DRAFT"]) {
+      expect(localStorage.getItem("vtai.providerHistory") ?? "").not.toContain(secret);
+      expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain(secret);
+    }
     act(() => {
       result.current.setEditCfg({ apiKey: "CONFIRMED" });
     });
@@ -414,20 +461,19 @@ describe("useProvider credential persistence", () => {
     expect(wsOf().provider.apiKey).toBe("CONFIRMED");
     const history = JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]");
     const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}").main;
-    expect(history[0]).toMatchObject({ baseUrl, model, apiKey: "" });
-    expect(history[1].apiKey).toBe("OTHER-HISTORY");
-    expect(draft.apiKey).toBe("");
-    expect(draft.keys).toEqual({ "https://other.test|other": "OTHER-DRAFT" });
+    expect(history[0]).toEqual({ baseUrl, model, kind: "auto" });
+    expect(history[1]).toEqual({ baseUrl: "https://other.test", model: "other", kind: "auto" });
+    expect(draft).toEqual({ baseUrl, model, kind: "auto" });
   });
 
-  it("persists a fallback only after the keySet fails", async () => {
+  it("never persists a fallback when the keySet fails", async () => {
     vi.useFakeTimers();
     const write = deferred<void>();
     setInvokeImpl(async (cmd) => {
       if (cmd === "key_set") return write.promise;
       throw new Error("no daemon");
     });
-    const { result } = setup();
+    const { result, wsOf } = setup();
     act(() => {
       result.current.setEditCfg({ apiKey: "FALLBACK" });
     });
@@ -440,7 +486,9 @@ describe("useProvider credential persistence", () => {
       await Promise.resolve();
     });
     expect(result.current.keychainOk).toBe(false);
-    expect(localStorage.getItem("vtai.providerDraft") ?? "").toContain("FALLBACK");
+    expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain("FALLBACK");
+    expect(localStorage.getItem("vtai.providerHistory") ?? "").not.toContain("FALLBACK");
+    expect(wsOf().provider.apiKey).toBe("FALLBACK");
   });
 
   it("serializes rapid writes so the latest value is last", async () => {
@@ -525,9 +573,15 @@ describe("useProvider credential persistence", () => {
       result.current.setEditCfg({ apiKey: "" });
     });
     expect(writes).toHaveLength(1);
-    expect(JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]")[0].apiKey).toBe("");
-    expect(JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}").main.keys).toEqual({
-      "https://other.test|other": "OTHER-DRAFT",
+    expect(JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]")[0]).toEqual({
+      baseUrl,
+      model,
+      kind: "auto",
+    });
+    expect(JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}").main).toEqual({
+      baseUrl,
+      model,
+      kind: "auto",
     });
     await act(async () => {
       writes[0].gate.resolve(undefined);
@@ -541,10 +595,14 @@ describe("useProvider credential persistence", () => {
       await Promise.resolve();
     });
     expect(stored).toBe("");
-    expect(JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]")[1].apiKey).toBe("OTHER-HISTORY");
+    expect(JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]")[1]).toEqual({
+      baseUrl: "https://other.test",
+      model: "other",
+      kind: "auto",
+    });
   });
 
-  it("purges successful migration pairs and retains only failed plaintext", async () => {
+  it("scrubs all legacy plaintext even when keychain migration fails", async () => {
     vi.useFakeTimers();
     const current = { baseUrl: "https://failed.test", model: "m" };
     const migrated = { baseUrl: "https://ok.test", model: "m" };
@@ -593,11 +651,14 @@ describe("useProvider credential persistence", () => {
     ]);
     const history = JSON.parse(localStorage.getItem("vtai.providerHistory") ?? "[]");
     const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}").main;
-    expect(history[0].apiKey).toBe("");
-    expect(history[1].apiKey).toBe("FAILED-HISTORY");
-    expect(draft.apiKey).toBe("FAILED-DRAFT");
-    expect(draft.keys).toEqual({ [`${current.baseUrl}|${current.model}`]: "FAILED-DRAFT" });
+    expect(history[0]).toEqual({ baseUrl: migrated.baseUrl, model: "m", kind: "auto" });
+    expect(history[1]).toEqual({ baseUrl: current.baseUrl, model: "m", kind: "auto" });
+    expect(draft).toEqual({ baseUrl: current.baseUrl, model: "m", kind: "auto" });
     expect(result.current.keychainOk).toBe(false);
+    for (const secret of ["MIGRATED-HISTORY", "FAILED-HISTORY", "FAILED-DRAFT", "MIGRATED-DRAFT", "DRAFT-ONLY"]) {
+      expect(localStorage.getItem("vtai.providerHistory") ?? "").not.toContain(secret);
+      expect(localStorage.getItem("vtai.providerDraft") ?? "").not.toContain(secret);
+    }
   });
 
   it("ignores a keychain result that resolves after an endpoint switch", async () => {
@@ -654,7 +715,8 @@ describe("useProvider credential persistence", () => {
       await Promise.resolve();
     });
     const draft = JSON.parse(localStorage.getItem("vtai.providerDraft") ?? "{}").main;
-    expect(draft.apiKey).toBe("OLD-DRAFT");
-    expect(draft.keys).toEqual({ [`${baseUrl}|${model}`]: "OLD-DRAFT" });
+    expect(draft).toEqual({ baseUrl, model, kind: "auto" });
+    expect(JSON.stringify(draft)).not.toContain("UNMOUNTED");
+    expect(JSON.stringify(draft)).not.toContain("OLD-DRAFT");
   });
 });
