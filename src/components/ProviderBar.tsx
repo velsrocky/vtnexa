@@ -67,13 +67,13 @@ function ProviderBarInner() {
           keychainOk
             ? "Stored in your OS keychain, auto-filled per endpoint+model"
             : keychainOk === false
-              ? "No OS keychain detected - key is kept locally for this setup"
+              ? "No OS keychain detected - key stays in memory for this session only (never written to disk)"
               : "apiKey (optional)"
         }
       />
       {keychainOk === false && (
-        <span className="muted small" title="Install a Secret Service provider (e.g. gnome-keyring) for OS-keychain storage">
-          keys stored locally
+        <span className="muted small" title="Install a Secret Service provider (e.g. gnome-keyring) for OS-keychain storage. Until then keys are not persisted and must be re-entered after restart.">
+          session-only key
         </span>
       )}
     </div>

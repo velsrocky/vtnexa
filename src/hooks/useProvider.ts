@@ -8,14 +8,12 @@ import {
   isPairCleared,
   loadDrafts,
   loadHist,
-  lookupDraftKey,
   markPairCleared,
   saveDrafts,
   saveHist,
-  setDraftKey,
-  stripDraftPair,
-  stripHistoryKey,
+  takeLegacySecrets,
   unmarkPairCleared,
+  type LegacySecret,
   type ProviderEntry,
 } from "../lib/providerHistory";
 
@@ -30,8 +28,6 @@ interface CredentialIntent {
   model: string;
   secret: string;
 }
-
-type MigrationCandidate = CredentialIntent;
 
 function pairOf(baseUrl: string, model: string): string {
   return draftPairKey(baseUrl, model);
@@ -62,6 +58,11 @@ export function useProvider(opts: {
   const probeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const probeGenerationRef = useRef(0);
   const migrationRunningRef = useRef(false);
+  // Secrets typed (or migrated from legacy plaintext) in this window. Kept in
+  // memory only: switching endpoint pairs must not lose a fresh key, but a
+  // restart must. Never mirrored to localStorage.
+  const sessionKeysRef = useRef(new Map<string, string>());
+  const legacySecretsRef = useRef<LegacySecret[]>([]);
 
   updateWsRef.current = opts.updateWs;
   activeProviderRef.current = opts.ws.provider;
@@ -80,13 +81,9 @@ export function useProvider(opts: {
   }
 
   function purgePairPersistence(baseUrl: string, model: string): void {
-    const drafts = loadDrafts();
-    const nextDrafts = stripDraftPair(drafts, windowLabel, baseUrl, model);
-    if (nextDrafts !== drafts) saveDrafts(nextDrafts);
-    const nextHist = stripHistoryKey(histRef.current, baseUrl, model);
-    if (nextHist.some((entry, index) => entry.apiKey !== histRef.current[index]?.apiKey)) {
-      commitHist(nextHist);
-    }
+    // Secrets are never written to history/drafts, so clearing a pair only
+    // needs to drop its in-memory copy. Legacy plaintext was scrubbed on mount.
+    sessionKeysRef.current.delete(pairOf(baseUrl, model));
   }
 
   function applyFallback(baseUrl: string, model: string): void {
@@ -97,7 +94,7 @@ export function useProvider(opts: {
     setKeychainOk(false);
     const pair = pairOf(baseUrl, model);
     if (isPairCleared(pair)) return;
-    const key = lookupDraftKey(loadDrafts(), windowLabel, baseUrl, model);
+    const key = sessionKeysRef.current.get(pair) ?? "";
     if (!key) return;
     updateWsRef.current((workspace) =>
       workspace.provider.baseUrl === baseUrl &&
@@ -108,29 +105,8 @@ export function useProvider(opts: {
     );
   }
 
-  function persistFallback(intent: CredentialIntent): void {
-    if (!mountedRef.current || !isCurrentIntent(intent)) return;
-    if (intent.secret) {
-      const drafts = loadDrafts();
-      saveDrafts(setDraftKey(drafts, windowLabel, intent.baseUrl, intent.model, intent.secret));
-      const nextHist = histRef.current.map((entry) =>
-        entry.baseUrl.trim() === intent.baseUrl.trim() && entry.model.trim() === intent.model.trim()
-          ? { ...entry, apiKey: intent.secret }
-          : entry,
-      );
-      if (nextHist.some((entry, index) => entry.apiKey !== histRef.current[index]?.apiKey)) {
-        commitHist(nextHist);
-      }
-    }
-    if (pairOf(activeProviderRef.current.baseUrl, activeProviderRef.current.model) === pairOf(intent.baseUrl, intent.model)) {
-      applyFallback(intent.baseUrl, intent.model);
-    }
-  }
-
   function handleWriteSuccess(intent: CredentialIntent): void {
-    if (!mountedRef.current) return;
-    purgePairPersistence(intent.baseUrl, intent.model);
-    if (!isCurrentIntent(intent)) return;
+    if (!mountedRef.current || !isCurrentIntent(intent)) return;
     if (intent.secret === "") unmarkPairCleared(pairOf(intent.baseUrl, intent.model));
     if (pairOf(activeProviderRef.current.baseUrl, activeProviderRef.current.model) === pairOf(intent.baseUrl, intent.model)) {
       setKeychainOk(true);
@@ -139,7 +115,9 @@ export function useProvider(opts: {
 
   function handleWriteFailure(intent: CredentialIntent): void {
     if (!mountedRef.current || !isCurrentIntent(intent)) return;
-    persistFallback(intent);
+    // No keychain means no persistence. The key stays in this window's
+    // session map so endpoint switches still work until the app restarts.
+    applyFallback(intent.baseUrl, intent.model);
   }
 
   function enqueueCredential<T>(operation: () => Promise<T>): Promise<T> {
@@ -192,68 +170,38 @@ export function useProvider(opts: {
     return intent;
   }
 
-  function addMigrationCandidate(
-    candidates: Map<string, MigrationCandidate>,
-    baseUrl: string,
-    model: string,
-    secret: string,
-  ): void {
-    if (!baseUrl.trim() || !model.trim() || !secret) return;
-    candidates.set(pairOf(baseUrl, model), {
-      version: intentsRef.current.get(pairOf(baseUrl, model))?.version ?? 0,
-      baseUrl,
-      model,
-      secret,
-    });
-  }
-
   async function migratePlaintextCredentials(): Promise<void> {
     if (migrationRunningRef.current || !mountedRef.current) return;
+    const candidates = legacySecretsRef.current;
+    if (!candidates.length) return;
     migrationRunningRef.current = true;
     try {
-      const candidates = new Map<string, MigrationCandidate>();
-      for (const entry of loadHist()) {
-        addMigrationCandidate(candidates, entry.baseUrl, entry.model, entry.apiKey);
-      }
-      const drafts = loadDrafts();
-      const slot = drafts[windowLabel];
-      if (slot) {
-        addMigrationCandidate(candidates, slot.baseUrl, slot.model, slot.apiKey);
-        for (const [pair, secret] of Object.entries(slot.keys ?? {})) {
-          const separator = pair.lastIndexOf("|");
-          if (separator > 0 && separator < pair.length - 1) {
-            addMigrationCandidate(candidates, pair.slice(0, separator), pair.slice(separator + 1), secret);
-          }
-        }
-      }
-      for (const candidate of candidates.values()) {
+      for (const candidate of candidates) {
         if (!mountedRef.current) break;
         const pair = pairOf(candidate.baseUrl, candidate.model);
         const version = intentsRef.current.get(pair)?.version ?? 0;
         try {
-          const migrated = await enqueueCredential(async () => {
-            if (!mountedRef.current) return false;
-            if ((intentsRef.current.get(pair)?.version ?? 0) !== version) return false;
+          await enqueueCredential(async () => {
+            if (!mountedRef.current) return;
+            if ((intentsRef.current.get(pair)?.version ?? 0) !== version) return;
             await keySet(candidate.baseUrl, candidate.model, candidate.secret);
-            return true;
           });
-          const stillCurrent = (intentsRef.current.get(pair)?.version ?? 0) === version;
-          if (migrated && stillCurrent && mountedRef.current) {
-            purgePairPersistence(candidate.baseUrl, candidate.model);
-          }
         } catch {
-          if (stillCurrentVersion(candidate, version)) {
-            applyFallback(candidate.baseUrl, candidate.model);
+          // No keychain: storage was already scrubbed, and the secret stays
+          // in this window's session map (seeded on mount) until restart.
+          if (
+            mountedRef.current &&
+            (intentsRef.current.get(pair)?.version ?? 0) === version &&
+            pairOf(activeProviderRef.current.baseUrl, activeProviderRef.current.model) === pair
+          ) {
+            setKeychainOk(false);
           }
         }
       }
     } finally {
+      legacySecretsRef.current = [];
       migrationRunningRef.current = false;
     }
-  }
-
-  function stillCurrentVersion(candidate: MigrationCandidate, version: number): boolean {
-    return (intentsRef.current.get(pairOf(candidate.baseUrl, candidate.model))?.version ?? 0) === version;
   }
 
   enqueueCredentialRef.current = enqueueCredential;
@@ -263,6 +211,13 @@ export function useProvider(opts: {
   useEffect(() => {
     const pendingWrites = pendingWritesRef.current;
     mountedRef.current = true;
+    // One-time upgrade path: move any plaintext keys from older builds into
+    // memory, then scrub storage immediately. Migration to the keychain runs
+    // only after a successful keychain probe.
+    legacySecretsRef.current = takeLegacySecrets();
+    for (const secret of legacySecretsRef.current) {
+      sessionKeysRef.current.set(pairOf(secret.baseUrl, secret.model), secret.secret);
+    }
     return () => {
       mountedRef.current = false;
       probeGenerationRef.current += 1;
@@ -284,7 +239,11 @@ export function useProvider(opts: {
     }
     opts.updateWs((workspace) => {
       const updated = { ...workspace.provider, ...patch };
-      if (("baseUrl" in patch || "model" in patch) && !("apiKey" in patch)) updated.apiKey = "";
+      if (("baseUrl" in patch || "model" in patch) && !("apiKey" in patch)) {
+        // Keys are never persisted, but switching pairs inside one session
+        // should not lose a key that is still in memory.
+        updated.apiKey = sessionKeysRef.current.get(nextPair) ?? "";
+      }
       return { ...workspace, provider: updated };
     });
 
@@ -295,6 +254,11 @@ export function useProvider(opts: {
     const secret = patch.apiKey;
     const pair = pairOf(baseUrl, model);
     const validPair = !!baseUrl.trim() && !!model.trim();
+
+    if (validPair) {
+      if (secret) sessionKeysRef.current.set(pair, secret);
+      else sessionKeysRef.current.delete(pair);
+    }
 
     if (!validPair) {
       if (secret === "") {
@@ -325,36 +289,16 @@ export function useProvider(opts: {
   useEffect(() => {
     try {
       const all = loadDrafts();
-      const previous = all[windowLabel];
-      const pair = pairOf(draftProvider.baseUrl, draftProvider.model);
-      const previousPair = previous ? pairOf(previous.baseUrl, previous.model) : "";
-      const keys = { ...(previous?.keys ?? {}) };
-      let persistedKey = previousPair === pair ? previous.apiKey : (keys[pair] ?? "");
-
-      if (isPairCleared(pair)) {
-        delete keys[pair];
-        persistedKey = "";
-      } else if (keychainOk === false) {
-        if (draftProvider.apiKey) {
-          keys[pair] = draftProvider.apiKey;
-          persistedKey = draftProvider.apiKey;
-        } else {
-          persistedKey = keys[pair] ?? "";
-        }
-      }
-
       all[windowLabel] = {
         baseUrl: draftProvider.baseUrl,
         model: draftProvider.model,
         kind: draftProvider.kind ?? "auto",
-        apiKey: persistedKey,
-        keys,
       };
       saveDrafts(all);
     } catch {
       return;
     }
-  }, [draftProvider, keychainOk]);
+  }, [draftProvider.baseUrl, draftProvider.model, draftProvider.kind]);
 
   const baseUrl = opts.ws.provider.baseUrl;
   const model = opts.ws.provider.model;
@@ -378,6 +322,7 @@ export function useProvider(opts: {
           }
           setKeychainOk(true);
           if (key && !isPairCleared(pair)) {
+            sessionKeysRef.current.set(pair, key);
             updateWsRef.current((workspace) =>
               workspace.provider.baseUrl === baseUrl &&
               workspace.provider.model === model &&
@@ -414,11 +359,11 @@ export function useProvider(opts: {
       if (intentsRef.current.get(pair)?.secret === "") unmarkPairCleared(pair);
       return;
     }
+    sessionKeysRef.current.set(pair, used.apiKey);
 
     const entry: ProviderEntry = {
       baseUrl: used.baseUrl,
       model: used.model,
-      apiKey: "",
       kind: used.kind ?? "auto",
     };
     commitHist([
