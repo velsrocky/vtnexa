@@ -36,7 +36,7 @@ portable-pty = "0.9"
 reqwest = { version = "0.13.5", features = ["json"] }
 tokio = { version = "1", features = ["time"] }
 tauri-plugin-updater = "2"
-getrandom = "0.3"
+getrandom = "0.4"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
