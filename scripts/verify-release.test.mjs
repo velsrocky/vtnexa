@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { verifyReleaseDirectory, verifyReleaseManifest } from "./verify-release.mjs";
+import { verifyReleaseDirectory, verifyReleaseManifest, verifyUpdaterArtifact } from "./verify-release.mjs";
 
 const execFileAsync = promisify(execFile);
 const tauriCli = fileURLToPath(new URL("../node_modules/@tauri-apps/cli/tauri.js", import.meta.url));
@@ -159,6 +159,12 @@ after(async () => {
 });
 
 describe("release artifact verifier", () => {
+  it("verifies a single updater artifact and refuses modified bytes", () => {
+    const bytes = artifacts.get(linuxAsset);
+    const signature = trustedSignatures.get(linuxAsset).toString("utf8");
+    assert.equal(verifyUpdaterArtifact(bytes, signature, trustedPublicKey), true);
+    assert.throws(() => verifyUpdaterArtifact(Buffer.concat([bytes, Buffer.from("changed")]), signature, trustedPublicKey), /verification failed/);
+  });
   it("accepts artifacts signed by a real temporary minisign keypair", () => {
     const result = verify();
     assert.deepEqual(result.windowsInstallers, [windowsAsset, msiAsset]);

@@ -35,7 +35,7 @@ function setup(initial?: Partial<Workspace>) {
       note: vi.fn(),
     }),
   );
-  return { ...hook, wsOf: () => ws };
+  return { ...hook, wsOf: () => ws, replaceWorkspace: (next: Workspace) => { ws = next; hook.rerender(); } };
 }
 
 const META = [
@@ -44,6 +44,13 @@ const META = [
 ];
 
 describe("useSessions boot", () => {
+  it("does not carry editor buffers or undo history into another workspace", async () => {
+    setInvokeImpl(async (command) => { if (command === "sessions_list") return "[]"; throw new Error(command); });
+    const h = setup({ tabs: ["/w/secret.txt"], buffers: { "/w/secret.txt": "unsaved" }, originals: { "/w/secret.txt": "old" }, openPath: "/w/secret.txt", chatDraft: "old draft", undoStack: [{ kind: "delete", path: "/w/a", content: "old" }] });
+    await act(async () => { await h.result.current.bootFresh("/other", "/other"); });
+    expect(h.wsOf()).toMatchObject({ cwd: "/other", tabs: [], buffers: {}, originals: {}, openPath: "", chatDraft: "" });
+    expect(h.wsOf().undoStack ?? []).toEqual([]);
+  });
   it("always starts fresh and lists previous sessions newest-first", async () => {
     setInvokeImpl(async (cmd) => {
       if (cmd === "sessions_list") return JSON.stringify(META);
@@ -63,6 +70,57 @@ describe("useSessions boot", () => {
 });
 
 describe("useSessions.persistCurrent", () => {
+  it("serializes concurrent saves so an older snapshot cannot overwrite the latest", async () => {
+    let release: () => void = () => undefined;
+    const firstWrite = new Promise<void>((resolve) => { release = resolve; });
+    const disk: string[] = [];
+    let calls = 0;
+    setInvokeImpl(async (command, args) => {
+      if (command === "sessions_list") return "[]";
+      if (command === "session_put") {
+        if (++calls === 1) await firstWrite;
+        disk.push(JSON.parse(args.content).workspace.chatDraft);
+        return {};
+      }
+      throw new Error(command);
+    });
+    const h = setup();
+    await act(async () => { await h.result.current.bootFresh("/w", "/w"); });
+    await act(async () => {
+      const first = h.result.current.persistCurrent({ ...h.wsOf(), chatDraft: "old" });
+      const second = h.result.current.persistCurrent({ ...h.wsOf(), chatDraft: "latest" });
+      await Promise.resolve();
+      expect(calls).toBe(1);
+      release();
+      await Promise.all([first, second]);
+    });
+    expect(disk).toEqual(["old", "latest"]);
+  });
+  it("saves editor-only work and refuses switching when that save fails", async () => {
+    const writes: any[] = [];
+    let fail = false;
+    setInvokeImpl(async (cmd, args?: any) => {
+      if (cmd === "sessions_list") return "[]";
+      if (cmd === "session_put") {
+        if (fail) throw new Error("session too large");
+        writes.push(JSON.parse(args.content));
+        return {};
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const content = "x".repeat(80_000) + "END";
+    const h = setup({ tabs: ["/w/edit.txt"], buffers: { "/w/edit.txt": content }, originals: { "/w/edit.txt": "old" } });
+    await act(async () => { await h.result.current.bootFresh("/w", "/w"); });
+    act(() => h.replaceWorkspace({ ...h.wsOf(), tabs: ["/w/edit.txt"], buffers: { "/w/edit.txt": content }, originals: { "/w/edit.txt": "old" } }));
+    await act(async () => { expect(await h.result.current.persistCurrent()).toBe(true); });
+    expect(writes[writes.length - 1].workspace.buffers["/w/edit.txt"]).toBe(content);
+    const id = h.result.current.currentId;
+    fail = true;
+    await act(async () => { expect(await h.result.current.newSession()).toBe(false); });
+    expect(h.result.current.currentId).toBe(id);
+    expect(h.wsOf().buffers["/w/edit.txt"]).toBe(content);
+    expect(h.result.current.operation.status).toBe("error");
+  });
   it("skips empty sessions and strips nothing else", async () => {
     const puts: any[] = [];
     setInvokeImpl(async (cmd, args?: any) => {

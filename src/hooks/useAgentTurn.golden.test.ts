@@ -65,6 +65,7 @@ function stubRafSync() {
 
 function setupGolden() {
   let ws: Workspace = newWorkspace("main:ws", "/w");
+  ws = { ...ws, provider: { ...ws.provider, kind: "openai" } };
   const audits: any[] = [];
   const centerTabs: string[] = [];
   const invoked: string[] = [];

@@ -1,0 +1,26 @@
+{
+  "startedAt": "2026-10-29T13:28:06.416Z",
+  "scope": "production useAgentTurn prompt and orchestration + real provider + real fixture files; filesystem IPC adapter, not native GUI",
+  "provider": {
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "deepseek-r1:8b",
+    "kind": "ollama"
+  },
+  "output": "/var/folders/c7/jxg1mfsj5nq1sqv091f88kd40000gn/T/vtnexa-live-validation-NpAHvx",
+  "tasks": [
+    {
+      "name": "refactor",
+      "root": "/private/tmp/nexa-refactor-TUL0nx",
+      "model": "deepseek-r1:8b",
+      "startedAt": "2026-10-29T13:28:06.506Z",
+      "agentStatus": "error",
+      "answer": "⏹ turn stopped by user (side effects already applied are not undone)",
+      "testOutput": "✔ math.test.mjs (85.137ms)\nℹ tests 1\nℹ suites 0\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 90.308292\n",
+      "contractChecks": "public exports and error behavior passed",
+      "diff": "",
+      "passed": false,
+      "finishedAt": "2026-10-29T13:32:06.831Z"
+    }
+  ],
+  "finishedAt": "2026-10-29T13:32:06.832Z"
+}

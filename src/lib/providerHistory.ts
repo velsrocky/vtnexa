@@ -19,7 +19,7 @@ export interface ProviderEntry {
 }
 
 export function asKind(v: unknown): ProviderKind {
-  return v === "openai" || v === "anthropic" || v === "gemini" ? v : "auto";
+  return v === "openai" || v === "anthropic" || v === "gemini" || v === "ollama" ? v : "auto";
 }
 
 export function loadHist(): ProviderEntry[] {

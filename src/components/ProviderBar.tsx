@@ -26,6 +26,7 @@ function ProviderBarInner() {
           // Switching backend presets the matching baseUrl when the current
           // one is empty or a different provider's default.
           const presets: Record<string, string> = {
+            ollama: "http://localhost:11434/v1",
             anthropic: "https://api.anthropic.com",
             gemini: "https://generativelanguage.googleapis.com/v1beta",
             openai: "http://localhost:11434/v1",
@@ -37,9 +38,10 @@ function ProviderBarInner() {
             ...(kind !== "auto" && isPreset ? { baseUrl: presets[kind] } : {}),
           });
         }}
-        title="Provider API: auto-detect from baseUrl, or force OpenAI-compatible / Anthropic / Gemini"
+        title="Provider API: auto-detect from baseUrl, or choose Ollama / OpenAI-compatible / Anthropic / Gemini"
       >
         <option value="auto">auto</option>
+        <option value="ollama">ollama</option>
         <option value="openai">openai</option>
         <option value="anthropic">anthropic</option>
         <option value="gemini">gemini</option>

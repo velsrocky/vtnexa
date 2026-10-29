@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { computeHash, verifyAuditExport, type AuditEntry } from "./audit-export";
+import { auditEntries, buildAuditExport, computeHash, verifyAuditExport, type AuditEntry } from "./audit-export";
 
 const entry = (over: Partial<AuditEntry> = {}): AuditEntry => ({
   timestamp: "2026-01-01T00:00:00Z",
@@ -44,6 +44,25 @@ describe("computeHash", () => {
 });
 
 describe("verifyAuditExport", () => {
+  it("exports actual retained events and checks result/timing fields too", async () => {
+    const entries = auditEntries([{ id: "event1", ts: 1, tool: "shell_run", args: "{}", decision: "auto", ok: true, ms: 12, note: "workspace" }], "main-2");
+    const exported = await buildAuditExport(entries);
+    expect((await verifyAuditExport(exported)).valid).toBe(true);
+    const payload = JSON.parse(exported);
+    expect(payload.retention).toContain("100");
+    expect(payload.entries[0]).toMatchObject({ windowLabel: "main-2", status: "auto", ok: true, ms: 12 });
+    payload.entries[0].ok = false;
+    expect((await verifyAuditExport(JSON.stringify(payload))).valid).toBe(false);
+  });
+
+  it("rejects hash fields used to hide entries and an incorrect count", async () => {
+    const payload = JSON.parse(await buildAuditExport([entry()]));
+    payload.entries.push({ ...entry(), hash: "hidden" });
+    expect((await verifyAuditExport(JSON.stringify(payload))).valid).toBe(false);
+    payload.entries.pop();
+    payload.entryCount = 0;
+    expect((await verifyAuditExport(JSON.stringify(payload))).valid).toBe(false);
+  });
   it("accepts an untouched export", async () => {
     const entries = [entry(), entry({ tool: "git_commit", status: "approved" })];
     const res = await verifyAuditExport(wrap(entries, await computeHash(entries)));

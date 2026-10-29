@@ -59,6 +59,8 @@ function setup(opts?: {
   provHistLength?: number;
   skills?: { name: string; description: string }[];
   memoryText?: string;
+  conventions?: string;
+  conventionsName?: string;
   repoMap?: string;
   gitSnapshot?: string;
   openPath?: string;
@@ -70,6 +72,7 @@ function setup(opts?: {
 }) {
   let ws: Workspace = {
     ...newWorkspace("main:ws", "/w"),
+    provider: { ...newWorkspace("main:ws", "/w").provider, kind: "openai" },
     ...(opts?.provider ? { provider: { ...newWorkspace("main:ws", "/w").provider, ...opts.provider } } : {}),
     ...(opts?.history ? { messages: opts.history } : {}),
   };
@@ -95,8 +98,8 @@ function setup(opts?: {
     useAgentTurn({
       ws,
       workspaceRoot: "/w",
-      conventions: "",
-      conventionsName: "",
+      conventions: opts?.conventions ?? "",
+      conventionsName: opts?.conventionsName ?? "",
       skills: opts?.skills ?? [],
       provHistLength: opts?.provHistLength ?? 1,
       memoryText: opts?.memoryText,
@@ -214,6 +217,14 @@ describe("useAgentTurn plain turns", () => {
     expect(last.content).toMatch(/provider error/);
     expect(h.agentStates[h.agentStates.length - 1]).toBe("error");
   });
+  it("marks an unverified completion as an error rather than a successful turn", async () => {
+    stubFetch(() => openAIText("Done.\n\n[No workspace tools ran. Requested changes and test results are unverified.]"));
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup();
+    await act(async () => { await h.result.current.runAgentTurn("go"); });
+    expect(h.agentStates[h.agentStates.length - 1]).toBe("error");
+  });
 });
 
 describe("useAgentTurn stop", () => {
@@ -244,10 +255,35 @@ describe("useAgentTurn stop", () => {
     const last = h.wsOf().messages[h.wsOf().messages.length - 1];
     expect(last.content).toMatch(/turn stopped/);
     expect(h.turnAbort.current).toBeNull();
+    expect(h.agentStates).toEqual(["pending", "error"]);
   });
 });
 
 describe("useAgentTurn context packing", () => {
+  it("keeps native Ollama instructions consistent with its action protocol and retains project context", async () => {
+    let sys = "";
+    stubFetch((_url, init: any) => {
+      sys = JSON.parse(init.body).messages[0].content;
+      return Response.json({ message: { content: JSON.stringify({ answer: "Hello." }) }, done: true });
+    });
+    stubRafSync();
+    setInvokeImpl(async () => ({}));
+    const h = setup({
+      provider: { baseUrl: "http://localhost:11434/v1", model: "qwen2.5-coder:7b", kind: "ollama" },
+      memoryText: "Decided: use pnpm.", repoMap: "src/math.mjs", conventions: "Keep exports stable.", conventionsName: "AGENTS.md",
+      planMode: true,
+    });
+    await act(async () => { await h.result.current.runAgentTurn("hello"); });
+    expect(sys).toContain("{tool, arguments}");
+    expect(sys).not.toContain("real tool_call");
+    expect(sys).toContain("PLAN MODE");
+    expect(sys).toContain("Decided: use pnpm.");
+    expect(sys).toContain("src/math.mjs");
+    expect(sys).toContain("Keep exports stable.");
+    expect(sys).toContain("Passing existing tests alone does not prove");
+    expect(h.agentStates).toEqual(["pending", "success"]);
+  });
+
   it("packs contract, clarify rule, memory, repo map, git and open file into the system prompt", async () => {
     let sys = "";
     stubFetch((_url, init: any) => {
@@ -297,7 +333,7 @@ describe("useAgentTurn model variants", () => {
     });
     stubRafSync();
     setInvokeImpl(async () => ({}));
-    const h = setup(provider ? { provider } : undefined);
+    const h = setup(provider ? { provider: { kind: "openai", ...provider } } : undefined);
     await act(async () => {
       await h.result.current.runAgentTurn("go");
     });

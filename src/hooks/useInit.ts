@@ -8,6 +8,7 @@ import {
 } from "../lib/tauri";
 import { isWithinPath } from "../lib/path";
 import { WS_KEY } from "./useWorkspace";
+import { probeProvider } from "../lib/providerProbe";
 
 export type InitPhase =
   | "initializing"
@@ -22,10 +23,9 @@ export function providerIssue(provider: ProviderConfig): string | null {
   const model = provider.model.trim();
   if (!baseUrl) return "Enter a provider endpoint before continuing.";
   if (!model) return "Choose a model before continuing.";
-  const isLocal = /localhost|127\.0\.0\.1|\[::1\]|ollama/i.test(baseUrl);
   const needsKey = /api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com/i.test(baseUrl);
   if (needsKey && !provider.apiKey.trim()) return "This cloud provider needs an API key before continuing.";
-  if (!isLocal && !baseUrl.startsWith("http://") && !baseUrl.startsWith("https://")) {
+  if (!/^https?:\/\//i.test(baseUrl)) {
     return "Enter a complete http:// or https:// provider endpoint.";
   }
   return null;
@@ -67,12 +67,18 @@ export function useInit(opts: {
   const changingRef = useRef(false);
   const providerRef = useRef<ProviderConfig>(opts.provider ?? DEFAULT_PROVIDER);
   const checkedProviderSignatureRef = useRef("");
+  const providerProbeRef = useRef<AbortController | null>(null);
   providerRef.current = opts.provider ?? DEFAULT_PROVIDER;
   const providerSignatureRef = useRef("");
-  providerSignatureRef.current = `${opts.provider?.baseUrl ?? DEFAULT_PROVIDER.baseUrl}\u0000${opts.provider?.model ?? DEFAULT_PROVIDER.model}\u0000${opts.provider?.apiKey ?? DEFAULT_PROVIDER.apiKey}`;
+  providerSignatureRef.current = `${opts.provider?.baseUrl ?? DEFAULT_PROVIDER.baseUrl}\u0000${opts.provider?.model ?? DEFAULT_PROVIDER.model}\u0000${opts.provider?.apiKey ?? DEFAULT_PROVIDER.apiKey}\u0000${opts.provider?.kind ?? "auto"}`;
 
   const checkProvider = useCallback(async () => {
     if (!initializedRef.current) return false;
+    providerProbeRef.current?.abort();
+    const controller = new AbortController();
+    providerProbeRef.current = controller;
+    const provider = { ...providerRef.current };
+    const signature = providerSignatureRef.current;
     checkedProviderSignatureRef.current = providerSignatureRef.current;
     setError(null);
     setDetails(null);
@@ -81,25 +87,46 @@ export function useInit(opts: {
     const run = runRef.current;
     await Promise.resolve();
     if (run !== runRef.current || !initializedRef.current) return false;
-    const issue = providerIssue(providerRef.current);
+    const issue = providerIssue(provider);
     if (issue) {
       setError(issue);
       setOperation({ status: "error", message: issue });
       setPhase("provider-required");
       return false;
     }
-    setOperation({ status: "success", message: "Workspace and provider ready." });
+    try {
+      await probeProvider(provider, controller.signal);
+    } catch (caught) {
+      if (controller.signal.aborted || run !== runRef.current || signature !== providerSignatureRef.current) return false;
+      const message = errorText(caught);
+      setError(message);
+      setOperation({ status: "error", message });
+      setPhase("provider-required");
+      return false;
+    }
+    if (controller.signal.aborted || run !== runRef.current || signature !== providerSignatureRef.current) return false;
+    setOperation({ status: "success", message: "Workspace ready. Provider connected and model available." });
     setPhase("ready");
     return true;
   }, []);
 
   useEffect(() => {
-    if (!initializedRef.current || phase !== "provider-required") return;
+    if (!initializedRef.current || (phase !== "provider-required" && phase !== "provider-checking")) return;
     if (checkedProviderSignatureRef.current === providerSignatureRef.current) return;
     void checkProvider();
-  }, [checkProvider, opts.provider?.apiKey, opts.provider?.baseUrl, opts.provider?.model, phase]);
+  }, [checkProvider, opts.provider?.apiKey, opts.provider?.baseUrl, opts.provider?.model, opts.provider?.kind, phase]);
+
+  const openWithoutProvider = useCallback(() => {
+    if (!initializedRef.current) return;
+    providerProbeRef.current?.abort();
+    setError(null);
+    setDetails(null);
+    setOperation({ status: "success", message: "Workspace ready; model connection not verified." });
+    setPhase("ready");
+  }, []);
 
   const initialize = useCallback(async () => {
+    providerProbeRef.current?.abort();
     const run = ++runRef.current;
     setPhase("initializing");
     setError(null);
@@ -163,6 +190,7 @@ export function useInit(opts: {
     void initialize();
     return () => {
       runRef.current += 1;
+      providerProbeRef.current?.abort();
     };
   }, [initialize]);
 
@@ -276,6 +304,7 @@ export function useInit(opts: {
     ready: phase === "ready",
     retry: initialize,
     checkProvider,
+    openWithoutProvider,
     changeWorkspace,
     browseWorkspace,
   };

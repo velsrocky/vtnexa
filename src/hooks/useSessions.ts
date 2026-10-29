@@ -35,7 +35,11 @@ function freshChatState(prev: Workspace, cwd: string): Workspace {
 }
 
 function isEmptySession(ws: Workspace): boolean {
-  return ws.messages.length === 0 && ws.audit.length === 0 && ws.pendingDiff == null;
+  const dirty = Object.entries(ws.buffers ?? {}).some(
+    ([path, content]) => content !== ws.originals?.[path],
+  );
+  return ws.messages.length === 0 && ws.audit.length === 0 && ws.pendingDiff == null &&
+    !dirty && !ws.chatDraft;
 }
 
 export function useSessions(opts: {
@@ -67,6 +71,7 @@ export function useSessions(opts: {
   const sessionEpochRef = useRef(0);
   const operationSequenceRef = useRef(0);
   const listSequenceRef = useRef(0);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   function reportError(text: string) {
     stateRef.current.onError?.(text);
@@ -102,7 +107,11 @@ export function useSessions(opts: {
       const file = buildSessionFile(id, source, snap, { created: createdRef.current, title: titleRef.current });
       setOperation({ status: "pending", message: "Saving session…" });
       try {
-        await putSessionFile(file);
+        // UI sequence checks cannot prevent an older disk write completing
+        // last. Serialize snapshots so the newest requested save wins on disk.
+        const saved = saveQueueRef.current.then(() => putSessionFile(file));
+        saveQueueRef.current = saved.catch(() => undefined);
+        await saved;
         if (sequence !== operationSequenceRef.current) return true;
         prevOf.current.set(id, { created: file.created, title: file.title });
         if (titleRef.current !== file.title) setCurrentTitle(file.title);
@@ -239,7 +248,10 @@ export function useSessions(opts: {
       setCurrentId(id);
       setCurrentTitle("New session");
       setCurrentCreated(Date.now());
-      stateRef.current.setWs((w) => freshChatState(w, cwd || root));
+      stateRef.current.setWs((w) => ({
+        ...freshChatState(w, cwd || root),
+        tabs: [], buffers: {}, originals: {}, openPath: "",
+      }));
       sessionsReady.current = true;
       setOperation({ status: "success", message: "New session ready." });
       await refreshSessions();

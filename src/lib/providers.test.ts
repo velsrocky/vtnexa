@@ -40,7 +40,7 @@ function sse(events: unknown[]) {
   return new Response(body, { headers: { "content-type": "text/event-stream" } });
 }
 
-const CFG = { baseUrl: "http://localhost:11434/v1", apiKey: "", model: "qwen-test", kind: "auto" as const };
+const CFG = { baseUrl: "http://localhost:11434/v1", apiKey: "", model: "qwen-test", kind: "openai" as const };
 
 function openAIText(text: string, usage = { prompt_tokens: 10, completion_tokens: 5 }) {
   return json({ choices: [{ message: { content: text } }], usage });
@@ -93,6 +93,15 @@ describe("listModels", () => {
       url.endsWith("/api/tags") ? json({ models: [{ name: "qwen2.5-coder:7b" }] }) : json({}, 404),
     );
     expect(await listModels(CFG)).toEqual(["qwen2.5-coder:7b"]);
+  });
+  it("normalizes explicit Ollama API-root endpoints for the model picker", async () => {
+    const urls: string[] = [];
+    stubFetch((url) => {
+      urls.push(url);
+      return url === "https://proxy.test/ollama/v1/models" ? json({ data: [{ id: "coder" }] }) : json({}, 404);
+    });
+    expect(await listModels({ ...CFG, kind: "ollama", baseUrl: "https://proxy.test/ollama/api" })).toEqual(["coder"]);
+    expect(urls).toEqual(["https://proxy.test/ollama/v1/models"]);
   });
   it("returns [] when unreachable - never throws", async () => {
     stubFetch(() => {
@@ -182,7 +191,7 @@ describe("runTool", () => {
   it("returns auto direct-write failures as tool errors instead of throwing", async () => {
     setInvokeImpl(async (cmd) => {
       if (cmd === "approval_claim") return "tok-test";
-      if (cmd === "fs_read") throw new Error("nope");
+      if (cmd === "fs_read") throw new Error("No such file or directory");
       if (cmd === "fs_write") throw new Error("fs_write: outside workspace /w (got /w/../x)");
       throw new Error(`unexpected ${cmd}`);
     });
@@ -198,7 +207,7 @@ describe("runTool", () => {
   it("flags empty auto direct-writes so dropped content gets re-sent", async () => {
     setInvokeImpl(async (cmd) => {
       if (cmd === "approval_claim") return "tok-test";
-      if (cmd === "fs_read") throw new Error("nope");
+      if (cmd === "fs_read") throw new Error("No such file or directory");
       if (cmd === "fs_write") return {};
       throw new Error(`unexpected ${cmd}`);
     });
@@ -208,6 +217,42 @@ describe("runTool", () => {
       { autoApproveWorkspace: true, workspaceRoot: "/w" },
     );
     expect(out).toMatch(/now EMPTY.*re-send the FULL content/);
+  });
+  it("refuses missing write content before reading or changing a file", async () => {
+    const invoke = vi.fn(async () => { throw new Error("no IPC should run"); });
+    setInvokeImpl(invoke);
+    const out = await runTool("fs_write", { path: "/w/math.mjs" }, { autoApproveWorkspace: true, workspaceRoot: "/w" });
+    expect(out).toMatch(/^error: fs_write content is required/);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+  it("does not auto-overwrite files whose original contents cannot be read", async () => {
+    const writes = vi.fn();
+    setInvokeImpl(async (command) => {
+      if (command === "fs_read") throw new Error("Permission denied");
+      if (command === "fs_write") return writes();
+      throw new Error(`unexpected ${command}`);
+    });
+    const result = await runTool("fs_write", { path: "/w/math.mjs", content: "replacement" }, { autoApproveWorkspace: true, workspaceRoot: "/w" });
+    expect(result).toMatch(/^error: fs_write could not read/);
+    expect(writes).not.toHaveBeenCalled();
+  });
+  it("does not write or capture Undo for identical content", async () => {
+    const calls: string[] = [];
+    const undo = vi.fn();
+    setInvokeImpl(async (command) => { calls.push(command); if (command === "fs_read") return "same"; throw new Error(command); });
+    const result = await runTool("fs_write", { path: "/w/a.txt", content: "same" }, { workspaceRoot: "/w", autoApproveWorkspace: true, onUndoCapture: undo });
+    expect(result).toMatch(/^unchanged /);
+    expect(calls).toEqual(["fs_read"]);
+    expect(undo).not.toHaveBeenCalled();
+  });
+  it("reports nonzero shell exits as tool failures", async () => {
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "shell_run") return { stdout: "failed test", stderr: "", code: 1 };
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const out = await runTool("shell_run", { cmd: "node --test", cwd: "/w" }, { requestApproval: async () => TOK });
+    expect(out).toMatch(/^error: shell exited with code 1/);
+    expect(out).toContain("failed test");
   });
   it("returns no-gate direct-write failures as tool errors instead of throwing", async () => {
     setInvokeImpl(async () => {
@@ -388,6 +433,61 @@ describe("runTool", () => {
 });
 
 describe("chatWithTools", () => {
+  it("allows the same test command after successive implementation changes", async () => {
+    let disk = "old";
+    let tests = 0;
+    setInvokeImpl(async (command, args) => {
+      if (command === "fs_read") return disk;
+      if (command === "approval_claim") return "token";
+      if (command === "fs_write") { disk = args.content; return; }
+      if (command === "shell_run") return { stdout: "test result", stderr: "", code: ++tests === 3 ? 0 : 1 };
+      throw new Error(command);
+    });
+    let round = 0;
+    const calls = stubFetch(() => {
+      round++;
+      if (round <= 6) return openAITools([{ id: `r${round}`, name: round % 2 ? "fs_write" : "shell_run", args: round % 2 ? { path: "/w/a.txt", content: `version${round}` } : { cwd: "/w", cmd: "node --test" } }]);
+      return openAIText("Verified.");
+    });
+    const result = await chatWithTools(CFG, [{ role: "user", content: "Fix this code and run tests" }], () => undefined,
+      { policy: { workspaceRoot: "/w", autoApproveWorkspace: true } });
+    expect(result).toBe("Verified.");
+    expect(tests).toBe(3);
+    const final = JSON.parse(calls[calls.length - 1].init.body);
+    expect(final.tools).toBeDefined();
+  });
+  it("accepts a read-only plan without incorrectly reporting missing code changes", async () => {
+    const fetches = stubFetch(() => openAIText("Plan: inspect the failing test and fix the implementation."));
+    const result = await chatWithTools(CFG, [{ role: "user", content: "Fix the bug in this project" }], () => undefined,
+      { policy: { workspaceRoot: "/w", planMode: true } });
+    expect(result).toBe("Plan: inspect the failing test and fix the implementation.");
+    expect(fetches).toHaveLength(1);
+  });
+  it("marks coding claims unverified when the model never uses its workspace tools", async () => {
+    stubFetch(() => openAIText("The bug is fixed and the tests pass."));
+    const result = await chatWithTools(CFG, [{ role: "user", content: "Fix the bug in this project" }], () => undefined,
+      { policy: { workspaceRoot: "/w" } });
+    expect(result).toContain("No workspace tools ran");
+  });
+  it("retries a failed verification before accepting a completion claim", async () => {
+    let runs = 0;
+    setInvokeImpl(async (cmd) => {
+      if (cmd === "shell_run") return { stdout: runs++ === 0 ? "test failed" : "tests pass", stderr: "", code: runs === 1 ? 1 : 0 };
+      throw new Error(`unexpected ${cmd}`);
+    });
+    let round = 0;
+    stubFetch(() => {
+      round++;
+      if (round === 1 || round === 3) return openAITools([{ id: `s${round}`, name: "shell_run", args: { cwd: "/w", cmd: "node --test" } }]);
+      return openAIText(round === 2 ? "Done." : "Tests pass.");
+    });
+    const audit: any[] = [];
+    const result = await chatWithTools(CFG, [{ role: "user", content: "Run the tests" }], () => undefined,
+      { policy: { requestApproval: async () => TOK }, onAudit: (event) => audit.push(event) });
+    expect(runs).toBe(2);
+    expect(audit.map((event) => event.ok)).toEqual([false, true]);
+    expect(result).toBe("Tests pass.");
+  });
   it("streams reasoning_content to onThinking and keeps it out of content/deltas", async () => {
     vi.stubGlobal(
       "fetch",
@@ -582,6 +682,16 @@ describe("chatWithTools", () => {
 });
 
 describe("parseTextToolCalls", () => {
+  it("preserves Llama template parameters, including file contents and newlines", () => {
+    const content = "export const value = 1;\nexport const escaped = '\\n';\n";
+    const [call] = parseTextToolCalls(JSON.stringify({ name: "fs_write", parameters: { path: "/w/a.mjs", content } }));
+    expect(JSON.parse(call.function.arguments)).toEqual({ path: "/w/a.mjs", content });
+  });
+  it("rejects malformed argument payloads instead of replacing them with an empty object", () => {
+    for (const parameters of [[], 12, null, "null", "[]"]) {
+      expect(parseTextToolCalls(JSON.stringify({ name: "fs_write", parameters }))).toEqual([]);
+    }
+  });
   it("recovers a plain-text tool call", () => {
     const [tc] = parseTextToolCalls('{"name":"skill_list","arguments":{}}');
     expect(tc.function.name).toBe("skill_list");

@@ -1,14 +1,14 @@
 # Security Policy
 
 VTNexa is a local-first tool whose security model is **workspace autonomy
-with outside-access approval** (opencode-style), not isolation. A
+with screened command approval** (opencode-style), not isolation. A
 review-gated mode (Settings → Commander autonomy, off by default) restores
 per-action approval. This page states what the app does and does not protect
 against — in auto mode first, since that is the default.
 
 ## What is enforced
 
-- **Outside-access gate (native, backend-enforced):** agent actions reaching
+- **Screened-action gate (native tokens enforced by the backend):** command text detected as reaching
   outside the workspace (absolute paths elsewhere, `~`, sudo, piped-to-shell
   downloads, browser actions, MCP tools) pop a NATIVE OS confirm dialog and
   mint a single-use token bound to the window, action, and exact arguments
@@ -16,6 +16,9 @@ against — in auto mode first, since that is the default.
   but cannot click it, and direct backend calls without a token fail. Direct
   user gestures (Diff Approve button, Git commit button, tree ops, manual
   browser driving) mint tokens without a dialog — the click is the intent.
+  Screening cannot infer all effects of scripts, build tools, or git hooks.
+  Those may access outside files without a dialog in auto mode. File tools
+  reject outside paths rather than granting arbitrary access after approval.
   In review-gated mode, every side effect above (plus in-workspace writes,
   staged as diffs) goes through the same dialog path.
 - **In-workspace auto-approval (frontend, audited):** workspace-confined
@@ -48,17 +51,18 @@ against — in auto mode first, since that is the default.
 
 ## What is NOT protected
 
-- **Approved commands run as you.** Pattern screening is defense-in-depth,
+- **Approved and auto-approved commands run as you.** Pattern screening is defense-in-depth,
   not a jail: it does not resist deliberate obfuscation (`$'...'`, encodings,
   fetched scripts). firejail confines the *filesystem view*, not network or
   your own home directory (the workspace often lives under it). If you
-  approve a command, read it first.
+  approve a command, read it first. A command such as `npm test` can execute
+  project code with outside-workspace effects that screening cannot detect.
 - **The interactive terminal is unscreened by design** — it is your shell.
 - **Prompt injection:** web pages and file contents enter the model's
   context. A malicious page can try to steer the agent and can trigger
   approval dialogs, but it cannot confirm them — an unattended dialog blocks
   the turn instead of approving. **In auto mode (default) this protection
-  covers only outside-workspace actions:** injected instructions CAN drive
+  gates only actions the screen identifies as requiring review:** injected instructions CAN drive
   in-workspace writes and shell with no popup. The top bar shows the current
   mode (`⌾ auto` / `⌾ gated`) next to the gate version so the active trust
   model is always visible. Browser page text enters the model context behind
@@ -67,9 +71,14 @@ against — in auto mode first, since that is the default.
   review-gated mode.
 - **Renderer compromise (XSS) is NOT contained:** arbitrary JavaScript in the
   webview can call the no-dialog claim path used by buttons. Mitigations are
-  a tight CSP (no `unsafe-eval`, `frame-src 'self'`) and sanitized markdown
+  a CSP without `unsafe-eval` and sanitized markdown
   previews — not a boundary. The gate's promise is narrower: model output
   alone cannot self-approve.
+- **Audit exports are bounded and unauthenticated.** Each session retains up
+  to 100 events with capped argument details. The Audit tab exports those
+  events with a SHA-256 checksum and can verify it. Anyone who can replace an
+  export can also recompute its checksum; this is not a signed, append-only,
+  or complete security log.
 - **Multi-user systems:** per-user app data assumes a single trusted user
   session.
 

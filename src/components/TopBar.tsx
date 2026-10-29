@@ -34,7 +34,7 @@ function TopBarInner() {
         style={autoOn ? { color: "#0ea5e9" } : undefined}
         title={
           autoOn
-            ? "Autonomy ON - in-workspace tools run with no dialog; anything reaching outside still pops the native approval. Toggle in Settings → Commander autonomy."
+            ? "Autonomy ON - workspace file tools and commands accepted by screening run without a dialog. Scripts may affect files outside the workspace. Toggle in Settings → Commander autonomy."
             : "Review-gated mode - every agent side effect is staged for your approval. Toggle in Settings → Commander autonomy."
         }
       >

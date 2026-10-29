@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
+import { useReducer } from "react";
 import { useDiffGate } from "./useDiffGate";
 import { newWorkspace } from "../lib/utils";
 import type { Workspace } from "../types";
@@ -38,11 +39,13 @@ function setup(over: Partial<Workspace> = {}) {
     retargeted: [] as [string, string][],
     closed: [] as string[],
   };
-  const hook = renderHook(() =>
-    useDiffGate({
+  const hook = renderHook(() => {
+    const [, refresh] = useReducer((value: number) => value + 1, 0);
+    return useDiffGate({
       ws,
       updateWs: (fn) => {
         ws = fn(ws);
+        refresh();
       },
       workspaceRoot: "/w",
       cwd: "/w",
@@ -69,9 +72,9 @@ function setup(over: Partial<Workspace> = {}) {
       closeTab: (p) => {
         calls.closed.push(p);
       },
-    }),
-  );
-  return { ...hook, calls, wsOf: () => ws };
+    });
+  });
+  return { ...hook, calls, wsOf: () => ws, restore: (next: Workspace) => { ws = next; hook.rerender(); } };
 }
 
 const staged = {
@@ -81,6 +84,32 @@ const staged = {
   openPath: "/w/a.txt",
   pendingDiff: { path: "/w/a.txt", content: "new", original: "old" },
 };
+
+describe("session undo isolation", () => {
+  it("uses the resumed session's history and clears it for a fresh session", async () => {
+    const a = { kind: "write" as const, path: "/w/a.txt", before: "old A", after: "new A", existedBefore: true };
+    const b = { kind: "write" as const, path: "/w/b.txt", before: "old B", after: "new B", existedBefore: true };
+    const writes: string[] = [];
+    let disk = "new B";
+    setInvokeImpl(async (command, args) => {
+      if (command === "approval_claim") return "token";
+      if (command === "fs_read") return disk;
+      if (command === "fs_write") { writes.push(args.path); disk = args.content; return {}; }
+      throw new Error(`unexpected ${command}`);
+    });
+    const h = setup({ undoStack: [a] });
+    expect(h.result.current.undoLabel).toBe("write a.txt");
+    act(() => h.restore({ ...newWorkspace("main:ws", "/w"), undoStack: [b] }));
+    expect(h.result.current.undoLabel).toBe("write b.txt");
+    await act(async () => { await h.result.current.undo(); });
+    expect(writes).toEqual(["/w/b.txt"]);
+    expect(disk).toBe("old B");
+    expect(h.result.current.canRedo).toBe(true);
+    act(() => h.restore(newWorkspace("main:ws", "/w")));
+    expect(h.result.current.canUndo).toBe(false);
+    expect(h.result.current.canRedo).toBe(false);
+  });
+});
 
 describe("useDiffGate.saveFile", () => {
   it("stages the buffer instead of writing", () => {

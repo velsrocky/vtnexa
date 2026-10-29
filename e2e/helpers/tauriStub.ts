@@ -1,6 +1,7 @@
 import type { Page } from "@playwright/test";
 
 export async function stubTauri(page: Page) {
+  await page.route("http://localhost:11434/v1/models", (route) => route.fulfill({ json: { data: [{ id: "qwen2.5-coder:7b" }] } }));
   await page.addInitScript(() => {
     const w = window as unknown as Record<string, unknown>;
     let eventId = 1;

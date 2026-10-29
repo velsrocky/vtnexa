@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+- Use native Ollama schema-constrained actions for the standard local endpoint
+  and explicit Ollama providers, preserving approval gates and streamed answers.
+  Keep explicit OpenAI compatibility available. Reduce local-model prompt/tool
+  distractions, accept textual `parameters` calls from compatibility endpoints,
+  reject no-op implementation writes, and allow repeat verification after edits.
+- Interrupted Commander turns no longer report successful completion. Add
+  opt-in live-device coding and cancellation checks with immutable tests and
+  independent public-API checks; see the local-model debugging report.
+
+- Functional debugging: session saves now finish in order, new workspaces
+  discard the previous workspace's editor buffers, and Undo/Redo follow the
+  active session rather than a mount-only history mirror.
+- Flush session data on normal window close, prevent closing when saving fails
+  or Commander is active, and show the reason in the workbench.
+- Allow read-only Plan/skill answers without reporting missing code changes;
+  refuse auto-writes when existing contents cannot be read safely.
+
+- Live-device validation: reject file writes that omit their content, mark
+  nonzero foreground/background shell exits as failed tool calls, and retry
+  unresolved tool failures before accepting a completion claim. Final answers
+  explicitly flag any failures still unresolved.
+
+- Preserve complete unsaved editor buffers, drafts, and tab lists in session
+  snapshots. Save editor-only sessions and keep failed saves visible.
+- Check provider connectivity and model availability without generating tokens;
+  allow explicitly opening a workspace with an unverified model. Normalize the
+  official Anthropic root to `/v1` for checks and chat requests.
+- Bound provider response headers to 30 seconds and body inactivity to 120
+  seconds while preserving Stop cancellation; setup checks use 10-second limits.
+- Connect retained audit event exports and checksum verification to the Audit
+  tab. Document the 100-event limit and that checksums do not authenticate logs.
+- Correct the macOS snapshot test's completeness assumption during process
+  churn; retain direct-identity and process-tree cleanup checks.
+- Clarify shell screening limits in onboarding, settings, and documentation.
+
 ## 1.0.7
 
 The release that makes VTNexa usable by someone other than its author.

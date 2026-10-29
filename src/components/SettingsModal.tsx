@@ -91,7 +91,7 @@ export default function SettingsModal({
           <span>
             Auto-approve in-workspace operations (opencode-style).
             {autoApproveWorkspace
-              ? " File writes, shell, git and renames inside the workspace run free; only outside access pops a dialog."
+              ? " File operations and commands screened as staying in the workspace run without a dialog. Scripts can still affect files outside it with your OS permissions."
               : " Every side effect pops an approval dialog (review-gated)."}
           </span>
         </label>

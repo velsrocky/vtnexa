@@ -13,16 +13,15 @@ real repository, and tell you what broke.** Everything below serves that.
 
 The one-line pitch (use this everywhere):
 
-> A local-first desktop agent that works on your code **inside your folder**,
-> and asks permission for anything that reaches outside it.
+> A local-first desktop coding agent with workspace file tools, local model
+> support, and native approval dialogs for commands that require review.
 
 Why that pitch and not "another AI coding agent":
 
-- Every other agent either asks for approval on every keystroke (annoying)
-  or edits your repo unsupervised (scary). VTNexa's answer is *autonomous
-  inside, gated outside*, and the gate is a **native OS dialog** with a
-  single-use token bound to the exact command — not a web prompt the agent
-  could click.
+- VTNexa offers workspace autonomy with screened command approvals. Its gate
+  is a **native OS dialog** with a single-use token bound to the exact command.
+  Shell screening cannot infer all effects of project scripts, and optional
+  Firejail protections do not provide complete workspace isolation.
 - **It runs fully offline** against Ollama. No account, no telemetry, no
   data leaving the machine. That is a real differentiator for anyone who
   cannot send their code to an API.
@@ -37,7 +36,7 @@ Who this is for (the first ten are all of these):
 | People who review AI diffs for a living | The Diff gate *is* the approval surface |
 | Local-first / OSS AI enthusiasts | `ollama pull qwen2.5-coder:7b` and it works |
 | Power users with a messy multi-repo workflow | One window = one independent instance |
-| Teams evaluating agentic tooling | The audit log with hash verification is a procurement answer |
+| Teams evaluating agentic tooling | Retained audit events help debug tool use; exports have an unauthenticated checksum |
 
 Who it is **not** for (say this out loud, it saves support time): people who
 want a hosted product, people who need their IDE to be VS Code, people who
@@ -76,7 +75,7 @@ answer honestly.
 **Title**
 
 ```
-Show HN: VTNexa – a local-first desktop agent that works inside your repo and asks for everything else
+Show HN: VTNexa – a local-first desktop coding workspace with native approval dialogs
 ```
 
 **Body**
@@ -93,10 +92,12 @@ The model of trust is simple:
 
   - Inside the workspace: it acts. Writes, shell, renames, deletes, commits.
     No popups.
-  - Outside the workspace: it asks. A native OS dialog (not a web prompt, so
+  - Detected outside access: it asks. A native OS dialog (not a web prompt, so
     the agent can't click its own approval) shows the exact command, and the
     backend mints a single-use token bound to the window, the action and the
     exact arguments. 5-minute expiry, single use.
+  - Shell commands run as your OS user. Project scripts can have outside
+    effects that screening cannot detect; this is not full isolation.
 
 It's also fully offline if you want it to be: point it at Ollama
 (qwen2.5-coder:7b) and nothing leaves your machine. API keys for other
@@ -123,8 +124,9 @@ account, nothing leaves the machine.
 
 It's called VTNexa. Point it at http://localhost:11434/v1 with
 qwen2.5-coder:7b and it reads/edits/runs things in a folder you pick. It
-asks before it does anything outside that folder (native OS dialog, and the
-agent literally cannot approve itself).
+asks when command screening detects outside access, and for browser/MCP
+actions, through native OS dialogs. Project scripts can have outside effects
+that screening cannot detect. File tools enforce the folder boundary.
 
 The part I'm most unsure about: small local models are weak at tool calling.
 I added a lot of scaffolding to keep them honest (one tool call per reply,
@@ -169,7 +171,7 @@ Full write-up and the code: https://github.com/velsrocky/vtnexa
 
 The highest-signal post you can write, and it doubles as marketing. Outline:
 
-1. The promise: autonomous inside, gated outside.
+1. The promise: workspace file tools with screened command approval.
 2. How the gate actually works (native dialog, single-use token bound to the
    exact command, 5-minute TTL).
 3. **The honest limits** — the agent runs with your permissions once you
@@ -219,7 +221,7 @@ publicly care about this problem and write to them **personally**:
 
 ```
 Hi <name> - I saw <specific thing they wrote/did>. I built a desktop agent
-that works inside one folder and asks for everything outside it, and I'd
+with workspace file tools and screened command approvals, and I'd
 value your take on whether the gate is in the right place.
 
 It's macOS/Windows/Linux, runs against Ollama if you want it fully offline:
@@ -245,9 +247,10 @@ questions, not a survey:
 3. **What did you have to teach it that it should have known?** (This finds
    the prompt bugs.)
 
-Ask for the **audit log** when they report a problem — it is a hash-verified
-record of every tool call and every approval decision, which turns "it did
-something weird" into a reproducible case.
+Ask for an **audit export** when they report a problem. It contains up to the
+latest 100 events in a session, with capped arguments and a checksum for
+detecting edits. It helps investigation but does not prove authenticity or
+completeness.
 
 ---
 

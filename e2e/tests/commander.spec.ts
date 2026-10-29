@@ -1,11 +1,13 @@
 import { test, expect, type Page } from "@playwright/test";
 import { routeProvider, roleContents } from "../helpers/mockProvider";
+import { verifyAuditExport } from "../../src/lib/audit-export";
 
 const E2E_BASE = "http://127.0.0.1:18080/v1";
 
 // Browser-only Tauri bridge, injected before any app code runs. Answers the
 // workspace-boot path; everything else rejects like a missing backend would.
 async function stubTauri(page: Page) {
+  await page.route("http://localhost:11434/v1/models", (route) => route.fulfill({ json: { data: [{ id: "qwen2.5-coder:7b" }] } }));
   await page.addInitScript(() => {
     const w = window as unknown as Record<string, unknown>;
     const calls: string[] = [];
@@ -50,6 +52,7 @@ async function stubTauri(page: Page) {
 test.describe("Commander agent turn (e2e, mocked backend)", () => {
   test("completes a tool round and shows tools, audit and answer", async ({ page }) => {
     await stubTauri(page);
+    await page.route(`${E2E_BASE}/models`, (route) => route.fulfill({ json: { data: [{ id: "e2e-mock" }] } }));
 
     const log = routeProvider(page, E2E_BASE, [
       { tool: "fs_list", args: { path: "/ws" } },
@@ -93,6 +96,21 @@ test.describe("Commander agent turn (e2e, mocked backend)", () => {
     // Audit tab records the auto-approved read.
     await page.getByRole("tab", { name: /Audit/ }).click();
     await expect(page.locator(".msgs, .audit").first()).toContainText("fs_list");
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export JSON", exact: true }).click();
+    const exported = await download;
+    const stream = await exported.createReadStream();
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream!) chunks.push(Buffer.from(chunk));
+    const data = Buffer.concat(chunks).toString("utf8");
+    expect((await verifyAuditExport(data)).valid).toBe(true);
+    expect(JSON.parse(data).entries.some((entry: { tool: string }) => entry.tool === "fs_list")).toBe(true);
+    await page.getByLabel("Verify audit export").setInputFiles({ name: "audit.json", mimeType: "application/json", buffer: Buffer.from(data) });
+    await expect(page.getByText(/Checksum matches\./)).toBeVisible();
+    const tampered = JSON.parse(data);
+    tampered.entries[0].detail = "changed";
+    await page.getByLabel("Verify audit export").setInputFiles({ name: "changed.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(tampered)) });
+    await expect(page.getByText(/Verification failed:/)).toBeVisible();
 
     // The provider saw the user task in both requests.
     expect(log.requests.length).toBeGreaterThanOrEqual(2);

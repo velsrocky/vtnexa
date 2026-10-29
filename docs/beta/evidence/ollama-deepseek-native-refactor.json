@@ -1,0 +1,26 @@
+{
+  "startedAt": "2026-10-29T13:21:47.175Z",
+  "scope": "production useAgentTurn prompt and orchestration + real provider + real fixture files; filesystem IPC adapter, not native GUI",
+  "provider": {
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "deepseek-r1:8b",
+    "kind": "ollama"
+  },
+  "output": "/var/folders/c7/jxg1mfsj5nq1sqv091f88kd40000gn/T/vtnexa-live-validation-HtJPyF",
+  "tasks": [
+    {
+      "name": "refactor",
+      "root": "/private/tmp/nexa-refactor-IWB7jc",
+      "model": "deepseek-r1:8b",
+      "startedAt": "2026-10-29T13:21:47.273Z",
+      "agentStatus": "error",
+      "answer": "provider error: Error: provider 400: {\"error\":\"Failed to initialize samplers: std::exception\"}",
+      "testOutput": "✔ math.test.mjs (82.704875ms)\nℹ tests 1\nℹ suites 0\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 87.798584\n",
+      "contractChecks": "public exports and error behavior passed",
+      "diff": "",
+      "passed": false,
+      "finishedAt": "2026-10-29T13:25:01.408Z"
+    }
+  ],
+  "finishedAt": "2026-10-29T13:25:01.408Z"
+}
