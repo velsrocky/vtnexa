@@ -3130,7 +3130,16 @@ for line in sys.stdin:
             ..Default::default()
         };
         let text = mcp_consent_text(&root, "local", &local, "fingerprint");
-        assert!(text.contains("node server.js --flag"));
+        // The executable is resolved to an absolute path before it is shown,
+        // so on Windows it ends in `.exe` and the literal "node server.js"
+        // substring never appears.
+        let command = text
+            .lines()
+            .find(|line| line.starts_with("Local command: "))
+            .expect("consent text names the local command");
+        assert!(command.to_lowercase().contains("node"));
+        assert!(command.contains("server.js"));
+        assert!(command.contains("--flag"));
         assert!(text.contains("Authorization"));
         assert!(!text.contains("SECRET"));
         let remote = McpServerConfig {
@@ -3236,9 +3245,18 @@ mod remote_roundtrip_tests {
                 };
                 let seen_srv = seen_srv.clone();
                 std::thread::spawn(move || {
-                    let mut buf = vec![0u8; 65536];
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    // The accepted socket must be blocking: a non-blocking
+                    // one returns `WouldBlock` immediately instead of waiting
+                    // for the request to arrive.
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    // Read the whole request, not just the first segment: a
+                    // partial read made the mock answer early and close the
+                    // socket while the client was still writing, which Windows
+                    // turns into a TCP reset and the client reports as
+                    // `error sending request`. That made these roundtrip
+                    // tests fail intermittently under load.
+                    let req = read_http_request(&mut stream);
                     let has_session = req.to_lowercase().contains("mcp-session-id: test123");
                     seen_srv
                         .lock()
@@ -3341,12 +3359,22 @@ mod remote_roundtrip_tests {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let mut request = Vec::new();
         let mut buffer = [0u8; 8192];
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let count = stream.read(&mut buffer).unwrap_or_default();
-            if count == 0 {
-                break;
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => request.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    // A non-blocking socket has no read timeout to fall back
+                    // on, so bound the wait here instead.
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(_) => break,
             }
-            request.extend_from_slice(&buffer[..count]);
             let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
             else {
                 continue;
@@ -3395,6 +3423,12 @@ mod remote_roundtrip_tests {
                 let Some((mut stream, _)) = accepted else {
                     break;
                 };
+                // The listener is non-blocking so the accept loop can honour
+                // its deadline. On Windows the accepted socket inherits that
+                // non-blocking mode (Unix resets it), so a read would return
+                // `WouldBlock` immediately instead of waiting for the
+                // request to arrive.
+                let _ = stream.set_nonblocking(false);
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                 let request = read_http_request(&mut stream);
                 seen.lock().unwrap().push(request);

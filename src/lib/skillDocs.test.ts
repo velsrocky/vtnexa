@@ -22,7 +22,10 @@ describe("bundled skill docs", () => {
       EXPECTED.map((n) => `${n}.md`),
     );
     for (const name of EXPECTED) {
-      const [header, , description] = read(name).split("\n");
+      // Split on CRLF as well as LF: a Windows checkout has the docs with
+      // CRLF endings, and the contract is about the header text, not the
+      // platform's line terminator.
+      const [header, , description] = read(name).split(/\r?\n/);
       expect(header).toBe(`# ${name}`);
       expect(description?.trim().length).toBeGreaterThan(0);
     }

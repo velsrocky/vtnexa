@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OperationState, Workspace } from "../types";
 import { keyGet } from "../lib/tauri";
-import { loadDrafts, lookupDraftKey } from "../lib/providerHistory";
 import { newWorkspace } from "../lib/utils";
 import { restoreWorkspace, snapshotWorkspace } from "./useSession";
-import { windowLabel } from "./useWorkspaceState";
 import {
   buildSessionFile,
   deleteSession,
@@ -169,13 +167,8 @@ export function useSessions(opts: {
             const key = await keyGet(restored.provider.baseUrl, restored.provider.model);
             if (key) restored.provider = { ...restored.provider, apiKey: key };
           } catch {
-            const key = lookupDraftKey(
-              loadDrafts(),
-              windowLabel,
-              restored.provider.baseUrl,
-              restored.provider.model,
-            );
-            if (key) restored.provider = { ...restored.provider, apiKey: key };
+            // No keychain: leave the key empty. Any in-memory key is restored
+            // by useProvider's session map, never from disk.
           }
         }
         if (sequence !== operationSequenceRef.current) return false;

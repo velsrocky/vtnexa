@@ -46,8 +46,9 @@ against — in auto mode first, since that is the default.
   The top bar shows a `⚠ no shell sandbox` chip whenever confinement is
   unavailable, so the degraded mode is never silent.
 - **Secrets:** API keys are stored in the OS keychain (per endpoint+model),
-  never in session files or the workspace. Without a keychain daemon they
-  fall back to app-local storage, and the UI labels this.
+  never in session files, history, drafts, or the workspace. Without a
+  keychain daemon they stay in memory for the current session only — never
+  written to disk — and the UI labels this. A restart requires re-entry.
 
 ## What is NOT protected
 
@@ -91,5 +92,5 @@ acknowledge within 7 days and ship a fix or mitigation within 30.
 
 ## Version support
 
-Pre-1.0: only the latest `main` is supported. Fixes land in `main` and ship
-in the next release.
+Only the latest release (and the tip of `main`) is supported. Fixes land in
+`main` and ship in the next release.

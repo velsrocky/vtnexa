@@ -20,6 +20,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { resolvePowerShell } from "./powershell.mjs";
 
 export const NODE_VERSION = "24.18.0";
 
@@ -281,7 +282,7 @@ async function extractArchive(archivePath, descriptor) {
   try {
     if (descriptor.format === "zip") {
       if (process.platform === "win32") {
-        const powershell = process.env.ComSpec ? "powershell.exe" : "pwsh";
+        const powershell = await resolvePowerShell(["Expand-Archive"]);
         const escapedArchive = archivePath.replaceAll("'", "''");
         const escapedDestination = destination.replaceAll("'", "''");
         await runCommand(powershell, [

@@ -97,6 +97,12 @@ The release that makes VTNexa usable by someone other than its author.
 This release lands the subsystems that were sitting uncommitted and hardens
 release + security around them.
 
+- **Secrets never hit disk**: provider history and per-window drafts are now
+  secret-free. When no OS keychain is available, keys stay in memory for the
+  current session only and must be re-entered after restart; legacy plaintext
+  keys are migrated to the keychain when available and scrubbed from storage
+  immediately either way. CI now fails on `pnpm audit --prod` or
+  `cargo audit` findings.
 - **Real process-tree control**: shell, background jobs, PTY and MCP children
   are now captured as their own process group on POSIX (`setsid`, kill the
   whole tree) and under a Windows Job Object, so a timed-out or cancelled

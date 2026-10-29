@@ -904,13 +904,30 @@ pub async fn browser_start(
         Ok(job) => Some(job),
         Err(error) => return Err(error),
     };
+    // On Windows the sidecar is created suspended so it cannot launch
+    // Chromium before the Job Object owns it. Assigning after a normal spawn
+    // leaves a window in which the Node runtime has already forked Chromium,
+    // and a process forked before the assignment stays outside the job for
+    // good — it would survive the app closing and keep the profile and the
+    // loopback port alive. The POSIX path gets the same guarantee from
+    // `setsid` above, which takes effect atomically at fork time.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+        command.creation_flags(CREATE_SUSPENDED);
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return Err(format!("browser Node runtime could not start: {}", error)),
     };
     #[cfg(windows)]
     if let Some(job) = &job {
-        if let Err(error) = job.assign(&child) {
+        if let Err(error) = job
+            .assign(&child)
+            .and_then(|()| job.resume_primary_thread(&child))
+        {
+            job.terminate();
             stop_child_bounded(child);
             return Err(error);
         }

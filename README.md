@@ -8,9 +8,9 @@ does not isolate code executed by project scripts.
 ![VTNexa window](docs/screenshot.png)
 
 Run it fully offline against Ollama, or point it at any OpenAI-compatible
-endpoint, Anthropic, or Gemini. Your API keys live in the OS keychain. Your
-files stay yours. No telemetry, no accounts, no cloud round-trip you didn't
-choose.
+endpoint, Anthropic, or Gemini. Your API keys live in the OS keychain — or only
+in memory when no keychain is available. Your files stay yours. No telemetry,
+no accounts, no cloud round-trip you didn't choose.
 
 ## Why this exists
 
@@ -233,7 +233,7 @@ This section documents exactly what is and isn't protected. Read it carefully.
   appearing in the command string. File tools enforce their own workspace
   boundary. Read-only tools run without approval.
 - **Workspace confinement.** File tools are confined server-side to the workspace root you pick (per window), with symlink-safe checks and a sensitive-path deny list.
-- **Secrets.** API keys go to the OS keychain (per endpoint+model), never to session files or the workspace. Without a keychain daemon they fall back to app-local storage and the UI says so.
+- **Secrets.** API keys go to the OS keychain (per endpoint+model), never to session files, history, drafts, or the workspace. Without a keychain daemon they stay in memory for the current session only — never written to disk — and the UI says so; a restart requires re-entry.
 - **Destruction patterns screened.** The backend refuses known destructive shell patterns (`rm -rf /`, `mkfs`, raw disk writes) and direct credential reads (`~/.ssh`, AWS creds, `/etc/shadow`). Download-to-shell commands require review and are not universally blocked. Screening cannot determine all effects of arbitrary code.
 - **Read-only skills are confined.** Skills that scope themselves to read-only
   work (e.g. `/rate`) can neither be offered nor trigger side-effect tools —
@@ -326,6 +326,7 @@ Automated testing and building on every PR:
 - Vitest unit tests with a coverage ratchet
 - Playwright e2e (chromium, against the web build)
 - Rust fmt check, clippy (`-D warnings`), and tests
+- Dependency audits: `pnpm audit --prod` and `cargo audit` (fail closed)
 - Tauri release builds on all three platforms (draft release on `v*` tags)
 - Dependabot: weekly grouped updates for npm, cargo and GitHub Actions
 

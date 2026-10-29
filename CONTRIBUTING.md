@@ -1,7 +1,7 @@
 # Contributing to VTNexa
 
-Thanks for helping! This is an early-stage (0.x) project — feedback, bug
-reports, and small PRs are especially valuable right now.
+Thanks for helping! Feedback, bug reports, and small PRs are especially
+valuable right now.
 
 ## Dev setup
 

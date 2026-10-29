@@ -238,7 +238,7 @@ describe("useSessions resume/remove", () => {
     expect(h.result.current.currentTitle).toBe("First");
   });
 
-  it("resumeSession refills the key from the local backup without a keychain", async () => {
+  it("resumeSession does not read plaintext key backups when no keychain exists", async () => {
     localStorage.clear();
     localStorage.setItem(
       "vtai.providerDraft",
@@ -270,7 +270,7 @@ describe("useSessions resume/remove", () => {
     await act(async () => {
       await h.result.current.resumeSession("ses_a");
     });
-    expect(h.wsOf().provider.apiKey).toBe("K-BACKUP");
+    expect(h.wsOf().provider.apiKey).toBe("");
     localStorage.clear();
   });
 
