@@ -1,5 +1,98 @@
 # Changelog
 
+## Unreleased
+
+- Use native Ollama schema-constrained actions for the standard local endpoint
+  and explicit Ollama providers, preserving approval gates and streamed answers.
+  Keep explicit OpenAI compatibility available. Reduce local-model prompt/tool
+  distractions, accept textual `parameters` calls from compatibility endpoints,
+  reject no-op implementation writes, and allow repeat verification after edits.
+- Interrupted Commander turns no longer report successful completion. Add
+  opt-in live-device coding and cancellation checks with immutable tests and
+  independent public-API checks; see the local-model debugging report.
+
+- Functional debugging: session saves now finish in order, new workspaces
+  discard the previous workspace's editor buffers, and Undo/Redo follow the
+  active session rather than a mount-only history mirror.
+- Flush session data on normal window close, prevent closing when saving fails
+  or Commander is active, and show the reason in the workbench.
+- Allow read-only Plan/skill answers without reporting missing code changes;
+  refuse auto-writes when existing contents cannot be read safely.
+
+- Live-device validation: reject file writes that omit their content, mark
+  nonzero foreground/background shell exits as failed tool calls, and retry
+  unresolved tool failures before accepting a completion claim. Final answers
+  explicitly flag any failures still unresolved.
+
+- Preserve complete unsaved editor buffers, drafts, and tab lists in session
+  snapshots. Save editor-only sessions and keep failed saves visible.
+- Check provider connectivity and model availability without generating tokens;
+  allow explicitly opening a workspace with an unverified model. Normalize the
+  official Anthropic root to `/v1` for checks and chat requests.
+- Bound provider response headers to 30 seconds and body inactivity to 120
+  seconds while preserving Stop cancellation; setup checks use 10-second limits.
+- Connect retained audit event exports and checksum verification to the Audit
+  tab. Document the 100-event limit and that checksums do not authenticate logs.
+- Correct the macOS snapshot test's completeness assumption during process
+  churn; retain direct-identity and process-tree cleanup checks.
+- Clarify shell screening limits in onboarding, settings, and documentation.
+
+## 1.0.7
+
+The release that makes VTNexa usable by someone other than its author.
+
+- **macOS process control actually works.** The managed process tree was
+  broken on macOS in three independent ways, all invisible because CI only
+  ran `cargo test` on Linux:
+  - The tree token was invisible for Apple platform binaries — macOS strips
+    the environment block from `sysctl KERN_PROCARGS2` for `/bin/sh` and
+    friends, so a re-parented descendant could never be found and survived.
+    Managed children are now torn down by **process group**
+    (`kill(-pgid)`), which still reaches an orphan after its parent exits.
+  - `proc_listallpids` silently truncates under process-table churn (measured:
+    6 of ~780 pids), so the tree walk saw almost nothing. The per-parent
+    child list is now authoritative and a child the snapshot does not know is
+    read directly.
+  - `proc_pidinfo` cannot read a zombie on macOS, so a command that exited
+    immediately sometimes failed to spawn at all ("entity not found"). The
+    root's start-time fingerprint now degrades to "unknown" instead of
+    failing the spawn.
+  - `proc_listchildpids` answers with the *global* process count for a zombie
+    parent, which put hundreds of unrelated pids into the tree.
+  - The Rust suite on macOS went from 157 passed / 6 failed to **168 passed /
+    0 failed**, stable across 20 consecutive parallel runs. The
+    background-job tree tests now run on macOS too, and `cargo clippy
+    --all-targets` is clean on macOS (it was not before).
+- **macOS Developer ID signing and notarization are enforced.** The published
+  macOS builds were ad-hoc signed, so Gatekeeper blocked them and the macOS
+  auto-updater could never have worked. The Apple secrets are now REQUIRED
+  by the release preflight, the macOS release job fails closed without them,
+  and a new `release-verify-macos` job checks the shipped `.app` bundle's
+  signature, team identifier, Gatekeeper acceptance and stapled notarization
+  ticket before the release is published. The release verification is now
+  split into per-platform jobs with a separate `release-publish` job that
+  needs both.
+  - `docs/APPLE-SIGNING.md` is the step-by-step: enrolling in the paid Apple
+    Developer Program, creating the certificate, and turning it into the
+    four GitHub secrets.
+  - `scripts/apple-local-export.mjs` automates the fiddly part - it lists the
+    Developer ID identities in the login keychain, exports the `.p12`,
+    base64-encodes it the way Tauri expects, and prints the `gh secret set`
+    commands. It never prints the certificate or the password.
+- **Install documentation.** The README documents every published artifact
+  (macOS `.dmg`, Windows `.msi`/`.exe`, Linux `.deb`/`.rpm`/`.AppImage`),
+  the per-platform install steps, the 60-second first run, the Browser Use
+  prerequisite and the uninstall path. Previously only the Linux `.deb` was
+  mentioned.
+- **A feedback path in the app.** Settings → Help & feedback links to the
+  issue tracker, the release notes and the private security advisory form.
+  The app sends no telemetry, so this is the only way a problem reaches the
+  maintainer.
+- **Documentation honesty.** The README claimed a "Health monitoring"
+  feature (uptime tracking, memory usage, turn count, heartbeat checks) that
+  does not exist in the codebase. It has been removed. Every other feature
+  claim was checked against the implementation and is accurate.
+
 ## 1.0.6
 This release lands the subsystems that were sitting uncommitted and hardens
 release + security around them.

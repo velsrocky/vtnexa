@@ -16,6 +16,7 @@ export default function FirstRunView({
   onChangePath,
   onProviderChange,
   onCheckProvider,
+  onSkipProvider,
 }: {
   phase: InitPhase;
   workspaceRoot: string;
@@ -28,6 +29,7 @@ export default function FirstRunView({
   onChangePath: (path: string) => void | Promise<boolean>;
   onProviderChange: (patch: Partial<ProviderConfig>) => void;
   onCheckProvider: () => void | Promise<boolean>;
+  onSkipProvider: () => void;
 }) {
   const [pathDraft, setPathDraft] = useState(workspaceRoot);
   useEffect(() => setPathDraft(workspaceRoot), [workspaceRoot]);
@@ -57,7 +59,7 @@ export default function FirstRunView({
         <h1 id="first-run-title">Welcome to VTNexa</h1>
         {workspacePhase ? (
           <>
-            <p>Choose the folder Commander should work in. Your files stay on this device and are only accessed through the workspace controls you choose.</p>
+            <p>Choose the folder Commander should work in. File tools stay within this folder. Code and tool results are sent to your selected model provider.</p>
             {phase === "initializing" && <p role="status">Opening your workspace…</p>}
             {phase === "workspace-required" && <p role="status">No workspace folder is selected yet.</p>}
             {phase === "workspace-error" && <p className="operation-status error" role="alert">{error ?? "The workspace could not be opened."}</p>}
@@ -98,7 +100,7 @@ export default function FirstRunView({
             {phase === "provider-required" && <p className="operation-status error" role="alert">{error ?? "Provider details are required."}</p>}
             <p>
               {localProvider
-                ? "The local provider is configured. VTNexa will let you start it when you send your first request."
+                ? "Start your local model server and download the selected model, then check the connection."
                 : "Enter the endpoint and model for your OpenAI-compatible, Anthropic, Gemini, or local provider."}
             </p>
             <div className="first-run-provider">
@@ -118,13 +120,17 @@ export default function FirstRunView({
             <button type="button" className="primary-action" onClick={() => void onCheckProvider()} disabled={phase === "provider-checking" || operationPending}>
               {phase === "provider-checking" ? "Checking…" : "Check provider"}
             </button>
+            <button type="button" data-testid="skip-provider-check" onClick={onSkipProvider}>
+              Open workspace without checking model
+            </button>
+            <p className="muted small">You can use the editor and terminal without a model connection. This also lets you use providers that do not offer model listing; their connection remains unverified.</p>
           </>
         )}
         {(operation.status !== "error" || (phase !== "workspace-error" && phase !== "provider-required")) && (
           <OperationStatus state={operation} />
         )}
         <p className="trust-note">
-          Trust: VTNexa uses the selected folder as its workspace boundary. Review the folder path before continuing; actions outside it stay gated for your approval.
+          Trust: file tools enforce the workspace boundary. Shell commands can run project scripts with your OS permissions; command screening does not confine their effects. Review untrusted projects in review-gated mode.
         </p>
       </section>
     </main>

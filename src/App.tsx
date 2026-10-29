@@ -40,6 +40,7 @@ import { useInit } from "./hooks/useInit";
 import { useRoutines } from "./hooks/useRoutines";
 import { useMcp } from "./hooks/useMcp";
 import { useAutoApprove } from "./hooks/useAutoApprove";
+import { useCloseGuard } from "./hooks/useCloseGuard";
 import { useSandboxStatus } from "./hooks/useSandboxStatus";
 import { AppContextProvider, type AppContextValue } from "./context/AppContext";
 import FirstRunView from "./components/FirstRunView";
@@ -347,6 +348,7 @@ export default function App() {
     operation: workspaceOperation,
     retry: retryWorkspace,
     checkProvider,
+    openWithoutProvider,
     changeWorkspace,
     browseWorkspace,
   } = useInit({
@@ -546,6 +548,8 @@ export default function App() {
     ],
   );
 
+  const closeError = useCloseGuard({ ready: lifecyclePhase === "ready", agentActiveRef, saveSession: saveSessionNow });
+
   if (lifecyclePhase !== "ready") {
     return (
       <FirstRunView
@@ -560,12 +564,14 @@ export default function App() {
         onChangePath={changeWorkspace}
         onProviderChange={setEditCfg}
         onCheckProvider={checkProvider}
+        onSkipProvider={openWithoutProvider}
       />
     );
   }
 
   return (
     <div className="shell" data-testid="workbench">
+      {closeError && <div role="alert" className="operation-status error">{closeError}</div>}
       {showRoutines && (
         <Suspense fallback={<div className="dialog-loading" role="status">Loading…</div>}>
           <RoutinesModal

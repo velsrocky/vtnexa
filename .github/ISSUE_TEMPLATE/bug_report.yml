@@ -44,3 +44,24 @@ body:
       label: Audit trail (optional)
       description: Paste the relevant entry from the Audit tab → Copy JSON.
       render: json
+  - type: markdown
+    attributes:
+      value: |
+        ### Three quick questions
+
+        These are the questions that tell us most. One line each is plenty.
+  - type: textarea
+    id: first-task
+    attributes:
+      label: What did you ask it to do first, and did it do it?
+      placeholder: e.g. "Summarise this repo — yes / no, it read the README and stopped."
+  - type: textarea
+    id: gate
+    attributes:
+      label: Where did it stop and ask for permission, and was that the right moment?
+      placeholder: e.g. "It asked before writing src/main.rs. Right call, but it also asked before reading a file inside the workspace, which felt like too much."
+  - type: textarea
+    id: teach
+    attributes:
+      label: What did you have to teach it that it should have known?
+      placeholder: e.g. "That our tests need `pnpm test:unit`, not `npm test`."

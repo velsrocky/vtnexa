@@ -1,0 +1,21 @@
+{
+  "asOf": "2026-10-28",
+  "invited": 0,
+  "installed": 0,
+  "installRate": null,
+  "taskRuns": 0,
+  "completedAndTested": 0,
+  "taskSuccessRate": null,
+  "lostWorkIncidents": 0,
+  "day2": {
+    "eligible": 0,
+    "returned": 0,
+    "rate": null
+  },
+  "day7": {
+    "eligible": 0,
+    "returned": 0,
+    "rate": null
+  },
+  "unresolvedIssues": 0
+}

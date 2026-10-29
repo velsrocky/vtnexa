@@ -219,6 +219,12 @@ export async function runSmoke(options = {}) {
         description: "submit workspace path",
       }),
     );
+    await runStep("open workspace without a model server", async () => {
+      await retryUntil(async () => {
+        try { await client.findElement(testId("workbench")); return; } catch { /* still checking the model */ }
+        await client.click(await client.findElement(testId("skip-provider-check")));
+      }, { timeoutMs, description: "model check recovery or verified workbench" });
+    });
     await runStep("workspace reaches ready workbench", () => waitForTestId(client, "workbench", timeoutMs, "ready workbench"));
     await runStep("Tauri IPC returns the selected workspace", async () => {
       const input = await waitForTestId(client, "workspace-root", timeoutMs, "workspace root");

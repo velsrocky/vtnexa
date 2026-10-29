@@ -2,12 +2,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useInit } from "./useInit";
+import { probeProvider } from "../lib/providerProbe";
 import { newWorkspace } from "../lib/utils";
 import type { ProviderConfig } from "../types";
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 const dialogStub = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("../lib/providerProbe", () => ({ probeProvider: vi.fn(async () => undefined) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialogStub.open }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -20,6 +22,7 @@ function setInvokeImpl(fn: (cmd: string, args?: any) => Promise<any>) {
 }
 
 afterEach(() => {
+  vi.mocked(probeProvider).mockReset().mockResolvedValue(undefined);
   localStorage.clear();
   setInvokeImpl(() => Promise.reject(new Error("unexpected invoke (test did not stub it)")));
 });
@@ -76,6 +79,33 @@ function setup(provider?: ProviderConfig) {
 }
 
 describe("useInit boot", () => {
+  it("allows editor access while cancelling an unverified model check", async () => {
+    localStorage.setItem("vtai.workspaceRoot", "/w");
+    setInvokeImpl(async (_cmd, args?: any) => String(args?.path ?? "/w"));
+    let finish: () => void = () => undefined;
+    vi.mocked(probeProvider).mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const h = setup();
+    await flush();
+    expect(h.result.current.phase).toBe("provider-checking");
+    const signal = vi.mocked(probeProvider).mock.calls[0][1];
+    act(() => h.result.current.openWithoutProvider());
+    expect(signal?.aborted).toBe(true);
+    expect(h.result.current.phase).toBe("ready");
+    expect(h.result.current.operation).toMatchObject({ status: "success", message: expect.stringContaining("not verified") });
+    await act(async () => { finish(); });
+    expect(h.result.current.operation).toMatchObject({ status: "success", message: expect.stringContaining("not verified") });
+  });
+  it("keeps an unreachable provider retryable until the model check succeeds", async () => {
+    localStorage.setItem("vtai.workspaceRoot", "/w");
+    setInvokeImpl(async (_cmd, args?: any) => String(args?.path ?? "/w"));
+    vi.mocked(probeProvider).mockRejectedValueOnce(new Error("Provider returned HTTP 401"));
+    const h = setup();
+    await flush();
+    expect(h.result.current.phase).toBe("provider-required");
+    expect(h.result.current.error).toContain("401");
+    await act(async () => { await h.result.current.checkProvider(); });
+    expect(h.result.current.phase).toBe("ready");
+  });
   it("resolves the root, loads every domain in order, clamps cwd", async () => {
     localStorage.setItem("vtai.workspaceRoot", "/backend-home");
     setInvokeImpl(async (cmd, args?: any) => {

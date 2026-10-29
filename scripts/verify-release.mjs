@@ -197,6 +197,13 @@ function verifyUpdaterSignature(artifact, signature, publicKey, platform, asset)
   }
 }
 
+/** Verify a single downloaded updater artifact without publishing/installing it. */
+export function verifyUpdaterArtifact(artifact, signature, publicKey = configuredUpdaterPublicKey()) {
+  verifyUpdaterSignature(Buffer.from(artifact), parseUpdaterSignature(signature, "updater signature"),
+    parseUpdaterPublicKey(publicKey), "device-check", "downloaded artifact");
+  return true;
+}
+
 function decodePathname(pathname) {
   try {
     return decodeURIComponent(pathname);

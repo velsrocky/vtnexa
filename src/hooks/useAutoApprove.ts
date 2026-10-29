@@ -3,7 +3,8 @@ import { useEffect, useState } from "react";
 const STORAGE_KEY = "vtai.autoApproveWorkspace";
 
 /** Opencode-style autonomy: in-workspace operations skip approval dialogs.
- *  Defaults ON; outside-workspace access always pops the native dialog. */
+ *  Defaults ON; detected outside references require a native dialog.
+ *  Screening cannot infer the outside effects of project scripts. */
 export function useAutoApprove() {
   const [autoApproveWorkspace, setAutoApproveWorkspace] = useState<boolean>(() => {
     try {

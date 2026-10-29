@@ -19,13 +19,15 @@ export { isPathInsideRoot } from "./path";
  *
  *  Rule: agent operations that stay inside the workspace root run WITHOUT an
  *  approval dialog (token is claimed silently by the trusted frontend, never
- *  by the model). Anything reaching outside — absolute paths elsewhere, `~`,
+ *  by the model). Detected outside references — absolute paths elsewhere, `~`,
  *  sudo, piped-to-shell downloads — keeps the native OS dialog. Browser and
  *  MCP tools are outside by nature and are never auto-approved.
  *
  *  This is a UX gate, not the security boundary: the Rust backend still
  *  refuses destructive patterns, credential reads, and paths outside the
- *  root even when blindly approved. A prompt-injected model CAN drive
+ *  root even when blindly approved. Shell script effects are not confined by
+ *  these checks: an accepted project command can access outside files.
+ *  A prompt-injected model CAN drive
  *  in-workspace writes/shell without a popup in auto mode — that is the
  *  accepted tradeoff, documented in README/SECURITY. */
 

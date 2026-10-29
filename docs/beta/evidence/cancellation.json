@@ -1,0 +1,24 @@
+{
+  "startedAt": "2026-10-28T14:04:18.403Z",
+  "scope": "production TS agent + real provider + real fixture files; filesystem IPC adapter, not native GUI",
+  "provider": {
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "llama3.1:8b",
+    "kind": "openai"
+  },
+  "output": "/var/folders/c7/jxg1mfsj5nq1sqv091f88kd40000gn/T/vtnexa-live-validation-2LExTN",
+  "tasks": [],
+  "cancellation": {
+    "passed": true,
+    "streamed": true,
+    "firstChunk": "The",
+    "errorName": "AbortError",
+    "elapsedMs": 278
+  },
+  "requestAfterStop": {
+    "passed": true,
+    "receivedResponse": true,
+    "reply": "Ready"
+  },
+  "finishedAt": "2026-10-28T14:04:19.047Z"
+}

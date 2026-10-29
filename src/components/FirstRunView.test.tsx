@@ -17,11 +17,18 @@ function props(overrides: Partial<React.ComponentProps<typeof FirstRunView>> = {
     onChangePath: vi.fn(),
     onProviderChange: vi.fn(),
     onCheckProvider: vi.fn(),
+    onSkipProvider: vi.fn(),
     ...overrides,
   };
 }
 
 describe("FirstRunView", () => {
+  it("lets the user open the workspace with an explicitly unverified model", () => {
+    const onSkipProvider = vi.fn();
+    render(<FirstRunView {...props({ phase: "provider-checking", onSkipProvider })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open workspace without checking model" }));
+    expect(onSkipProvider).toHaveBeenCalledOnce();
+  });
   it("makes Open Folder the primary recovery action and explains trust", () => {
     const onOpenFolder = vi.fn();
     render(<FirstRunView {...props({ onOpenFolder })} />);
@@ -55,7 +62,7 @@ describe("FirstRunView", () => {
     expect(screen.getByRole("textbox", { name: "Endpoint" })).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "Model" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Check provider" })).toBeTruthy();
-    expect(screen.getByText(/local provider is configured/i)).toBeTruthy();
+    expect(screen.getByText(/start your local model server/i)).toBeTruthy();
   });
 
   it("renders an explicit ready state", () => {

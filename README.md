@@ -1,8 +1,9 @@
 # VTNexa
 
 **A private agentic workspace for your code.** A desktop app
-(Tauri v2 + React) where a tool-calling agent drives your workspace — autonomous
-inside it, approval-gated the moment it reaches outside.
+(Tauri v2 + React) where a tool-calling agent drives your workspace, with
+workspace-scoped file tools and configurable approval gates. Shell screening
+does not isolate code executed by project scripts.
 
 ![VTNexa window](docs/screenshot.png)
 
@@ -16,12 +17,13 @@ no accounts, no cloud round-trip you didn't choose.
 Most coding agents either (a) ask for permission on every keystroke or
 (b) quietly edit your repo and hope for the best. VTNexa takes a third path:
 
-- **Autonomous inside, gated outside.** File writes, shell commands, renames,
+- **Workspace autonomy with command screening.** File writes, shell commands, renames,
   deletes and commits *inside your workspace* run free — no popups. The
-  moment an action reaches outside (absolute paths elsewhere, `~`, sudo,
-  piped-to-shell downloads, browser and MCP tools), a native approval dialog
-  pops. Toggle it in Settings → Commander autonomy (review-gated mode asks
-  for everything, like before).
+  command screen detects outside access (absolute paths elsewhere, `~`, sudo,
+  piped-to-shell downloads), or a browser/MCP action is requested, a native
+  approval dialog appears. Project scripts and tools can have effects outside
+  the folder that screening cannot detect. Toggle Settings → Commander autonomy
+  for review-gated mode. Neither mode is a full shell sandbox.
 - **Local by default.** `ollama pull qwen2.5-coder:7b` and you have a private
   coding agent. Switch models per window — grind with a cheap local model in
   one window, think with a frontier model in another.
@@ -29,8 +31,8 @@ Most coding agents either (a) ask for permission on every keystroke or
   provider, terminal, chat history, and audit trail. `⧉ New Window` (or just
   launch the app again) opens a sibling.
 - **Full transparency.** Per-window token counts, estimated cost, tool
-  timing, and a persisted audit log of every tool call and your decision on
-  it.
+  timing, and the latest 100 audit events per session, including approval
+  decisions. Argument details are capped.
 
 ## Features
 
@@ -38,7 +40,7 @@ Most coding agents either (a) ask for permission on every keystroke or
   directly, run shell commands, typecheck edited files and query language
   servers (`lsp`: hover, definition, references, symbols), drive a real
   Chromium browser (navigate, click, type, screenshot with vision), and commit
-  to git. In-workspace work runs free; outside-workspace access, browser
+  to git. Commands accepted by screening run free; detected outside access, browser
   actions and MCP tools pop the native approval dialog (backend single-use
   tokens). Review-gated mode (Settings) restores per-action approval with
   side-by-side Diff staging. Long shell work (installs, builds, test suites)
@@ -83,16 +85,94 @@ Most coding agents either (a) ask for permission on every keystroke or
     dialog and backend screening, not the jail.
   Without firejail, the same command runs behind the same screening +
   approval + timeout path (no second, unsandboxed execution).
-- **Rate limiting** — 30 turns per minute per window, 500 turns per day (prevents token exhaustion)
-- **Audit log export** — Export full audit trail with cryptographic hash verification
-- **Health monitoring** — Uptime tracking, memory usage, turn count, heartbeat checks
+- **Rate limiting** — 30 expensive tool operations per minute per window, 500 per day while the app runs. This is not a provider spending cap.
+- **Audit log export** — Export retained events as JSON and verify their SHA-256 checksum in the Audit tab. This detects edits relative to the included checksum; it does not authenticate the source or prove completeness.
 - **Trusted paths** — Skip approval dialogs for safe directories (e.g., `docs/`, `src/generated/`, `tests/__snapshots__/`). Configure via Settings → Trusted Paths to reduce UX verbosity without compromising safety.
 
 ## Install
 
-**Linux (deb):** grab the latest release `.deb` and `sudo dpkg -i`.
+Download the latest release from
+[GitHub Releases](https://github.com/velsrocky/vtnexa/releases/latest).
 
-**From source:**
+| Platform | Architecture | Asset | Notes |
+|---|---|---|---|
+| macOS | Apple Silicon (arm64) | `VTNexa_<version>_aarch64.dmg` | Drag to Applications; check the release notes for signing status |
+| Windows | x86_64 | `VTNexa_<version>_x64_en-US.msi` | Signed; Windows SmartScreen may ask once |
+| Windows | x86_64 | `VTNexa_<version>_x64-setup.exe` | NSIS installer, same signature |
+| Linux | x86_64 | `VTNexa_<version>_amd64.deb` | Debian/Ubuntu |
+| Linux | x86_64 | `VTNexa-<version>-1.x86_64.rpm` | Fedora/RHEL |
+| Linux | x86_64 | `VTNexa_<version>_amd64.AppImage` | Portable, no install |
+
+**macOS.** Open the `.dmg` and drag **VTNexa** into **Applications**. Public
+release candidates must pass Developer ID signing, notarization, and
+Gatekeeper checks before distribution. A local ad-hoc test build does not
+establish those properties. There is no Intel (x86_64) build yet — Apple
+Silicon only.
+
+**Windows.** Run the `.msi` (or the `.exe` — pick either; both are signed with
+the same certificate). Windows SmartScreen shows an "unrecognized app" prompt
+for any newly published app the first time; choose **More info → Run anyway**.
+
+**Linux.**
+
+```sh
+sudo dpkg -i VTNexa_<version>_amd64.deb     # Debian/Ubuntu
+sudo rpm -i VTNexa-<version>-1.x86_64.rpm    # Fedora/RHEL
+chmod +x VTNexa_<version>_amd64.AppImage && ./VTNexa_<version>_amd64.AppImage
+```
+
+### First run (60 seconds)
+
+1. **Pick a workspace.** VTNexa opens on a first-run screen and asks for the
+   folder Commander should work in. File tools are confined to that folder;
+   shell commands can execute project scripts with your OS permissions.
+2. **Pick a model.** Either point the provider bar at a local Ollama
+   (`http://localhost:11434/v1`, model `qwen2.5-coder:7b`) or paste any
+   OpenAI-compatible `baseUrl` + key, or choose Anthropic/Gemini. The key is
+   stored in the **OS keychain** (Keychain / Credential Manager / Secret
+   Service), never in the workspace and never in a session file.
+3. **Start one local model** if you want to run fully offline:
+
+   ```sh
+   ollama serve
+   ollama pull qwen2.5-coder:7b
+   ```
+
+   Setup checks the provider's `/models` endpoint and confirms the selected
+   model is listed, without generating tokens. The endpoint must support model
+   listing for verification. You can explicitly open the workspace without
+   checking a model, including for providers without model listing. A successful
+   check confirms availability, not tool-calling quality.
+
+4. **Talk to it.** Type in the Commander pane: *"read README.md and summarise
+   this project"*. In-workspace reads and writes run without popups; anything
+   detected by screening as reaching outside asks first. This does not constrain
+   the effects of scripts run by an otherwise auto-approved command.
+
+### Optional: Browser Use
+
+Browser Use needs a **system Chromium browser** (Google Chrome, Microsoft Edge
+including the built-in Windows Edge, or Chromium). It is not bundled. The
+Browser pane shows what is missing and offers a **Recheck** action. Set
+`VTAI_BROWSER_CHROME` to point at an executable if discovery cannot find one.
+See [Browser Use runtime](#browser-use-runtime) below for the details.
+
+### Uninstall
+
+- **macOS** — delete the app from Applications. The Browser Use profile
+  (your signed-in Chromium session) lives in
+  `~/Library/Application Support/VTNexa/browser-profile` — remove that folder
+  to forget it.
+- **Windows** — Settings → Apps → VTNexa → Uninstall. The browser profile is
+  in `%LOCALAPPDATA%\VTNexa\browser-profile`.
+- **Linux** — `sudo dpkg -r vt-nexa` (or `sudo rpm -e vt-nexa`).
+
+**Your data is not in the app.** Notes, plans, memory, routines and chat
+sessions live in `<your workspace>/.nexa/` — delete that folder to remove
+them. API keys live in the OS keychain and are removed with the keychain
+entry, not with the app. Nothing is copied anywhere else.
+
+### From source
 
 ```sh
 # prereqs: Node 24.18.0/pnpm, Rust, and Tauri's system deps
@@ -131,9 +211,12 @@ Linux. The Browser pane shows missing prerequisites and a Recheck action before
 Start is enabled.
 
 **Model:** start Ollama (`ollama serve`, `ollama pull qwen2.5-coder:7b`) or
-paste any provider's baseUrl + key into the provider bar. Tip: pick a model
-that handles tool calling well (`qwen2.5:7b-instruct`, `llama3.1:8b`,
-`qwen2.5-coder:32b`); VTNexa also recovers tool calls printed as plain text.
+paste a provider's baseUrl + key into the provider bar. `auto` uses native
+Ollama structured actions at the standard local port 11434; select `ollama`
+for other Ollama endpoints, or `openai` to keep the compatibility protocol.
+Qwen Coder 7B passed the three small device coding checks described in the
+[local-model report](docs/LOCAL-MODEL-DEBUG-2026-10-29.md). Other models can
+still produce incorrect changes; inspect diffs and run your project's tests.
 
 ## Security model (honest version)
 
@@ -141,15 +224,17 @@ This section documents exactly what is and isn't protected. Read it carefully.
 
 ### ✅ What IS protected
 
-- **Outside access pops a dialog.** Anything reaching outside the workspace
+- **Detected outside access pops a dialog.** Commands screened as reaching outside the workspace
   (absolute paths elsewhere, `~`, sudo, piped-to-shell downloads, browser and
   MCP tools) pops a native OS dialog — page content cannot click it.
   In-workspace file writes, shell, renames, deletes and commits run free
   (opencode-style; toggle review-gated mode in Settings for per-action
-  approval). Read-only tools always run free.
+  approval). Project scripts can access outside paths without those paths
+  appearing in the command string. File tools enforce their own workspace
+  boundary. Read-only tools run without approval.
 - **Workspace confinement.** File tools are confined server-side to the workspace root you pick (per window), with symlink-safe checks and a sensitive-path deny list.
 - **Secrets.** API keys go to the OS keychain (per endpoint+model), never to session files, history, drafts, or the workspace. Without a keychain daemon they stay in memory for the current session only — never written to disk — and the UI says so; a restart requires re-entry.
-- **Destruction patterns blocked.** The backend refuses obviously destructive shell patterns (`rm -rf /`, `mkfs`, `dd`, `curl | sh` pipe downloads to shell) and direct reads of credential material (`~/.ssh`, AWS creds, `/etc/shadow`) — even when auto-approved or blindly approved.
+- **Destruction patterns screened.** The backend refuses known destructive shell patterns (`rm -rf /`, `mkfs`, raw disk writes) and direct credential reads (`~/.ssh`, AWS creds, `/etc/shadow`). Download-to-shell commands require review and are not universally blocked. Screening cannot determine all effects of arbitrary code.
 - **Read-only skills are confined.** Skills that scope themselves to read-only
   work (e.g. `/rate`) can neither be offered nor trigger side-effect tools —
   refused fail-closed before any dialog could appear.
@@ -167,6 +252,11 @@ dialog on every side effect.
 ### ⚠️ What is NOT sandboxed
 
 **This is the critical limitation: Approved commands run as your OS user with your full permissions.**
+
+Auto-approved project commands have the same limitation: `npm test`, build
+tools, hooks, and local scripts may read or write outside the workspace without
+those effects being visible to the command screen. Firejail's optional system
+directory protections do not restrict all access to your home directory.
 
 - The interactive terminal (PTY) has NO screening - it's your shell.
 - `curl ... | sh` is allowed in the backend but WARNINGED in the native approval dialog - it's how many toolchains work.
@@ -252,6 +342,10 @@ changes in `CHANGELOG.md`.
 
 Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Early
 project: expect rough edges, label experiments accordingly.
+
+Looking for the current build? Grab it from
+[GitHub Releases](https://github.com/velsrocky/vtnexa/releases/latest) — the
+[install steps are above](#install).
 
 ## License
 

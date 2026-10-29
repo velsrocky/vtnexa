@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { useSession } from "./useSession";
+import { restoreWorkspace, snapshotWorkspace, useSession } from "./useSession";
 import { newWorkspace } from "../lib/utils";
 import type { Workspace } from "../types";
 
@@ -62,6 +62,20 @@ function setup(ws: Workspace = BASE_WS) {
 }
 
 describe("useSession.saveSessionNow", () => {
+  it("preserves explicit Ollama selection on a custom endpoint after restoring", () => {
+    const ws = { ...BASE_WS, provider: { ...BASE_WS.provider, baseUrl: "http://127.0.0.1:12000", kind: "ollama" as const } };
+    expect(restoreWorkspace(snapshotWorkspace(ws, 500), ws.id).provider.kind).toBe("ollama");
+  });
+  it("roundtrips large unsaved buffers and drafts without truncation", () => {
+    const content = "😀".repeat(40_000) + "END";
+    const original = "o".repeat(70_000);
+    const draft = "d".repeat(25_000);
+    const ws = { ...BASE_WS, tabs: ["/w/large.txt"], buffers: { "/w/large.txt": content }, originals: { "/w/large.txt": original }, chatDraft: draft };
+    const restored = restoreWorkspace(JSON.parse(JSON.stringify(snapshotWorkspace(ws, 500))), ws.id);
+    expect(restored.buffers["/w/large.txt"]).toBe(content);
+    expect(restored.originals["/w/large.txt"]).toBe(original);
+    expect(restored.chatDraft).toBe(draft);
+  });
   it("persists v7 per-window slot, strips secrets and non-chat roles", async () => {
     const { result, saves } = setup();
     await act(async () => {
@@ -293,7 +307,7 @@ describe("useSession.loadSession", () => {
     expect(restored[0].provider).toMatchObject({ baseUrl: "https://y.test", apiKey: "REFILLED", kind: "gemini" });
   });
 
-  it("validates UI fields and caps drafts", async () => {
+  it("validates UI fields and preserves drafts", async () => {
     const raw = JSON.stringify({
       version: 6,
       workspace: {
@@ -318,7 +332,7 @@ describe("useSession.loadSession", () => {
     });
     expect(restored[0].centerTab).toBe("edit");
     expect(restored[0].sideTab).toBe("chat");
-    expect(restored[0].chatDraft).toHaveLength(20000);
+    expect(restored[0].chatDraft).toHaveLength(25000);
   });
 
   it("ignores empty or corrupt payloads but still readies", async () => {

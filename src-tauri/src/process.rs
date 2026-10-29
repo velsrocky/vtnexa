@@ -529,7 +529,10 @@ fn process_args_unavailable(raw_os_error: Option<i32>) -> bool {
     matches!(raw_os_error, Some(libc::EINVAL) | Some(libc::EIO))
 }
 
-#[cfg(unix)]
+/// The Linux path reads a process's environment from `/proc/<pid>/environ`.
+/// macOS uses `KERN_PROCARGS2` instead (`macos_procargs_has_exact_token`),
+/// so this helper only exists on Linux.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn environment_has_exact_token(data: &[u8], token: &str) -> bool {
     if token.is_empty() || token.as_bytes().contains(&0) {
         return false;
@@ -927,6 +930,15 @@ fn macos_process_has_token(pid: libc::pid_t, token: &str) -> io::Result<bool> {
 
 #[cfg(target_os = "macos")]
 fn read_macos_children(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
+    // `proc_listchildpids` answers with the GLOBAL process count for a
+    // ZOMBIE parent on macOS (the parent has no task info left, so the
+    // kernel falls back to a global number). Treating that as a child count
+    // would put hundreds of unrelated pids into the tree. A zombie parent has
+    // no live children of ours to find by walking anyway - the process-group
+    // kill covers them - so answer with an empty list.
+    if read_macos_record(pid).is_err() {
+        return Ok(Vec::new());
+    }
     let count = unsafe { libc::proc_listchildpids(pid, std::ptr::null_mut(), 0) };
     if count < 0 {
         return Err(io::Error::last_os_error());
@@ -1047,8 +1059,13 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
         }
         let record = match read_macos_record(pid) {
             Ok(record) => record,
-            Err(error) if process_is_gone(&error) => continue,
-            Err(error) => return Err(error),
+            // A foreign PID we cannot read (exited mid-scan, or a protected
+            // system process rejecting proc_pidinfo with EPERM/EINVAL/EIO) is
+            // never a token-bearing descendant of ours. Skip it: aborting the
+            // whole scan on one unreadable PID would fail every managed spawn
+            // (git, shell) on a busy host. The token-missing guard below still
+            // fails loudly if nothing at all can be read.
+            Err(_) => continue,
         };
         if let Some(token) = token {
             if record.state == b'Z' {
@@ -1061,9 +1078,9 @@ fn capture_macos_snapshot(token: Option<&str>) -> io::Result<ProcessSnapshot> {
                         marked.insert(pid, record.identity);
                     }
                     Ok(_) => {}
-                    Err(error) if process_is_gone(&error) => {}
-                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
-                    Err(error) => return Err(error),
+                    // Unreadable now (exited/recycled/protected): never a
+                    // confirmable descendant of ours. Skip; refresh re-scans.
+                    Err(_) => {}
                 },
                 Ok(false) => {}
                 Err(error) if process_is_gone(&error) => unreadable += 1,
@@ -1465,6 +1482,30 @@ fn read_process_record(pid: libc::pid_t) -> io::Result<ProcessRecord> {
     })
 }
 
+/// Read a process record, retrying briefly while the process is in a
+/// transient "gone" state.
+///
+/// A process that is exiting can be observed as unreadable for a moment: the
+/// kernel tears down its task info before the zombie is fully published.
+/// A short-lived command (`git config`, `true`) hits that window regularly,
+/// and failing the whole spawn on it would make ordinary commands fail at
+/// random on a busy machine.
+#[cfg(unix)]
+fn read_process_record_resilient(pid: libc::pid_t) -> io::Result<ProcessRecord> {
+    let mut last: Option<io::Error> = None;
+    for attempt in 0..5u64 {
+        match read_process_record(pid) {
+            Ok(record) => return Ok(record),
+            Err(error) if process_is_gone(&error) => {
+                last = Some(error);
+                std::thread::sleep(Duration::from_millis(1 + attempt));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::from(io::ErrorKind::NotFound)))
+}
+
 #[cfg(unix)]
 fn read_children_data(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1733,11 +1774,23 @@ fn token_candidate_start_is_valid(root: ProcessIdentity, candidate: ProcessIdent
     }
 }
 
+/// Does `record` still describe the process `identity` refers to?
+///
+/// A `start_time` of 0 means "the exact start time is unknown" (see
+/// `UnixTree::capture`): the pid is trusted on its own. That is safe for the
+/// managed ROOT, because we spawned it and the kernel holds its pid until we
+/// reap it - a recycled pid is impossible while the process (or its zombie)
+/// is still ours.
+#[cfg(unix)]
+fn identity_matches(record: &ProcessRecord, identity: ProcessIdentity) -> bool {
+    identity.start_time == 0 || record.identity == identity
+}
+
 #[cfg(unix)]
 fn identity_running(identity: ProcessIdentity) -> io::Result<bool> {
     match read_process_record(identity.pid) {
         Ok(record) => {
-            Ok(record.identity == identity && !matches!(record.state, b'Z' | b'X' | b'x'))
+            Ok(identity_matches(&record, identity) && !matches!(record.state, b'Z' | b'X' | b'x'))
         }
         Err(error) if process_is_gone(&error) => Ok(false),
         Err(error) => Err(error),
@@ -1751,7 +1804,7 @@ fn signal_identity(identity: ProcessIdentity, signal: libc::c_int) -> io::Result
         Err(error) if process_is_gone(&error) => return Ok(false),
         Err(error) => return Err(error),
     };
-    if record.identity != identity {
+    if !identity_matches(&record, identity) {
         return Ok(false);
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -1760,7 +1813,7 @@ fn signal_identity(identity: ProcessIdentity, signal: libc::c_int) -> io::Result
         if pidfd >= 0 {
             let current = read_process_record(identity.pid);
             let result = match current {
-                Ok(current) if current.identity == identity => unsafe {
+                Ok(current) if identity_matches(&current, identity) => unsafe {
                     libc::syscall(
                         libc::SYS_pidfd_send_signal,
                         pidfd,
@@ -1808,7 +1861,7 @@ fn signal_identity(identity: ProcessIdentity, signal: libc::c_int) -> io::Result
         Err(error) if process_is_gone(&error) => return Ok(false),
         Err(error) => return Err(error),
     };
-    if current.identity != identity {
+    if !identity_matches(&current, identity) {
         return Ok(false);
     }
     if unsafe { libc::kill(identity.pid, signal) } == 0 {
@@ -1816,6 +1869,76 @@ fn signal_identity(identity: ProcessIdentity, signal: libc::c_int) -> io::Result
     }
     let error = io::Error::last_os_error();
     if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+/// The managed root's process group, but ONLY when the root genuinely leads
+/// its own group.
+///
+/// `configure_managed_command` puts every managed child in a fresh group
+/// (`process_group(0)`), and descendants inherit that group. The group is the
+/// only handle that still identifies a descendant after its parent exits: an
+/// orphan is reparented to init, so the parent/child map loses it, and the
+/// `VTNEXA_TREE_TOKEN` marker is invisible on macOS for Apple platform
+/// binaries (the kernel strips the environment from `KERN_PROCARGS2` for
+/// them). `kill(-pgid)` still reaches it.
+///
+/// Returns `None` unless the root is its own group leader AND that group is
+/// not our own - a group kill that reached the VTNexa process itself would be
+/// catastrophic, so this fails closed.
+#[cfg(unix)]
+fn managed_process_group(root_pid: libc::pid_t, self_pid: libc::pid_t) -> Option<libc::pid_t> {
+    if root_pid <= 1 || self_pid <= 1 {
+        return None;
+    }
+    let group = unsafe { libc::getpgid(root_pid) };
+    if group <= 1 || group != root_pid {
+        // Not a group leader (setpgid failed, or the root already exited and
+        // was reparented): no group handle, no group kill.
+        return None;
+    }
+    let own_group = unsafe { libc::getpgrp() };
+    if group == own_group {
+        return None;
+    }
+    // Belt and braces: the group must not contain us.
+    if unsafe { libc::getpgid(self_pid) } == group {
+        return None;
+    }
+    Some(group)
+}
+
+/// Signal every member of `group`. Returns whether the signal was delivered to
+/// at least one process.
+///
+/// Two "nothing happened" cases are both reported as `Ok(false)`, because for
+/// cleanup purposes they are equivalent:
+///
+/// - `ESRCH` - the group is already empty.
+/// - `EPERM` - the group still exists, but no member can be signalled. On
+///   macOS this is what a group whose only member is a ZOMBIE returns (a
+///   zombie is still a group member, but signals to it are refused). That is
+///   the normal case for a command that exits immediately: the group leader
+///   is a zombie by the time the tree is torn down. The per-PID walk below
+///   still handles every identity we know about, and the caller decides
+///   success from whether anything is still alive - so this must not fail the
+///   whole operation.
+#[cfg(unix)]
+fn signal_process_group(group: libc::pid_t, signal: libc::c_int) -> io::Result<bool> {
+    if group <= 1 {
+        return Ok(false);
+    }
+    if unsafe { libc::kill(-group, signal) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH)
+        || error.raw_os_error() == Some(libc::EPERM)
+        || error.kind() == io::ErrorKind::PermissionDenied
+    {
         Ok(false)
     } else {
         Err(error)
@@ -1858,6 +1981,10 @@ pub(crate) struct UnixTree {
     token: Option<String>,
     self_pid: libc::pid_t,
     reaps_descendants: bool,
+    /// Process group of the managed root, when the root really leads its own
+    /// group (`process_group(0)`). Killing the group catches descendants that
+    /// are otherwise undiscoverable - see `signal_process_group`.
+    group: Option<libc::pid_t>,
     known: HashMap<libc::pid_t, ProcessIdentity>,
 }
 
@@ -1866,13 +1993,31 @@ impl UnixTree {
     pub(crate) fn capture(pid: u32, token: Option<String>) -> io::Result<Self> {
         ensure_unix_tree_ready()?;
         let pid = pid_from_u32(pid)?;
-        let root = read_process_record(pid)?.identity;
+        // The root's exact start time is a pid-reuse fingerprint. It is not
+        // always obtainable: on macOS `proc_pidinfo` cannot read a ZOMBIE,
+        // and a command that exits immediately (`true`, `git config`) is
+        // already a zombie by the time we look. Failing the whole spawn
+        // there would make ordinary commands fail at random, so degrade to
+        // "start time unknown" (start_time 0) instead. That is safe: we
+        // spawned the root and the kernel holds its pid until we reap it, so
+        // the pid cannot be recycled underneath us.
+        let root = match read_process_record_resilient(pid) {
+            Ok(record) => record.identity,
+            Err(error) if process_is_gone(&error) => ProcessIdentity { pid, start_time: 0 },
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "managed root record is unreadable: {error}"
+                )))
+            }
+        };
         let self_pid = pid_from_u32(std::process::id())?;
+        let group = managed_process_group(pid, self_pid);
         let mut tree = Self {
             root,
             token,
             self_pid,
             reaps_descendants: cfg!(any(target_os = "linux", target_os = "android")),
+            group,
             known: HashMap::from([(pid, root)]),
         };
         tree.refresh()?;
@@ -1881,7 +2026,8 @@ impl UnixTree {
 
     pub(crate) fn refresh(&mut self) -> io::Result<()> {
         let started = Instant::now();
-        let snapshot = capture_process_snapshot(self.self_pid, self.token.as_deref())?;
+        let snapshot = capture_process_snapshot(self.self_pid, self.token.as_deref())
+            .map_err(|error| io::Error::other(format!("process snapshot failed: {error}")))?;
         if started.elapsed() >= TREE_CLEANUP_TIMEOUT {
             return Err(io::Error::other(
                 "managed process tree scan exceeded cleanup time bound",
@@ -1903,7 +2049,10 @@ impl UnixTree {
         if snapshot
             .records
             .get(&self.root.pid)
-            .is_some_and(|record| record.identity == self.root)
+            .is_some_and(|record| identity_matches(record, self.root))
+            // A degraded root (unknown start time) is trusted by pid: the
+            // snapshot may not know it either, but the pid is still ours.
+            || self.root.start_time == 0
         {
             known.insert(self.root.pid, self.root);
             queue.push_back(self.root.pid);
@@ -1933,11 +2082,38 @@ impl UnixTree {
             match read_children_data(parent) {
                 Ok(extra) => children.extend(extra),
                 Err(error) if process_is_gone(&error) => {}
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(io::Error::other(format!(
+                        "child list for {parent} failed: {error}"
+                    )))
+                }
             }
             for child in children {
-                let Some(record) = snapshot.records.get(&child).copied() else {
-                    continue;
+                // The global enumeration can be TRUNCATED: on macOS,
+                // `proc_listallpids` silently returns a short list (often
+                // only the newest handful of pids) when the process table is
+                // churning, so a child we know exists may be missing from the
+                // snapshot. The per-parent child list (`proc_listchildpids`)
+                // is not subject to that, so it is the authoritative source:
+                // read the child's record directly when the snapshot does
+                // not have it.
+                let record = match snapshot.records.get(&child).copied() {
+                    Some(record) => record,
+                    None => match read_process_record(child) {
+                        Ok(record) => {
+                            if record.ppid != parent {
+                                // Re-parented between the child list and the
+                                // record read: it is no longer our descendant.
+                                continue;
+                            }
+                            record
+                        }
+                        Err(error) if process_is_gone(&error) => continue,
+                        // A child we cannot read is not ours to kill (and is
+                        // never token-bearing); skip it rather than aborting
+                        // the whole scan.
+                        Err(_) => continue,
+                    },
                 };
                 if record.ppid != parent
                     && !previous.contains_key(&child)
@@ -2012,11 +2188,29 @@ impl UnixTree {
             if let Err(error) = self.refresh() {
                 remember_error(&mut failure, error);
             }
+            // Group-wide stop first, then the per-PID walk. The group is the
+            // only reliable handle for a descendant whose parent already
+            // exited (see `managed_process_group`), so it has to be signalled
+            // before the walk decides the tree is finished.
+            if let Some(group) = self.group {
+                match signal_process_group(group, libc::SIGSTOP) {
+                    Ok(true) => {}
+                    Ok(false) => {}
+                    Err(error) => remember_error(&mut failure, error),
+                }
+            }
             let mut identities: Vec<_> = self.known.values().copied().collect();
             identities.sort_by_key(|identity| u8::from(identity.pid != self.root.pid));
             for identity in &identities {
                 if let Err(error) = signal_identity(*identity, libc::SIGSTOP) {
                     remember_error(&mut failure, error);
+                }
+            }
+            if let Some(group) = self.group {
+                match signal_process_group(group, libc::SIGKILL) {
+                    Ok(true) => {}
+                    Ok(false) => {}
+                    Err(error) => remember_error(&mut failure, error),
                 }
             }
             identities.reverse();
@@ -2731,6 +2925,44 @@ mod tests {
         assert!(std::env::var_os(TREE_TOKEN_ENV).is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn managed_group_is_only_accepted_for_a_real_group_leader() {
+        let self_pid = pid_from_u32(std::process::id()).unwrap();
+        // Our own process is not a group leader of a private group, so the
+        // helper must refuse it: a group kill that reached VTNexa itself
+        // would be catastrophic.
+        assert_eq!(managed_process_group(self_pid, self_pid), None);
+        // Invalid pids never produce a group handle.
+        assert_eq!(managed_process_group(0, self_pid), None);
+        assert_eq!(managed_process_group(1, self_pid), None);
+        assert_eq!(managed_process_group(-1, self_pid), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_group_is_accepted_for_a_private_group_leader() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30");
+        let mut child = spawn_managed(&mut command).unwrap();
+        let pid = pid_from_u32(child.child_mut().id()).unwrap();
+        let self_pid = pid_from_u32(std::process::id()).unwrap();
+        // The managed child leads its own group (process_group(0)).
+        let group = managed_process_group(pid, self_pid);
+        assert_eq!(group, Some(pid));
+        // The group must not contain the test process.
+        assert_ne!(unsafe { libc::getpgid(self_pid) }, group.unwrap());
+        let _ = child.terminate();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signalling_an_empty_group_is_not_an_error() {
+        // ESRCH (no such group) is a successful cleanup, not a failure.
+        assert!(!signal_process_group(0, libc::SIGKILL).unwrap());
+        assert!(!signal_process_group(-5, libc::SIGKILL).unwrap());
+    }
+
     #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn missing_proc_snapshot_fails_closed() {
@@ -2756,7 +2988,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_process_identity_enumeration_compiles() {
+    fn macos_process_snapshot_covers_table_and_preserves_identity() {
         let pid = pid_from_u32(std::process::id()).unwrap();
         let record = read_process_record(pid).unwrap();
         assert_eq!(record.identity.pid, pid);
@@ -2779,6 +3011,11 @@ mod tests {
             "snapshot captured {} of {listed} listed processes",
             snapshot.records.len()
         );
+        for (listed_pid, listed_record) in &snapshot.records {
+            assert_eq!(*listed_pid, listed_record.identity.pid);
+            assert!(*listed_pid > 0);
+        }
+        assert_eq!(read_macos_record(pid).unwrap().identity, record.identity);
     }
 
     #[cfg(target_os = "macos")]

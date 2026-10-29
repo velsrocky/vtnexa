@@ -102,7 +102,7 @@ export type CenterTab = "edit" | "diff" | "preview" | "browser" | "git";
 /** Right-rail tab. */
 export type SideTab = "chat" | "pad" | "plan" | "memory" | "audit";
 
-export type ProviderKind = "auto" | "openai" | "anthropic" | "gemini";
+export type ProviderKind = "auto" | "openai" | "anthropic" | "gemini" | "ollama";
 
 export type OperationState =
   | { status: "idle" }

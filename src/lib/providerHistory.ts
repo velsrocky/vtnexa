@@ -36,7 +36,7 @@ export interface LegacySecret {
 }
 
 export function asKind(v: unknown): ProviderKind {
-  return v === "openai" || v === "anthropic" || v === "gemini" ? v : "auto";
+  return v === "openai" || v === "anthropic" || v === "gemini" || v === "ollama" ? v : "auto";
 }
 
 function sanitizeEntry(value: ProviderEntry): ProviderEntry {

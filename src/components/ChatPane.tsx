@@ -5,6 +5,8 @@ import type { NexaState } from "../hooks/useNexa";
 import { useInputHistory } from "../hooks/useInputHistory";
 import { renderChatMarkdown } from "../lib/chatMarkdown";
 import { toolArgsSummary } from "../lib/toolCard";
+import { auditEntries, exportAuditLog, verifyAuditExport } from "../lib/audit-export";
+import { windowLabel } from "../hooks/useWorkspaceState";
 import OperationStatus from "./OperationStatus";
 
 /** Assistant replies render as sanitized markdown: the finalized message
@@ -308,7 +310,7 @@ export default function ChatPane({ ws, agentActive, agentOperation, workspaceOpe
         <>
           <div className="row">
             <span className="muted small">
-              {ws.audit.length} event{ws.audit.length === 1 ? "" : "s"} · {ws.id} · persisted in session.json
+              {ws.audit.length} event{ws.audit.length === 1 ? "" : "s"} · {ws.id} · latest 100 events per session
             </span>
             <button
               onClick={async () => {
@@ -325,8 +327,35 @@ export default function ChatPane({ ws, agentActive, agentOperation, workspaceOpe
             >
               Copy JSON
             </button>
+            <button
+              disabled={!ws.audit.length}
+              onClick={async () => {
+                try {
+                  await exportAuditLog(auditEntries(ws.audit, windowLabel));
+                  setAuditNote(`Exported ${ws.audit.length} retained events with a SHA-256 checksum.`);
+                } catch (error) {
+                  setAuditNote(`Audit export failed: ${error}`);
+                }
+              }}
+            >Export JSON</button>
+            <label>
+              Verify export
+              <input type="file" accept=".json,application/json" aria-label="Verify audit export" onChange={async (event) => {
+                const file = event.target.files?.[0];
+                event.target.value = "";
+                if (!file) return;
+                try {
+                  if (file.size > 2 * 1024 * 1024) throw new Error("File exceeds 2 MB.");
+                  const result = await verifyAuditExport(await file.text());
+                  setAuditNote(result.valid ? "Checksum matches. This does not authenticate the source or prove completeness." : "Verification failed: invalid export or checksum mismatch.");
+                } catch (error) {
+                  setAuditNote(`Audit verification failed: ${error}`);
+                }
+              }} />
+            </label>
           </div>
           {auditNote && <div className="muted small">{auditNote}</div>}
+          <div className="muted small">Only retained events are exported; argument details may be truncated. The checksum detects edits, not a forged or incomplete log.</div>
           <div className="msgs">
             {[...ws.audit].reverse().map((e) => (
               <div key={e.id} className="msg">

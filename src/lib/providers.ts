@@ -2,6 +2,9 @@
    OpenAI/Anthropic/Gemini wire formats, which are untyped JSON at the boundary;
    shape drift is caught by the provider + agent-turn test suites. */
 import type { ProviderConfig, ProviderKind } from "../types";
+import { providerRequest } from "./providerRequest";
+import { anthropicBaseUrl } from "./providerEndpoint";
+import { ollamaBaseUrl, ollamaComplete, usesOllamaProtocol } from "./ollama";
 import {
   fsCreate,
   fsDelete,
@@ -323,17 +326,20 @@ function toTextToolCall(item: unknown): ToolCall | null {
   const name = typeof fn.name === "string" ? fn.name : "";
   if (!isKnownToolName(name)) return null;
   let args = "{}";
-  if (typeof fn.arguments === "string") {
+  // Llama's shipped Ollama template emits `parameters`, not `arguments`.
+  // Preserve the entire object and JSON-decode string arguments exactly once.
+  const input = fn.arguments ?? fn.args ?? fn.parameters;
+  if (typeof input === "string") {
     try {
-      JSON.parse(fn.arguments);
-      args = fn.arguments;
+      const parsed = JSON.parse(input);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      args = input;
     } catch {
       return null;
     }
-  } else if (fn.arguments && typeof fn.arguments === "object") {
-    args = JSON.stringify(fn.arguments);
-  } else if (fn.args && typeof fn.args === "object") {
-    args = JSON.stringify(fn.args);
+  } else if (input !== undefined) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+    args = JSON.stringify(input);
   }
   return { id: `txt_${Math.random().toString(36).slice(2, 10)}`, function: { name, arguments: args } };
 }
@@ -408,13 +414,13 @@ export function extractEmbeddedToolCalls(text: string): ToolCall[] {
  *  then Ollama-native /api/tags (covers baseUrls with or without /v1).
  *  Returns [] when unreachable - never throws. */
 export async function listModels(cfg: ProviderConfig): Promise<string[]> {
-  const base = cfg.baseUrl.replace(/\/$/, "");
-  if (!base) return [];
+  if (!cfg.baseUrl.trim()) return [];
+  const base = usesOllamaProtocol(cfg) ? `${ollamaBaseUrl(cfg.baseUrl.trim())}/v1` : cfg.baseUrl.replace(/\/$/, "");
   const headers: Record<string, string> = {
     ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
   };
   try {
-    const r = await fetch(base + "/models", { headers });
+    const r = await providerRequest(base + "/models", { headers });
     if (r.ok) {
       const d = await r.json();
       const ids = ((d?.data ?? []) as unknown[])
@@ -428,8 +434,8 @@ export async function listModels(cfg: ProviderConfig): Promise<string[]> {
   // Anthropic native model list.
   if (/api\.anthropic\.com/.test(base) && cfg.apiKey) {
     try {
-      const r = await fetch(base + "/models", {
-        headers: { "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" },
+      const r = await providerRequest(anthropicBaseUrl(base) + "/models", {
+        headers: { "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
       });
       if (r.ok) {
         const d = await r.json();
@@ -445,7 +451,7 @@ export async function listModels(cfg: ProviderConfig): Promise<string[]> {
   // Gemini native model list.
   if (/generativelanguage\.googleapis\.com/.test(base) && cfg.apiKey) {
     try {
-      const r = await fetch(base + "/models", {
+      const r = await providerRequest(base + "/models", {
         headers: { "x-goog-api-key": cfg.apiKey },
       });
       if (r.ok) {
@@ -460,7 +466,7 @@ export async function listModels(cfg: ProviderConfig): Promise<string[]> {
     }
   }
   try {
-    const r = await fetch(base.replace(/\/v1$/, "") + "/api/tags", { headers });
+    const r = await providerRequest(base.replace(/\/v1$/, "") + "/api/tags", { headers });
     if (r.ok) {
       const d = await r.json();
       const names = ((d?.models ?? []) as unknown[])
@@ -879,7 +885,10 @@ export async function runTool(
       }
       case "fs_write": {
         const path = String(args.path ?? "");
-        const content = String(args.content ?? "");
+        if (typeof args.content !== "string") {
+          return "error: fs_write content is required and must be a string. No file was changed. Read the file, then send the full intended content.";
+        }
+        const content = args.content;
         const phW = placeholderPathError(path, "fs_write", policy);
         if (phW) return phW;
         // Writes stay explicit-absolute (no silent resolution: a wrongly
@@ -903,8 +912,15 @@ export async function runTool(
           let existed = true;
           try {
             before = await fsRead(path);
-          } catch {
+          } catch (error) {
+            const message = String(error);
+            if (!/no such file|not found|does not exist|cannot find the (?:file|path)|os error [23]\b|ENOENT/i.test(message)) {
+              return `error: fs_write could not read the existing file safely: ${message.slice(0, 300)}. No file was changed.`;
+            }
             existed = false;
+          }
+          if (existed && before === content) {
+            return `unchanged ${path}: the supplied content already matches the file. No write or undo entry was created.`;
           }
           const direct = await claimFor("fs_write", { path, content });
           try {
@@ -954,7 +970,8 @@ export async function runTool(
       case "shell_run": {
         const cmd = String(args.cmd ?? "");
         if (cmd.length > 20000) return "error: cmd too long";
-        return JSON.stringify(await shellRun(args.cwd ?? ".", cmd, approval));
+        const result = await shellRun(args.cwd ?? ".", cmd, approval);
+        return (result.code === 0 ? "" : `error: shell exited with code ${result.code}\n`) + JSON.stringify(result);
       }
       case "shell_bg": {
         const cmd = String(args.cmd ?? "");
@@ -967,7 +984,8 @@ export async function runTool(
         const id = String(args.job_id ?? "");
         if (!id) return "error: shell_poll job_id is required - use the id shell_bg returned";
         const r = await shellPoll(id);
-        return JSON.stringify(r).slice(0, 12000);
+        const failed = r.code !== null && r.code !== 0;
+        return (failed ? `error: background shell exited with code ${r.code}\n` : "") + JSON.stringify(r).slice(0, 12000);
       }
       case "shell_kill": {
         const id = String(args.job_id ?? "");
@@ -1065,7 +1083,7 @@ export async function chatWithTools(
     /** Live reasoning-model thinking stream (OpenAI-compat reasoning_content). */
     onThinking?: (text: string) => void;
     /** Fires on every repair nudge (narration or denial) - powers auto-banding. */
-    onRepair?: (r: { kind: "narration" | "denial" | "question" | "repetition" | "skill" | "survey" }) => void;
+    onRepair?: (r: { kind: "narration" | "denial" | "question" | "repetition" | "skill" | "survey" | "failure" }) => void;
     onAudit?: (e: {
       tool: string;
       args: string;
@@ -1211,6 +1229,13 @@ export async function chatWithTools(
   // to convert or prove stubbornness. MAX_ROUNDS bounds the worst case
   // regardless — after acting, summaries are fine unchecked.
   let surveyNudges = 0;
+  let failureNudges = 0;
+  const unresolvedFailures = new Map<string, string>();
+  const withFailureStatus = (answer: string) => {
+    if (unresolvedFailures.size > 0) return `${answer}\n\n[Unresolved tool failures: ${[...unresolvedFailures.keys()].join(", ")}. Completion has not been verified; review the failed tool results.]`;
+    if (wantsWorkspaceAction && usedTools.length === 0) return `${answer}\n\n[No workspace tools ran. Requested changes and test results are unverified.]`;
+    return answer;
+  };
   // Consecutive-failure breaker: the identical-call loop-guard can't see a
   // model failing DIFFERENTLY every round (observed live: placeholder path,
   // echoed-back error text, empty cmd — 8 failures, 0 progress, all 10
@@ -1220,6 +1245,7 @@ export async function chatWithTools(
   const MAX_CONSECUTIVE_FAILURES = 4;
   const seen = new Map<string, number>();
   const usedTools: string[] = [];
+  const appliedWrites = new Set<string>();
   let loopNote = "";
   // Explicit user paths win over the workspace-root default. Collected once
   // from user messages so the loop-guard nudge can point at the exact path
@@ -1239,6 +1265,12 @@ export async function chatWithTools(
       .reverse()
       .find((m) => m.role === "user" && typeof m.content === "string")?.content ?? "";
 
+  const wantsWorkspaceAction = !opts?.policy?.planMode && allTools.some((tool) => !isReadOnlyTool(tool.function.name)) &&
+    !!opts?.policy?.workspaceRoot && requestsAction(turnRequest) &&
+    /\b(fix|refactor|implement|bug|feature|file|code|test|function|repo|project)\b/i.test(turnRequest);
+  const wantsImplementationChange = wantsWorkspaceAction &&
+    /\b(fix|refactor|implement|add|edit|modify|change|update|create|remove|delete|rename)\b/i.test(turnRequest);
+
   // ---- Provider backends ----
   interface BackendUsage {
     input: number;
@@ -1251,7 +1283,8 @@ export async function chatWithTools(
     usage?: BackendUsage;
   }
 
-  function resolveKind(): "openai" | "anthropic" | "gemini" {
+  function resolveKind(): "openai" | "anthropic" | "gemini" | "ollama" {
+    if (usesOllamaProtocol(cfg)) return "ollama";
     const k = cfg.kind as ProviderKind | undefined;
     if (k && k !== "auto") return k;
     const base = cfg.baseUrl;
@@ -1273,7 +1306,7 @@ export async function chatWithTools(
       if (signal?.aborted) throw abortError();
       if (attempt > 0) await new Promise((r) => setTimeout(r, 1500 * attempt));
       try {
-        res = await fetch(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
+        res = await providerRequest(url, { method: "POST", headers, body: JSON.stringify(payload), signal });
       } catch (e) {
         if (signal?.aborted) throw abortError();
         lastErr = e;
@@ -1285,6 +1318,7 @@ export async function chatWithTools(
       // any body byte is consumed, so the request never half-streamed.
       if (res.ok || (res.status < 500 && res.status !== 429)) break;
       lastErr = new Error(`provider ${res.status}`);
+      await res.body?.cancel();
       res = null;
     }
     if (!res) {
@@ -1383,6 +1417,7 @@ export async function chatWithTools(
     };
     const res = await postJSON(url, headers, {
       model: cfg.model,
+      ...(/^(?:localhost|127\.0\.0\.1|\[::1\])$/.test(new URL(cfg.baseUrl).hostname) ? { temperature: 0 } : {}),
       messages: toOpenAI(convo),
       ...(useTools ? { tools: allTools } : {}),
       stream: true,
@@ -1535,7 +1570,7 @@ export async function chatWithTools(
     useTools: boolean,
     onDelta: (text: string) => void,
   ): Promise<BackendResult> {
-    const base = cfg.baseUrl.replace(/\/$/, "");
+    const base = anthropicBaseUrl(cfg.baseUrl);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "x-api-key": cfg.apiKey,
@@ -1782,6 +1817,8 @@ export async function chatWithTools(
   ): Promise<BackendResult> {
     const pruned = pruneImages(convo, 2);
     const kind = resolveKind();
+    if (kind === "ollama") return ollamaComplete(cfg, pruned, useTools ? allTools : [], postJSON, onDelta,
+      opts?.policy?.allowedTools ? undefined : turnRequest);
     if (kind === "anthropic") return anthropicComplete(pruned, useTools, onDelta);
     if (kind === "gemini") return geminiComplete(pruned, useTools, onDelta);
     return openaiComplete(pruned, useTools, onDelta, onThinking);
@@ -1815,7 +1852,7 @@ export async function chatWithTools(
     // model sometimes prints the call as plain text instead of structured
     // tool_calls. If the whole reply IS a tool-call JSON object (or array),
     // and the name is a real tool, run it like a normal call.
-    if (toolCalls.length === 0 && useTools) {
+    if (toolCalls.length === 0 && useTools && resolveKind() !== "ollama") {
       const parsed = parseTextToolCalls(content);
       if (parsed.length > 0) {
         toolCalls = parsed;
@@ -1833,6 +1870,16 @@ export async function chatWithTools(
     }
 
     if (toolCalls.length === 0) {
+      if (useTools && unresolvedFailures.size > 0 && failureNudges < 2) {
+        failureNudges++;
+        opts?.onRepair?.({ kind: "failure" });
+        convo.push({ role: "assistant", content });
+        convo.push({ role: "system", content:
+          `[system nudge] Tool failures remain unresolved:\n${[...unresolvedFailures.values()].join("\n")}\n` +
+          `Do not report completion. Fix the failed arguments or implementation, then run the failed tool again to verify. Preserve existing function APIs. If blocked, clearly report the failure.` });
+        onEvent("\n[note: unresolved tool failure — checking before completion]\n");
+        continue;
+      }
       // Degenerate-output backstop: a model (often a weak/non-multimodal one
       // handed an image it cannot parse) can repeat one phrase dozens of
       // times. The tool-call loop-guard can't see this (no tools ran), so
@@ -1954,7 +2001,7 @@ export async function chatWithTools(
         useTools &&
         !opts?.policy?.planMode &&
         surveyNudges < 2 &&
-        usedTools.length > 0 &&
+        (usedTools.length > 0 || wantsWorkspaceAction) &&
         usedTools.every((t) => isReadOnlyTool(t)) &&
         requestsAction(turnRequest)
       ) {
@@ -1972,7 +2019,7 @@ export async function chatWithTools(
         });
         continue;
       }
-      return content;
+      return withFailureStatus(content);
     }
 
     convo.push({ role: "assistant", content, tool_calls: toolCalls });
@@ -1988,10 +2035,21 @@ export async function chatWithTools(
       seen.set(sig, (seen.get(sig) ?? 0) + 1);
       usedTools.push(tc.function.name);
       const t0 = performance.now();
-      const out = await runTool(tc.function.name, args, opts?.policy);
+      let out = await runTool(tc.function.name, args, opts?.policy);
+      if (wantsImplementationChange && tc.function.name === "fs_write" && out.startsWith("unchanged ") && !appliedWrites.has(String(args.path))) {
+        out = `error: the proposed write makes no implementation change. ${out} Compare the source with the requested change and write the corrected full content; passing existing tests alone does not complete this task.`;
+      }
+      if (tc.function.name === "fs_write" && out.startsWith("wrote ")) appliedWrites.add(String(args.path));
       const ms = performance.now() - t0;
       const rejected = out.startsWith("user rejected");
       const failed = out.startsWith("error:");
+      // Re-running the same read/test after an edit is verification progress,
+      // not a stuck loop. Only repeated calls against unchanged files count.
+      if (!failed && !rejected && ["fs_write", "fs_create", "fs_rename", "fs_delete"].includes(tc.function.name) && !out.startsWith("unchanged ")) {
+        seen.clear();
+      }
+      if (failed) unresolvedFailures.set(tc.function.name, `${tc.function.name}: ${out.slice(0, 1200)}`);
+      else if (!rejected) unresolvedFailures.delete(tc.function.name);
       opts?.onToolActivity?.({ name: tc.function.name, ms, ok: !(failed || rejected) });
       // Audit trail: what ran, with what args, under whose decision.
       opts?.onAudit?.({
@@ -2158,7 +2216,7 @@ export async function chatWithTools(
         continue;
       }
       if (ftext) {
-        return ftext;
+        return withFailureStatus(ftext);
       }
       finErr = "empty reply";
     } catch (e) {

@@ -1,0 +1,24 @@
+{
+  "startedAt": "2026-10-29T09:33:20.330Z",
+  "scope": "production TS agent loop + real provider + real fixture files; filesystem IPC adapter, not native GUI",
+  "provider": {
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "qwen2.5-coder:7b",
+    "kind": "ollama"
+  },
+  "output": "/var/folders/c7/jxg1mfsj5nq1sqv091f88kd40000gn/T/vtnexa-live-validation-S7zqJF",
+  "tasks": [],
+  "cancellation": {
+    "passed": true,
+    "streamed": true,
+    "firstChunk": "In",
+    "errorName": "AbortError",
+    "elapsedMs": 1113
+  },
+  "requestAfterStop": {
+    "passed": true,
+    "receivedResponse": true,
+    "reply": "ready"
+  },
+  "finishedAt": "2026-10-29T09:33:22.489Z"
+}

@@ -13,6 +13,15 @@ commands in `src-tauri/src/lib.rs` → OS / sidecar.
   - `toolDefs.ts` — READONLY/GATED sets, `toolsForMode` (plan vs build).
   - `providers.ts` — agent loop (`chatWithTools`) + `runTool` gate
     (native dialog → `Approval` token → backend command).
+  - `ollama.ts` — native `/api/chat` schema-constrained actions, bounded
+    NDJSON parsing, answer streaming, and focused coding-tool selection.
+    Actions still execute through `runTool`; explicit OpenAI selection keeps
+    the compatibility backend. Native Ollama uses a shorter Commander prompt.
+  - `providerRequest.ts` — 30-second response-header deadline and 120-second
+    body-inactivity deadline, with Stop cancellation. `providerProbe.ts` checks
+    authentication/model listing with 10-second deadlines and no generation.
+  - `audit-export.ts` — retained event JSON export and SHA-256 checksum
+    verification. Checksums cover event fields, not authenticity/completeness.
   - `approval.ts` — `approvalIssue()` (native dialog, agent path),
     `approvalClaim()`/`claimFor()` (no dialog, direct-gesture paths),
     `detailFor()`/`actionFor()` fingerprint helpers, `lspNeedsApproval()`.
@@ -60,7 +69,8 @@ commands in `src-tauri/src/lib.rs` → OS / sidecar.
 
 Approval dialogs are native OS windows, not page DOM; `ApprovalStore` is the
 enforcement point and tokens bind the exact approved arguments. CSP is tight
-(no `unsafe-eval`, `frame-src 'self'`). Direct-gesture claims trust the
+(no `unsafe-eval`; live preview frames allow local and HTTPS URLs). Direct-gesture claims trust the
 renderer by design — the gate stops model output from self-approving, not
 XSS. See `SECURITY.md` for the honest limits (approved commands run as you;
-PTY is your shell).
+PTY is your shell). Shell command screening cannot infer the outside-workspace
+effects of project scripts, even when the command itself is auto-approved.

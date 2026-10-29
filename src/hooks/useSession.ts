@@ -12,8 +12,8 @@ import { windowLabel } from "./useWorkspaceState";
 const SESSION_TARGET_BYTES = 1_800_000;
 const AUDIT_MAX = 100;
 
-function asKind(v: unknown): "auto" | "openai" | "anthropic" | "gemini" {
-  return v === "openai" || v === "anthropic" || v === "gemini" ? v : "auto";
+function asKind(v: unknown): ProviderConfig["kind"] {
+  return v === "openai" || v === "anthropic" || v === "gemini" || v === "ollama" ? v : "auto";
 }
 
 function asCenterTab(v: unknown): CenterTab {
@@ -74,8 +74,10 @@ export function snapshotWorkspace(ws: Workspace, msgCap: number): Record<string,
     const b = ws.buffers?.[t];
     const o = ws.originals?.[t];
     if (b !== undefined && b !== o) {
-      dirtyBuffers[t] = b.slice(0, 50000);
-      dirtyOriginals[t] = (o ?? "").slice(0, 50000);
+      // Never truncate unsaved work. Oversized snapshots must fail visibly
+      // at the persistence boundary, leaving the previous save intact.
+      dirtyBuffers[t] = b;
+      dirtyOriginals[t] = o ?? "";
     }
   }
   return {
@@ -92,7 +94,7 @@ export function snapshotWorkspace(ws: Workspace, msgCap: number): Record<string,
       })),
     usage: ws.usage,
     audit: ws.audit.slice(-AUDIT_MAX),
-    tabs: (ws.tabs ?? []).slice(0, 20),
+    tabs: ws.tabs ?? [],
     buffers: dirtyBuffers,
     originals: dirtyOriginals,
     openPath: ws.openPath ?? "",
@@ -163,7 +165,7 @@ export function restoreWorkspace(l: any, fallbackId: string): Workspace {
       ) ?? { ...DEFAULT_PROVIDER },
     centerTab: asCenterTab(l?.centerTab),
     sideTab: asSideTab(l?.sideTab),
-    chatDraft: typeof l?.chatDraft === "string" ? l.chatDraft.slice(0, 20000) : "",
+    chatDraft: typeof l?.chatDraft === "string" ? l.chatDraft : "",
     previewUrl: typeof l?.previewUrl === "string" ? l.previewUrl.slice(0, 4096) : "",
     planMode: l?.planMode === true,
     undoStack: reviveUndoStack(l?.undoStack),

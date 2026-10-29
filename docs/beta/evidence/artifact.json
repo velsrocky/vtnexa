@@ -1,0 +1,11 @@
+{
+  "builtAt": "2026-10-28",
+  "version": "1.0.7",
+  "sourceBaseCommit": "83a36754b4048e8dcf98a299131766e16f533a52",
+  "workingTree": "uncommitted validation fixes",
+  "path": "/tmp/VTNexa_1.0.7_beta-validation.dmg",
+  "sha256": "0f42c43e151afffde85a7e084541fdd884ff57b5b3932f399aab379321fc0deb",
+  "bytes": 71270814,
+  "signing": "ad-hoc; not notarized; not for beta distribution",
+  "nativeUIAutomation": "blocked: Accessibility disabled"
+}
